@@ -43,7 +43,7 @@ MIN_SIGNAL_SCORE = int(os.getenv("MIN_SIGNAL_SCORE", "75"))
 BEST_SIGNAL_COUNT = int(os.getenv("BEST_SIGNAL_COUNT", "5"))
 
 AUTO_SIGNAL_ENABLED = os.getenv("AUTO_SIGNAL_ENABLED", "true").lower() in ("1", "true", "yes", "on")
-AUTO_SIGNAL_SCORE = int(os.getenv("AUTO_SIGNAL_SCORE", "85"))
+AUTO_SIGNAL_SCORE = int(os.getenv("AUTO_SIGNAL_SCORE", "80"))
 AUTO_SCAN_INTERVAL_MINUTES = int(os.getenv("AUTO_SCAN_INTERVAL_MINUTES", "5"))
 AUTO_SIGNAL_COOLDOWN_MINUTES = int(os.getenv("AUTO_SIGNAL_COOLDOWN_MINUTES", "120"))
 
