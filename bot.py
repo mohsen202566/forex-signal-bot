@@ -1,345 +1,293 @@
 import logging
+import traceback
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-from config import BOT_TOKEN
-from forex_pairs import FOREX_PAIRS
+from config import BOT_TOKEN, MIN_SIGNAL_SCORE, BEST_SIGNAL_COUNT
+from forex_pairs import FOREX_PAIRS, normalize_pair, PAIR_DISPLAY_NAMES
 from analysis import analyze_pair as run_analysis
-
+from news_engine import format_news_message
+from statistics import format_stats, parse_days, reset_stats
+from tracker import add_active_signal, parse_signal_from_text, check_active_signals, format_active_signals, make_signal_id
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
 )
+logger = logging.getLogger(__name__)
 
 
-PAIR_NAMES = {
-    "یورو دلار": "EUR/USD",
-    "eurusd": "EUR/USD",
-    "eur/usd": "EUR/USD",
-    "EUR/USD": "EUR/USD",
-
-    "پوند دلار": "GBP/USD",
-    "gbpusd": "GBP/USD",
-    "gbp/usd": "GBP/USD",
-    "GBP/USD": "GBP/USD",
-
-    "دلار ین": "USD/JPY",
-    "usdjpy": "USD/JPY",
-    "usd/jpy": "USD/JPY",
-    "USD/JPY": "USD/JPY",
-
-    "دلار فرانک": "USD/CHF",
-    "usdchf": "USD/CHF",
-    "usd/chf": "USD/CHF",
-    "USD/CHF": "USD/CHF",
-
-    "استرالیا دلار": "AUD/USD",
-    "دلار استرالیا": "AUD/USD",
-    "audusd": "AUD/USD",
-    "aud/usd": "AUD/USD",
-    "AUD/USD": "AUD/USD",
-
-    "نیوزیلند دلار": "NZD/USD",
-    "دلار نیوزیلند": "NZD/USD",
-    "nzdusd": "NZD/USD",
-    "nzd/usd": "NZD/USD",
-    "NZD/USD": "NZD/USD",
-
-    "دلار کانادا": "USD/CAD",
-    "usdcad": "USD/CAD",
-    "usd/cad": "USD/CAD",
-    "USD/CAD": "USD/CAD",
-
-    "یورو ین": "EUR/JPY",
-    "eurjpy": "EUR/JPY",
-    "eur/jpy": "EUR/JPY",
-    "EUR/JPY": "EUR/JPY",
-
-    "طلا": "XAU/USD",
-    "انس": "XAU/USD",
-    "gold": "XAU/USD",
-    "xauusd": "XAU/USD",
-    "xau/usd": "XAU/USD",
-    "XAU/USD": "XAU/USD",
-}
+def direction_fa(direction: str):
+    return {"BUY": "صعودی / خرید", "SELL": "نزولی / فروش", "NEUTRAL": "خنثی / نامشخص"}.get(direction, direction)
 
 
-def normalize_pair(text: str):
-    text_lower = text.lower().strip()
+def status_fa(status: str):
+    return {
+        "SIGNAL": "✅ سیگنال فعال",
+        "PREDICTION_ONLY": "🔎 فقط پیش‌بینی؛ ورود هنوز کامل نیست",
+        "NO_TRADE": "⏸ بدون معامله",
+        "NEWS_BLOCKED": "⛔ مسدود به خاطر ریسک خبر",
+    }.get(status, status)
 
-    for name, pair in PAIR_NAMES.items():
-        if name.lower() in text_lower:
-            return pair
 
-    return None
+def format_analysis(result: dict) -> str:
+    reasons = "\n".join([f"• {r}" for r in result.get("reasons", [])]) or "• دلیل خاصی ثبت نشد."
+    entry_reasons = "\n".join([f"• {r}" for r in result.get("entry_reasons", [])]) or "• تریگر ورود هنوز کامل نیست."
+    news = result.get("news", {})
+    tf = result.get("tf_summary", {})
+    tf_lines = []
+    for name in ["4H", "1H", "15M", "5M"]:
+        item = tf.get(name, {})
+        if item:
+            tf_lines.append(f"{name}: RSI {item.get('rsi')} | ADX {item.get('adx')} | EMA50 {item.get('ema50')} | EMA200 {item.get('ema200')}")
+    tf_text = "\n".join(tf_lines)
+
+    signal_id = None
+    if result.get("status") == "SIGNAL":
+        signal_id = make_signal_id(result["symbol"])
+
+    lines = [
+        f"📊 تحلیل {result['symbol']}",
+        "",
+        f"💰 قیمت فعلی: {result['price']}",
+        f"📍 جهت پیش‌بینی: {direction_fa(result['direction'])}",
+        f"⭐ امتیاز پیش‌بینی: {result['prediction_score']} / 100",
+        f"🟢 امتیاز خرید: {result['buy_score']}",
+        f"🔴 امتیاز فروش: {result['sell_score']}",
+        f"⚙️ وضعیت: {status_fa(result['status'])}",
+        "",
+        "🧭 خلاصه تایم‌فریم‌ها:",
+        tf_text,
+        "",
+        "🧠 دلایل پیش‌بینی:",
+        reasons,
+        "",
+        "⚡ وضعیت ورود سریع 5M:",
+        f"امتیاز ورود: {result.get('entry_score', 0)} / 100",
+        entry_reasons,
+    ]
+
+    if result.get("entry") is not None:
+        lines.extend([
+            "",
+            "🎯 سطوح معامله:",
+            f"Entry: {result['entry']}",
+            f"SL: {result['stop_loss']}",
+            f"TP1: {result['tp1']}",
+            f"TP2: {result['tp2']}",
+        ])
+    else:
+        lines.extend(["", "🎯 Entry / SL / TP فعال نیست چون جهت یا ورود هنوز کامل نیست."])
+
+    lines.extend([
+        "",
+        "📰 وضعیت خبر:",
+        f"ریسک: {news.get('risk_level', 'LOW')} | بلاک: {'بله' if news.get('blocked') else 'خیر'}",
+        news.get("note", ""),
+    ])
+
+    if signal_id:
+        lines.extend(["", f"شناسه: {signal_id}"])
+
+    return "\n".join(lines)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = """
 سلام 👋
-ربات تحلیل فارکس فعال شد.
+ربات تحلیل و پیش‌بینی فارکس فعال است.
 
-دستورهای اصلی:
-
+دستورها:
 تحلیل یورو دلار
-تحلیل پوند دلار
 سیگنال طلا
 بهترین سیگنال
 بررسی بازار
 اخبار امروز
 آمار
+آمار 7 روز
 حذف آمار
+سیگنال‌های فعال
+زیر نظر بگیر  ← با ریپلای روی سیگنال
 راهنما
 
 نسخه فعلی:
-✅ اتصال به VPS
-✅ اجرای سیستمی با systemd
-✅ دریافت دیتا از Twelve Data
-✅ تحلیل اولیه جهت بازار با EMA / RSI / MACD
-
-مرحله بعد:
-اضافه کردن Entry Engine سریع 5M برای ورود، SL و TP.
+✅ دیتای واقعی Twelve Data
+✅ پیش‌بینی چند تایم‌فریم 4H / 1H / 15M / 5M
+✅ Entry Engine سریع 5M
+✅ Entry / SL / TP
+✅ بهترین سیگنال
+✅ آمار و حذف آمار
+✅ زیر نظر گرفتن سیگنال تا TP1 یا SL
+✅ موتور اخبار محافظه‌کار و آماده اتصال به تقویم زنده
 """
     await update.message.reply_text(msg)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = """
-راهنمای ربات فارکس:
-
-برای تحلیل:
-تحلیل یورو دلار
-تحلیل پوند دلار
-تحلیل دلار ین
-سیگنال طلا
-
-برای بررسی کلی:
-بهترین سیگنال
-بررسی بازار
-اخبار امروز
-
-برای آمار:
-آمار
-حذف آمار
-
-برای زیر نظر گرفتن:
-بعداً با ریپلای روی سیگنال و نوشتن «زیر نظر بگیر» فعال می‌شود.
-"""
-    await update.message.reply_text(msg)
+    await start(update, context)
 
 
-async def analyze_pair(update: Update, pair: str):
+async def send_analysis(update: Update, pair: str):
+    await update.message.reply_text(f"⏳ در حال تحلیل {pair}...")
     result = run_analysis(pair)
-
-    if not result["success"]:
-        await update.message.reply_text(
-            f"❌ خطا در تحلیل {pair}\n\n{result['error']}"
-        )
+    if not result.get("success"):
+        await update.message.reply_text(f"❌ خطا در تحلیل {pair}\n\n{result.get('error')}")
         return
-
-    direction_fa = {
-        "BUY": "صعودی / خرید",
-        "SELL": "نزولی / فروش",
-        "NEUTRAL": "خنثی / نامشخص"
-    }.get(result["direction"], result["direction"])
-
-    reasons_text = "\n".join([f"• {r}" for r in result["reasons"]])
-
-    msg = f"""
-📊 تحلیل واقعی {result['symbol']}
-
-💰 قیمت فعلی:
-{result['price']}
-
-📍 جهت پیش‌بینی:
-{direction_fa}
-
-⭐ امتیاز پیش‌بینی:
-{result['score']} / 100
-
-📈 RSI:
-{result['rsi']}
-
-📊 EMA50:
-{result['ema50']}
-
-📊 EMA200:
-{result['ema200']}
-
-📉 MACD:
-{result['macd']}
-
-📉 MACD Signal:
-{result['macd_signal']}
-
-🧠 دلایل تحلیل:
-{reasons_text}
-
-⚠️ هنوز Entry / SL / TP فعال نشده.
-مرحله بعدی: اضافه کردن Entry Engine سریع با 5M.
-"""
-    await update.message.reply_text(msg)
+    await update.message.reply_text(format_analysis(result))
 
 
 async def best_signal(update: Update):
+    await update.message.reply_text("⏳ در حال بررسی بهترین سیگنال‌ها...")
     results = []
-
+    errors = []
     for pair in FOREX_PAIRS:
-        result = run_analysis(pair)
-        if result["success"]:
-            results.append(result)
-
+        r = run_analysis(pair)
+        if r.get("success"):
+            results.append(r)
+        else:
+            errors.append(f"{pair}: {r.get('error')}")
     if not results:
-        await update.message.reply_text("❌ فعلاً هیچ تحلیلی دریافت نشد.")
+        await update.message.reply_text("❌ هیچ تحلیلی دریافت نشد.\n" + "\n".join(errors[:3]))
         return
-
-    results = sorted(results, key=lambda x: x["score"], reverse=True)
-    top_results = results[:5]
-
-    lines = ["🔥 بهترین سیگنال‌های فعلی:\n"]
-
-    for i, r in enumerate(top_results, start=1):
-        direction_fa = {
-            "BUY": "خرید",
-            "SELL": "فروش",
-            "NEUTRAL": "خنثی"
-        }.get(r["direction"], r["direction"])
-
-        lines.append(
-            f"{i}. {r['symbol']} | {direction_fa} | امتیاز: {r['score']}/100 | قیمت: {r['price']}"
-        )
-
-    lines.append("\n⚠️ هنوز Entry / SL / TP فعال نشده.")
+    results = sorted(results, key=lambda x: (x.get("status") == "SIGNAL", x.get("prediction_score", 0), x.get("entry_score", 0)), reverse=True)
+    lines = ["🔥 بهترین فرصت‌های فعلی:", ""]
+    for i, r in enumerate(results[:BEST_SIGNAL_COUNT], start=1):
+        lines.append(f"{i}. {r['symbol']} | {direction_fa(r['direction'])} | پیش‌بینی {r['prediction_score']}/100 | ورود {r.get('entry_score', 0)}/100 | {status_fa(r['status'])}")
+        if r.get("entry") is not None:
+            lines.append(f"   Entry: {r['entry']} | SL: {r['stop_loss']} | TP1: {r['tp1']}")
     await update.message.reply_text("\n".join(lines))
 
 
 async def market_overview(update: Update):
-    msg = """
-🌍 بررسی بازار فارکس
-
-در نسخه فعلی:
-- تحلیل جهت جفت‌ارزها فعال شده
-- موتور اخبار هنوز فعال نشده
-- بررسی قدرت دلار هنوز کامل نشده
-
-نسخه بعدی:
-- روند کلی دلار
-- اخبار مهم امروز
-- بازار رنج / رونددار
-- مناسب بودن بازار برای ترید
-"""
-    await update.message.reply_text(msg)
+    await update.message.reply_text("⏳ در حال بررسی بازار...")
+    results = []
+    for pair in FOREX_PAIRS:
+        r = run_analysis(pair)
+        if r.get("success"):
+            results.append(r)
+    if not results:
+        await update.message.reply_text("❌ بررسی بازار ناموفق بود.")
+        return
+    buy = sum(1 for r in results if r["direction"] == "BUY")
+    sell = sum(1 for r in results if r["direction"] == "SELL")
+    neutral = sum(1 for r in results if r["direction"] == "NEUTRAL")
+    usd_strength = 0
+    for r in results:
+        sym = r["symbol"]
+        d = r["direction"]
+        if sym.endswith("/USD") and d == "SELL":
+            usd_strength += 1
+        if sym.startswith("USD/") and d == "BUY":
+            usd_strength += 1
+        if sym == "XAU/USD" and d == "SELL":
+            usd_strength += 1
+    mood = "بازار بیشتر صعودی است" if buy > sell else ("بازار بیشتر نزولی است" if sell > buy else "بازار متعادل/رنج است")
+    lines = [
+        "🌍 بررسی کلی بازار فارکس",
+        "",
+        f"🟢 جهت‌های خرید: {buy}",
+        f"🔴 جهت‌های فروش: {sell}",
+        f"⚪ خنثی: {neutral}",
+        f"📌 جمع‌بندی: {mood}",
+        f"💵 قدرت تقریبی دلار از روی نمادها: {usd_strength}/9",
+        "",
+        "نمادهای بررسی‌شده:",
+    ]
+    for r in results:
+        lines.append(f"• {r['symbol']}: {direction_fa(r['direction'])} | امتیاز {r['prediction_score']}/100 | {status_fa(r['status'])}")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def news_today(update: Update):
-    msg = """
-📰 اخبار امروز
-
-موتور اخبار هنوز وصل نشده.
-
-در نسخه بعدی اضافه می‌کنیم:
-- CPI
-- NFP
-- FOMC
-- نرخ بهره
-- سخنرانی‌های فدرال رزرو
-- هشدار قبل از خبر
-- تحلیل اثر خبر بعد از انتشار
-"""
-    await update.message.reply_text(msg)
+    await update.message.reply_text(format_news_message())
 
 
-async def stats(update: Update):
-    msg = """
-📈 آمار سیگنال‌ها
-
-فعلاً سیستم آمار فعال نشده.
-
-بعداً اضافه می‌شود:
-- تعداد سیگنال‌ها
-- TP
-- SL
-- Win Rate
-- عملکرد هر جفت‌ارز
-- آمار 3 / 7 / 30 روز / کل
-"""
-    await update.message.reply_text(msg)
+async def stats_command(update: Update, text: str):
+    days = parse_days(text)
+    await update.message.reply_text(format_stats(days))
 
 
-async def reset_stats(update: Update):
-    msg = """
-🗑 حذف آمار
-
-فعلاً سیستم آمار هنوز فعال نشده.
-بعداً این دستور آمار ذخیره‌شده را پاک می‌کند.
-"""
-    await update.message.reply_text(msg)
+async def reset_stats_command(update: Update):
+    reset_stats()
+    await update.message.reply_text("🗑 آمار سیگنال‌ها حذف شد.")
 
 
 async def watch_signal(update: Update):
-    msg = """
-👁 زیر نظر گرفتن سیگنال
+    reply = update.message.reply_to_message
+    if not reply or not reply.text:
+        await update.message.reply_text("برای زیر نظر گرفتن، روی پیام سیگنال ریپلای کن و بنویس: زیر نظر بگیر")
+        return
+    signal = parse_signal_from_text(reply.text)
+    if not signal:
+        await update.message.reply_text("❌ نتونستم Entry/SL/TP سیگنال رو از پیام ریپلای‌شده بخونم. فقط سیگنال‌هایی که Entry، SL و TP1 دارند قابل پیگیری هستند.")
+        return
+    added = add_active_signal(signal)
+    if added:
+        await update.message.reply_text(f"👁 سیگنال {signal['symbol']} زیر نظر گرفته شد تا TP1 یا SL.\nشناسه: {signal['signal_id']}")
+    else:
+        await update.message.reply_text("این سیگنال قبلاً زیر نظر گرفته شده بود.")
 
-این قابلیت در مرحله بعدی اضافه می‌شود.
-بعداً با ریپلای روی سیگنال و نوشتن «زیر نظر بگیر» فعال خواهد شد.
-"""
-    await update.message.reply_text(msg)
+
+async def check_tracker_events(update: Update):
+    try:
+        events = check_active_signals()
+        for ev in events:
+            s = ev["signal"]
+            res = "✅ TP1 خورد" if ev["result"] == "TP1" else "❌ SL خورد"
+            await update.message.reply_text(f"{res}\n{ s.get('symbol') } | قیمت فعلی: {ev['price']}\nشناسه: {s.get('signal_id')}")
+    except Exception as e:
+        logger.warning("Tracker check failed: %s", e)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    text_lower = text.lower()
+    try:
+        await check_tracker_events(update)
+        text = update.message.text.strip()
+        text_lower = text.lower()
 
-    if "راهنما" in text_lower:
-        await help_command(update, context)
-        return
+        if "راهنما" in text_lower:
+            await help_command(update, context)
+            return
+        if "بهترین سیگنال" in text_lower:
+            await best_signal(update)
+            return
+        if "بررسی بازار" in text_lower or "وضعیت بازار" in text_lower:
+            await market_overview(update)
+            return
+        if "اخبار" in text_lower:
+            await news_today(update)
+            return
+        if "حذف آمار" in text_lower or "ریست آمار" in text_lower:
+            await reset_stats_command(update)
+            return
+        if "آمار" in text_lower:
+            await stats_command(update, text_lower)
+            return
+        if "سیگنال‌های فعال" in text_lower or "سیگنال های فعال" in text_lower:
+            await update.message.reply_text(format_active_signals())
+            return
+        if "زیر نظر" in text_lower or text_lower == "نظر":
+            await watch_signal(update)
+            return
 
-    if "بهترین سیگنال" in text_lower:
-        await best_signal(update)
-        return
+        pair = normalize_pair(text)
+        if pair:
+            await send_analysis(update, pair)
+            return
 
-    if "بررسی بازار" in text_lower:
-        await market_overview(update)
-        return
-
-    if "اخبار" in text_lower:
-        await news_today(update)
-        return
-
-    if "حذف آمار" in text_lower or "ریست آمار" in text_lower:
-        await reset_stats(update)
-        return
-
-    if "آمار" in text_lower:
-        await stats(update)
-        return
-
-    if "زیر نظر" in text_lower or text_lower == "نظر":
-        await watch_signal(update)
-        return
-
-    pair = normalize_pair(text)
-
-    if pair:
-        await analyze_pair(update, pair)
-        return
-
-    await update.message.reply_text(
-        "متوجه نشدم. یکی از این‌ها رو بنویس:\n\nتحلیل یورو دلار\nسیگنال طلا\nبهترین سیگنال\nبررسی بازار\nاخبار امروز"
-    )
+        await update.message.reply_text("متوجه نشدم. بنویس مثلا:\nتحلیل یورو دلار\nسیگنال طلا\nبهترین سیگنال\nبررسی بازار\nاخبار امروز\nآمار")
+    except Exception as e:
+        logger.error("Unhandled error: %s\n%s", e, traceback.format_exc())
+        await update.message.reply_text(f"❌ خطای داخلی ربات رخ داد:\n{e}")
 
 
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN تنظیم نشده است.")
-
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     print("Forex bot is running...")
     app.run_polling()
 
