@@ -134,14 +134,14 @@ def _make_levels(symbol: str, direction: str, price: float, atr: float):
         return None, None, None, None
     if direction == "BUY":
         entry = price
-        sl = price - (atr * 1.0)
-        tp1 = price + (atr * 0.9)
-        tp2 = price + (atr * 1.6)
+        sl = price - (atr * 1.2)
+        tp1 = price + (atr * 1.2)
+        tp2 = price + (atr * 2.2)
     elif direction == "SELL":
         entry = price
-        sl = price + (atr * 1.0)
-        tp1 = price - (atr * 0.9)
-        tp2 = price - (atr * 1.6)
+        sl = price + (atr * 1.2)
+        tp1 = price - (atr * 1.2)
+        tp2 = price - (atr * 2.2)
     else:
         return None, None, None, None
     return (
