@@ -1,3 +1,4 @@
+from data_provider import get_latest_price
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
