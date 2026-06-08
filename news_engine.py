@@ -9,12 +9,15 @@ HIGH_IMPACT_WEEKDAYS = {
 }
 
 def get_news_risk(symbol: str = ""):
+    """
+    سیستم خبر در این نسخه فقط هشدار می‌دهد و هیچ سیگنالی را بلاک نمی‌کند.
+    blocked همیشه False است تا با کدهای قبلی سازگار بماند.
+    """
     now = datetime.now(timezone.utc)
     weekday = now.weekday()
     hour = now.hour
 
     risk = "LOW"
-    blocked = False
     notes = []
 
     if weekday in HIGH_IMPACT_WEEKDAYS:
@@ -22,38 +25,47 @@ def get_news_risk(symbol: str = ""):
         notes.append(HIGH_IMPACT_WEEKDAYS[weekday])
 
     if 12 <= hour <= 16:
-        risk = "MEDIUM" if risk == "LOW" else risk
-        notes.append("ساعت فعلی نزدیک بازه انتشار بسیاری از اخبار آمریکا/لندن است؛ با احتیاط معامله کن.")
+        if risk == "LOW":
+            risk = "MEDIUM"
+        notes.append("ساعت فعلی نزدیک بازه انتشار بسیاری از اخبار آمریکا/لندن است؛ احتمال نوسان بیشتر است.")
 
     if weekday == 4 and 12 <= hour <= 15:
         risk = "HIGH"
-        blocked = True
-        notes.append("جمعه و بازه پرریسک اخبار آمریکا؛ سیگنال جدید بهتر است با احتیاط شدید بررسی شود.")
+        notes.append("جمعه و بازه پرریسک اخبار آمریکا؛ نوسان شدید محتمل است.")
 
-    if symbol and "USD" in symbol:
-        notes.append("این نماد به دلار وابسته است؛ اخبار آمریکا می‌تواند جهت را سریع تغییر دهد.")
+    if symbol:
+        if "USD" in symbol or symbol in ("DXY", "XAU/USD", "XAG/USD", "BTC/USD", "ETH/USD", "SOL/USD"):
+            notes.append("این نماد به دلار یا ریسک‌پذیری بازار وابسته است؛ اخبار آمریکا می‌تواند جهت را سریع تغییر دهد.")
+        if symbol in ("WTI/USD", "BRENT/USD"):
+            notes.append("این نماد به اخبار انرژی، ذخایر نفت، جنگ و تنش‌های ژئوپلیتیک حساس است.")
+        if symbol in ("US30", "NAS100", "SPX500", "DAX40"):
+            notes.append("شاخص‌ها به نرخ بهره، سخنرانی بانک‌های مرکزی و ریسک بازار حساس هستند.")
+
+    if not notes:
+        notes.append("خبر مهم زنده متصل نیست؛ این بخش فعلاً هشدار زمانی و ریسک عمومی را نمایش می‌دهد.")
 
     return {
         "risk_level": risk,
-        "blocked": blocked,
-        "note": " ".join(notes) if notes else "خبر مهم زنده متصل نیست؛ فیلتر فعلی محافظه‌کار است.",
+        "blocked": False,
+        "warning_only": True,
+        "note": " ".join(notes),
         "keywords": IMPORTANT_NEWS_KEYWORDS,
     }
 
 def format_news_message():
     risk = get_news_risk("")
     lines = [
-        "📰 اخبار و ریسک امروز",
+        "📰 هشدار اخبار و ریسک بازار",
         "",
         f"سطح ریسک فعلی: {risk['risk_level']}",
-        f"بلاک معامله: {'بله' if risk['blocked'] else 'خیر'}",
+        "اثر روی سیگنال: فقط هشدار؛ سیگنال تکنیکال بلاک نمی‌شود.",
         "",
         risk["note"],
         "",
-        "اخبار مهمی که ربات در فاز زنده باید جدی بگیرد:",
+        "رویدادهایی که باید جدی گرفته شوند:",
     ]
     for k in risk["keywords"]:
         lines.append(f"• {k}")
     lines.append("")
-    lines.append("فعلاً تقویم اقتصادی زنده وصل نیست؛ این بخش به صورت محافظه‌کار ریسک زمانی را بررسی می‌کند.")
+    lines.append("نکته: تقویم اقتصادی زنده هنوز وصل نیست؛ این بخش فعلاً ریسک زمانی و عمومی را هشدار می‌دهد.")
     return "\n".join(lines)
