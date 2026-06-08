@@ -1,69 +1,59 @@
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List
+# -*- coding: utf-8 -*-
+from datetime import datetime, timezone
+from config import IMPORTANT_NEWS_KEYWORDS
 
-from config import NEWS_BLOCK_BEFORE_MINUTES, NEWS_BLOCK_AFTER_MINUTES, IMPORTANT_NEWS_KEYWORDS
+HIGH_IMPACT_WEEKDAYS = {
+    0: "دوشنبه: شروع هفته؛ احتمال گپ و نوسان بعد از باز شدن بازار.",
+    2: "چهارشنبه: معمولاً روز مهمی برای داده‌های اقتصادی و سخنرانی‌هاست.",
+    4: "جمعه: ریسک اخبار اشتغال، NFP یا بستن پوزیشن‌های هفتگی بیشتر است.",
+}
 
-# نسخه امن بدون نیاز به API خبر: کرش نمی‌کند و قابل توسعه است.
-# بعداً اگر FINNHUB_API_KEY یا منبع تقویم اقتصادی اضافه شود، همین فایل را ارتقا می‌دهیم.
+def get_news_risk(symbol: str = ""):
+    now = datetime.now(timezone.utc)
+    weekday = now.weekday()
+    hour = now.hour
 
-HIGH_IMPACT_EVENTS = [
-    {"title": "CPI", "impact": "HIGH", "currency": "USD", "description": "تورم آمریکا؛ تاثیر شدید روی دلار، طلا و جفت‌ارزهای اصلی."},
-    {"title": "NFP", "impact": "HIGH", "currency": "USD", "description": "گزارش اشتغال آمریکا؛ معمولا نوسان شدید ایجاد می‌کند."},
-    {"title": "FOMC", "impact": "HIGH", "currency": "USD", "description": "تصمیمات و بیانیه فدرال رزرو؛ بسیار مهم برای جهت دلار."},
-    {"title": "Interest Rate Decision", "impact": "HIGH", "currency": "USD/EUR/GBP/JPY", "description": "تصمیم نرخ بهره بانک‌های مرکزی."},
-    {"title": "Fed Chair Powell Speech", "impact": "HIGH", "currency": "USD", "description": "سخنرانی پاول؛ می‌تواند جهت بازار را ناگهانی تغییر دهد."},
-    {"title": "GDP", "impact": "MEDIUM", "currency": "USD/EUR/GBP", "description": "رشد اقتصادی؛ تاثیر متوسط تا زیاد."},
-    {"title": "Unemployment Rate", "impact": "MEDIUM", "currency": "USD", "description": "نرخ بیکاری؛ همراه NFP بسیار مهم است."},
-]
+    risk = "LOW"
+    blocked = False
+    notes = []
 
+    if weekday in HIGH_IMPACT_WEEKDAYS:
+        risk = "MEDIUM"
+        notes.append(HIGH_IMPACT_WEEKDAYS[weekday])
 
-def affected_currencies(symbol: str) -> List[str]:
-    symbol = symbol.upper()
-    if symbol == "XAU/USD":
-        return ["USD", "XAU"]
-    parts = symbol.split("/")
-    return parts if len(parts) == 2 else ["USD"]
+    if 12 <= hour <= 16:
+        risk = "MEDIUM" if risk == "LOW" else risk
+        notes.append("ساعت فعلی نزدیک بازه انتشار بسیاری از اخبار آمریکا/لندن است؛ با احتیاط معامله کن.")
 
+    if weekday == 4 and 12 <= hour <= 15:
+        risk = "HIGH"
+        blocked = True
+        notes.append("جمعه و بازه پرریسک اخبار آمریکا؛ سیگنال جدید بهتر است با احتیاط شدید بررسی شود.")
 
-def get_today_news() -> Dict:
+    if symbol and "USD" in symbol:
+        notes.append("این نماد به دلار وابسته است؛ اخبار آمریکا می‌تواند جهت را سریع تغییر دهد.")
+
     return {
-        "success": True,
-        "mode": "STATIC_IMPORTANT_EVENTS",
-        "message": "موتور اخبار فعال است، اما تقویم اقتصادی زنده هنوز به API خبر وصل نشده. فیلتر محافظه‌کار اخبار با لیست رویدادهای مهم فعال است.",
-        "events": HIGH_IMPACT_EVENTS,
+        "risk_level": risk,
+        "blocked": blocked,
+        "note": " ".join(notes) if notes else "خبر مهم زنده متصل نیست؛ فیلتر فعلی محافظه‌کار است.",
         "keywords": IMPORTANT_NEWS_KEYWORDS,
     }
 
-
-def get_news_risk_for_symbol(symbol: str) -> Dict:
-    # بدون تقویم زنده نمی‌توان زمان دقیق خبر را دانست؛ پس بلاک خودکار انجام نمی‌دهیم.
-    # این خروجی طوری طراحی شده که بعداً با تقویم اقتصادی واقعی، blocked=True شود.
-    currencies = affected_currencies(symbol)
-    return {
-        "success": True,
-        "blocked": False,
-        "risk_level": "LOW",
-        "currencies": currencies,
-        "block_before_minutes": NEWS_BLOCK_BEFORE_MINUTES,
-        "block_after_minutes": NEWS_BLOCK_AFTER_MINUTES,
-        "note": "تقویم اقتصادی زنده هنوز وصل نیست؛ برای CPI/NFP/FOMC دستی مراقب زمان خبر باش.",
-    }
-
-
-def format_news_message() -> str:
-    data = get_today_news()
+def format_news_message():
+    risk = get_news_risk("")
     lines = [
-        "📰 اخبار و رویدادهای مهم فارکس",
+        "📰 اخبار و ریسک امروز",
         "",
-        "⚠️ نسخه فعلی لیست رویدادهای مهم را نمایش می‌دهد و فیلتر محافظه‌کار آماده است.",
-        "برای بلاک خودکار دقیق قبل/بعد خبر، در مرحله بعد باید API تقویم اقتصادی زنده اضافه شود.",
+        f"سطح ریسک فعلی: {risk['risk_level']}",
+        f"بلاک معامله: {'بله' if risk['blocked'] else 'خیر'}",
         "",
-        "رویدادهای بسیار مهم:",
+        risk["note"],
+        "",
+        "اخبار مهمی که ربات در فاز زنده باید جدی بگیرد:",
     ]
-    for event in data["events"]:
-        icon = "🔴" if event["impact"] == "HIGH" else "🟠"
-        lines.append(f"{icon} {event['title']} | ارز: {event['currency']}")
-        lines.append(f"   {event['description']}")
+    for k in risk["keywords"]:
+        lines.append(f"• {k}")
     lines.append("")
-    lines.append(f"⛔ قانون ربات: {NEWS_BLOCK_BEFORE_MINUTES} دقیقه قبل و {NEWS_BLOCK_AFTER_MINUTES} دقیقه بعد از خبر مهم نباید ورود عجولانه گرفت.")
+    lines.append("فعلاً تقویم اقتصادی زنده وصل نیست؛ این بخش به صورت محافظه‌کار ریسک زمانی را بررسی می‌کند.")
     return "\n".join(lines)
