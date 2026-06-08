@@ -35,12 +35,12 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
 
+logger = logging.getLogger(__name__)
 LAST_AUTO_SIGNALS = {}
 
 
-def direction_fa(direction: str):
+def direction_fa(direction: str) -> str:
     return {
         "BUY": "صعودی / خرید",
         "SELL": "نزولی / فروش",
@@ -48,7 +48,7 @@ def direction_fa(direction: str):
     }.get(direction, direction)
 
 
-def status_fa(status: str):
+def status_fa(status: str) -> str:
     return {
         "SIGNAL": "✅ سیگنال فعال",
         "PREDICTION_ONLY": "🔎 فقط پیش‌بینی",
@@ -66,7 +66,7 @@ def is_valid_trade_signal(result: dict) -> bool:
     )
 
 
-def ensure_access(update: Update):
+def ensure_access(update: Update) -> bool:
     user = update.effective_user
     if not user:
         return False
@@ -74,8 +74,13 @@ def ensure_access(update: Update):
 
 
 def format_analysis(result: dict) -> str:
-    reasons = "\n".join([f"• {r}" for r in result.get("reasons", [])]) or "• دلیل خاصی ثبت نشد."
-    entry_reasons = "\n".join([f"• {r}" for r in result.get("entry_reasons", [])]) or "• تریگر ورود هنوز کامل نیست."
+    reasons = "\n".join([f"• {r}" for r in result.get("reasons", [])])
+    if not reasons:
+        reasons = "• دلیل خاصی ثبت نشد."
+
+    entry_reasons = "\n".join([f"• {r}" for r in result.get("entry_reasons", [])])
+    if not entry_reasons:
+        entry_reasons = "• تریگر ورود هنوز کامل نیست."
 
     news = result.get("news", {})
     tf = result.get("tf_summary", {})
@@ -99,12 +104,12 @@ def format_analysis(result: dict) -> str:
     lines = [
         f"📊 تحلیل {result['symbol']}",
         "",
-        f"💰 قیمت فعلی: {result['price']}",
-        f"📍 جهت پیش‌بینی: {direction_fa(result['direction'])}",
-        f"⭐ امتیاز پیش‌بینی: {result['prediction_score']} / 100",
-        f"🟢 امتیاز خرید: {result['buy_score']}",
-        f"🔴 امتیاز فروش: {result['sell_score']}",
-        f"⚙️ وضعیت: {status_fa(result['status'])}",
+        f"💰 قیمت فعلی: {result.get('price')}",
+        f"📍 جهت پیش‌بینی: {direction_fa(result.get('direction'))}",
+        f"⭐ امتیاز پیش‌بینی: {result.get('prediction_score')} / 100",
+        f"🟢 امتیاز خرید: {result.get('buy_score')}",
+        f"🔴 امتیاز فروش: {result.get('sell_score')}",
+        f"⚙️ وضعیت: {status_fa(result.get('status'))}",
         "",
         "🧭 خلاصه تایم‌فریم‌ها:",
         tf_text,
@@ -121,9 +126,9 @@ def format_analysis(result: dict) -> str:
         lines.extend([
             "",
             "🎯 سطوح معامله:",
-            f"Entry: {result['entry']}",
-            f"SL: {result['stop_loss']}",
-            f"TP1: {result['tp1']}",
+            f"Entry: {result.get('entry')}",
+            f"SL: {result.get('stop_loss')}",
+            f"TP1: {result.get('tp1')}",
             f"TP2: {result.get('tp2', '')}",
             "",
             f"شناسه: {signal_id}",
@@ -157,7 +162,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if not OWNER_ID:
-        await update.message.reply_text(f"⚠️ OWNER_ID روی VPS تنظیم نشده است.\nآیدی شما: {user_id}")
+        await update.message.reply_text(
+            f"⚠️ OWNER_ID روی VPS تنظیم نشده است.\nآیدی شما: {user_id}"
+        )
         return
 
     if not ensure_access(update):
@@ -215,7 +222,9 @@ async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     add_user(user_id)
-    await update.message.reply_text(f"✅ کاربر اضافه شد.\nآیدی: {user_id}\n\n{list_users_text()}")
+    await update.message.reply_text(
+        f"✅ کاربر اضافه شد.\nآیدی: {user_id}\n\n{list_users_text()}"
+    )
 
 
 async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -234,7 +243,9 @@ async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     remove_user(user_id)
-    await update.message.reply_text(f"✅ کاربر حذف شد.\nآیدی: {user_id}\n\n{list_users_text()}")
+    await update.message.reply_text(
+        f"✅ کاربر حذف شد.\nآیدی: {user_id}\n\n{list_users_text()}"
+    )
 
 
 async def list_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -251,7 +262,9 @@ async def send_analysis(update: Update, pair: str):
     result = run_analysis(pair)
 
     if not result.get("success"):
-        await update.message.reply_text(f"❌ خطا در تحلیل {pair}\n\n{result.get('error')}")
+        await update.message.reply_text(
+            f"❌ خطا در تحلیل {pair}\n\n{result.get('error')}"
+        )
         return
 
     await update.message.reply_text(format_analysis(result))
@@ -263,9 +276,12 @@ async def best_signal(update: Update):
     results = []
 
     for pair in FOREX_PAIRS:
-        r = run_analysis(pair)
-        if r.get("success"):
-            results.append(r)
+        try:
+            r = run_analysis(pair)
+            if r.get("success"):
+                results.append(r)
+        except Exception as e:
+            logger.warning("Analysis failed for %s: %s", pair, e)
 
     if not results:
         await update.message.reply_text("❌ هیچ تحلیلی دریافت نشد.")
@@ -283,7 +299,7 @@ async def best_signal(update: Update):
     )
 
     if not valid_signals:
-        await update.message.reply_text("❌ فعلاً سیگنالی نیست.")
+        await update.message.reply_text("❌ فعلاً سیگنال قابل ورود وجود ندارد.")
         return
 
     for i, r in enumerate(valid_signals[:BEST_SIGNAL_COUNT], start=1):
@@ -293,16 +309,16 @@ async def best_signal(update: Update):
         lines = [
             f"🔥 سیگنال قابل ورود #{i}",
             "",
-            f"نماد: {r['symbol']}",
-            f"📍 جهت: {direction_fa(r['direction'])}",
-            f"⭐ پیش‌بینی: {r['prediction_score']} / 100",
+            f"نماد: {r.get('symbol')}",
+            f"📍 جهت: {direction_fa(r.get('direction'))}",
+            f"⭐ پیش‌بینی: {r.get('prediction_score')} / 100",
             f"⚡ ورود: {r.get('entry_score', 0)} / 100",
-            f"⚙️ وضعیت: {status_fa(r['status'])}",
+            f"⚙️ وضعیت: {status_fa(r.get('status'))}",
             "",
             "🎯 سطوح معامله:",
-            f"Entry: {r['entry']}",
-            f"SL: {r['stop_loss']}",
-            f"TP1: {r['tp1']}",
+            f"Entry: {r.get('entry')}",
+            f"SL: {r.get('stop_loss')}",
+            f"TP1: {r.get('tp1')}",
             f"TP2: {r.get('tp2', '')}",
             "",
             f"شناسه: {signal_id}",
@@ -318,21 +334,27 @@ async def market_overview(update: Update):
     results = []
 
     for pair in FOREX_PAIRS:
-        r = run_analysis(pair)
-        if r.get("success"):
-            results.append(r)
+        try:
+            r = run_analysis(pair)
+            if r.get("success"):
+                results.append(r)
+        except Exception as e:
+            logger.warning("Market overview failed for %s: %s", pair, e)
 
     if not results:
         await update.message.reply_text("❌ بررسی بازار ناموفق بود.")
         return
 
-    buy = sum(1 for r in results if r["direction"] == "BUY")
-    sell = sum(1 for r in results if r["direction"] == "SELL")
-    neutral = sum(1 for r in results if r["direction"] == "NEUTRAL")
+    buy = sum(1 for r in results if r.get("direction") == "BUY")
+    sell = sum(1 for r in results if r.get("direction") == "SELL")
+    neutral = sum(1 for r in results if r.get("direction") == "NEUTRAL")
 
-    mood = "بازار بیشتر صعودی است" if buy > sell else (
-        "بازار بیشتر نزولی است" if sell > buy else "بازار متعادل/رنج است"
-    )
+    if buy > sell:
+        mood = "بازار بیشتر صعودی است"
+    elif sell > buy:
+        mood = "بازار بیشتر نزولی است"
+    else:
+        mood = "بازار متعادل/رنج است"
 
     lines = [
         "🌍 بررسی کلی بازار فارکس",
@@ -346,8 +368,8 @@ async def market_overview(update: Update):
 
     for r in results:
         lines.append(
-            f"• {r['symbol']}: {direction_fa(r['direction'])} | "
-            f"امتیاز {r['prediction_score']}/100 | {status_fa(r['status'])}"
+            f"• {r.get('symbol')}: {direction_fa(r.get('direction'))} | "
+            f"امتیاز {r.get('prediction_score')}/100 | {status_fa(r.get('status'))}"
         )
 
     await update.message.reply_text("\n".join(lines))
@@ -357,7 +379,9 @@ async def watch_signal(update: Update):
     reply = update.message.reply_to_message
 
     if not reply or not reply.text:
-        await update.message.reply_text("برای زیر نظر گرفتن، روی پیام سیگنال ریپلای کن و بنویس: زیر نظر بگیر")
+        await update.message.reply_text(
+            "برای زیر نظر گرفتن، روی پیام سیگنال ریپلای کن و بنویس: زیر نظر بگیر"
+        )
         return
 
     signal = parse_signal_from_text(reply.text)
@@ -385,11 +409,19 @@ async def check_tracker_events(app: Application):
 
         for ev in events:
             s = ev["signal"]
-            res = "✅ TP1 خورد" if ev["result"] == "TP1" else "❌ SL خورد"
+
+            if ev["result"] == "TP1":
+                res = "✅ TP1 خورد"
+            else:
+                res = "❌ SL خورد"
 
             await app.bot.send_message(
                 chat_id=OWNER_ID,
-                text=f"{res}\n{s.get('symbol')} | قیمت فعلی: {ev['price']}\nشناسه: {s.get('signal_id')}",
+                text=(
+                    f"{res}\n"
+                    f"{s.get('symbol')} | قیمت فعلی: {ev['price']}\n"
+                    f"شناسه: {s.get('signal_id')}"
+                ),
             )
 
     except Exception as e:
@@ -412,16 +444,21 @@ async def auto_signal_loop(app: Application):
                     if now - last_ts < AUTO_SIGNAL_COOLDOWN_MINUTES * 60:
                         continue
 
-                    r = run_analysis(pair)
+                    try:
+                        r = run_analysis(pair)
+                    except Exception as e:
+                        logger.warning("Auto analysis failed for %s: %s", pair, e)
+                        continue
 
                     if not r.get("success"):
                         continue
 
-                    if is_valid_trade_signal(r) and r.get("prediction_score", 0) >= AUTO_SIGNAL_SCORE:
+                    if (
+                        is_valid_trade_signal(r)
+                        and r.get("prediction_score", 0) >= AUTO_SIGNAL_SCORE
+                    ):
                         text = "🚨 اتو سیگنال فارکس\n\n" + format_analysis(r)
-
                         await app.bot.send_message(chat_id=OWNER_ID, text=text)
-
                         LAST_AUTO_SIGNALS[pair] = now
 
             await asyncio.sleep(max(60, AUTO_SCAN_INTERVAL_MINUTES * 60))
