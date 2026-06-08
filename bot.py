@@ -1,60 +1,77 @@
-from data_provider import get_latest_price
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-from config import BOT_TOKEN, FOREX_PAIRS
+from config import BOT_TOKEN
+from forex_pairs import FOREX_PAIRS
+from analysis import analyze_pair as run_analysis
+
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 
+
 PAIR_NAMES = {
     "یورو دلار": "EUR/USD",
     "eurusd": "EUR/USD",
     "eur/usd": "EUR/USD",
+    "EUR/USD": "EUR/USD",
 
     "پوند دلار": "GBP/USD",
     "gbpusd": "GBP/USD",
     "gbp/usd": "GBP/USD",
+    "GBP/USD": "GBP/USD",
 
     "دلار ین": "USD/JPY",
     "usdjpy": "USD/JPY",
     "usd/jpy": "USD/JPY",
+    "USD/JPY": "USD/JPY",
 
     "دلار فرانک": "USD/CHF",
     "usdchf": "USD/CHF",
     "usd/chf": "USD/CHF",
+    "USD/CHF": "USD/CHF",
 
     "استرالیا دلار": "AUD/USD",
+    "دلار استرالیا": "AUD/USD",
     "audusd": "AUD/USD",
     "aud/usd": "AUD/USD",
+    "AUD/USD": "AUD/USD",
 
     "نیوزیلند دلار": "NZD/USD",
+    "دلار نیوزیلند": "NZD/USD",
     "nzdusd": "NZD/USD",
     "nzd/usd": "NZD/USD",
+    "NZD/USD": "NZD/USD",
 
     "دلار کانادا": "USD/CAD",
     "usdcad": "USD/CAD",
     "usd/cad": "USD/CAD",
+    "USD/CAD": "USD/CAD",
 
     "یورو ین": "EUR/JPY",
     "eurjpy": "EUR/JPY",
     "eur/jpy": "EUR/JPY",
+    "EUR/JPY": "EUR/JPY",
 
     "طلا": "XAU/USD",
+    "انس": "XAU/USD",
     "gold": "XAU/USD",
     "xauusd": "XAU/USD",
     "xau/usd": "XAU/USD",
+    "XAU/USD": "XAU/USD",
 }
 
 
 def normalize_pair(text: str):
-    text = text.lower().strip()
+    text_lower = text.lower().strip()
+
     for name, pair in PAIR_NAMES.items():
-        if name in text:
+        if name.lower() in text_lower:
             return pair
+
     return None
 
 
@@ -63,9 +80,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 سلام 👋
 ربات تحلیل فارکس فعال شد.
 
-دستورهای فعلی:
+دستورهای اصلی:
 
 تحلیل یورو دلار
+تحلیل پوند دلار
 سیگنال طلا
 بهترین سیگنال
 بررسی بازار
@@ -74,7 +92,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 حذف آمار
 راهنما
 
-نسخه فعلی پایه است؛ بعداً موتور تحلیل، اخبار، آمار و زیرنظر گرفتن را مرحله‌به‌مرحله اضافه می‌کنیم.
+نسخه فعلی:
+✅ اتصال به VPS
+✅ اجرای سیستمی با systemd
+✅ دریافت دیتا از Twelve Data
+✅ تحلیل اولیه جهت بازار با EMA / RSI / MACD
+
+مرحله بعد:
+اضافه کردن Entry Engine سریع 5M برای ورود، SL و TP.
 """
     await update.message.reply_text(msg)
 
@@ -86,6 +111,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 برای تحلیل:
 تحلیل یورو دلار
 تحلیل پوند دلار
+تحلیل دلار ین
 سیگنال طلا
 
 برای بررسی کلی:
@@ -93,7 +119,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 بررسی بازار
 اخبار امروز
 
-برای عملکرد:
+برای آمار:
 آمار
 حذف آمار
 
@@ -104,61 +130,103 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def analyze_pair(update: Update, pair: str):
+    result = run_analysis(pair)
+
+    if not result["success"]:
+        await update.message.reply_text(
+            f"❌ خطا در تحلیل {pair}\n\n{result['error']}"
+        )
+        return
+
+    direction_fa = {
+        "BUY": "صعودی / خرید",
+        "SELL": "نزولی / فروش",
+        "NEUTRAL": "خنثی / نامشخص"
+    }.get(result["direction"], result["direction"])
+
+    reasons_text = "\n".join([f"• {r}" for r in result["reasons"]])
+
     msg = f"""
-📊 تحلیل اولیه {pair}
+📊 تحلیل واقعی {result['symbol']}
 
-وضعیت: آماده تحلیل تکنیکال
+💰 قیمت فعلی:
+{result['price']}
 
-در نسخه بعدی اضافه می‌کنیم:
-- پیش‌بینی جهت با 4H و 1H
-- بررسی ستاپ با 15M
-- تریگر ورود با 5M
-- EMA50/200
-- MACD
-- RSI Slope
-- ADX
-- Support/Resistance
-- ATR برای SL و TP
-- فیلتر اخبار مهم
+📍 جهت پیش‌بینی:
+{direction_fa}
 
-فعلاً این دستور درست کار می‌کند و آماده اتصال به موتور تحلیل است.
+⭐ امتیاز پیش‌بینی:
+{result['score']} / 100
+
+📈 RSI:
+{result['rsi']}
+
+📊 EMA50:
+{result['ema50']}
+
+📊 EMA200:
+{result['ema200']}
+
+📉 MACD:
+{result['macd']}
+
+📉 MACD Signal:
+{result['macd_signal']}
+
+🧠 دلایل تحلیل:
+{reasons_text}
+
+⚠️ هنوز Entry / SL / TP فعال نشده.
+مرحله بعدی: اضافه کردن Entry Engine سریع با 5M.
 """
     await update.message.reply_text(msg)
 
 
 async def best_signal(update: Update):
-    msg = """
-🔥 بهترین سیگنال‌ها
+    results = []
 
-فعلاً موتور تحلیل هنوز وصل نشده.
+    for pair in FOREX_PAIRS:
+        result = run_analysis(pair)
+        if result["success"]:
+            results.append(result)
 
-در نسخه بعدی این بخش جفت‌ارزهای زیر را بررسی می‌کند:
-EUR/USD
-GBP/USD
-USD/JPY
-USD/CHF
-AUD/USD
-NZD/USD
-USD/CAD
-EUR/JPY
-XAU/USD
+    if not results:
+        await update.message.reply_text("❌ فعلاً هیچ تحلیلی دریافت نشد.")
+        return
 
-و بهترین 3 تا 5 سیگنال را بر اساس امتیاز نمایش می‌دهد.
-"""
-    await update.message.reply_text(msg)
+    results = sorted(results, key=lambda x: x["score"], reverse=True)
+    top_results = results[:5]
+
+    lines = ["🔥 بهترین سیگنال‌های فعلی:\n"]
+
+    for i, r in enumerate(top_results, start=1):
+        direction_fa = {
+            "BUY": "خرید",
+            "SELL": "فروش",
+            "NEUTRAL": "خنثی"
+        }.get(r["direction"], r["direction"])
+
+        lines.append(
+            f"{i}. {r['symbol']} | {direction_fa} | امتیاز: {r['score']}/100 | قیمت: {r['price']}"
+        )
+
+    lines.append("\n⚠️ هنوز Entry / SL / TP فعال نشده.")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def market_overview(update: Update):
     msg = """
 🌍 بررسی بازار فارکس
 
-فعلاً نسخه پایه است.
+در نسخه فعلی:
+- تحلیل جهت جفت‌ارزها فعال شده
+- موتور اخبار هنوز فعال نشده
+- بررسی قدرت دلار هنوز کامل نشده
 
-در نسخه بعدی بررسی می‌کند:
-- قدرت دلار
-- روند کلی EUR/USD و GBP/USD و USD/JPY
+نسخه بعدی:
+- روند کلی دلار
 - اخبار مهم امروز
-- وضعیت بازار: رونددار / رنج / پرریسک
+- بازار رنج / رونددار
 - مناسب بودن بازار برای ترید
 """
     await update.message.reply_text(msg)
@@ -168,14 +236,14 @@ async def news_today(update: Update):
     msg = """
 📰 اخبار امروز
 
-فعلاً موتور اخبار وصل نشده.
+موتور اخبار هنوز وصل نشده.
 
 در نسخه بعدی اضافه می‌کنیم:
 - CPI
 - NFP
 - FOMC
 - نرخ بهره
-- سخنرانی‌های مهم فدرال رزرو
+- سخنرانی‌های فدرال رزرو
 - هشدار قبل از خبر
 - تحلیل اثر خبر بعد از انتشار
 """
@@ -186,16 +254,15 @@ async def stats(update: Update):
     msg = """
 📈 آمار سیگنال‌ها
 
-فعلاً آمار ثبت نشده.
+فعلاً سیستم آمار فعال نشده.
 
-در نسخه بعدی:
+بعداً اضافه می‌شود:
 - تعداد سیگنال‌ها
 - TP
 - SL
 - Win Rate
 - عملکرد هر جفت‌ارز
 - آمار 3 / 7 / 30 روز / کل
-اضافه می‌شود.
 """
     await update.message.reply_text(msg)
 
@@ -206,6 +273,16 @@ async def reset_stats(update: Update):
 
 فعلاً سیستم آمار هنوز فعال نشده.
 بعداً این دستور آمار ذخیره‌شده را پاک می‌کند.
+"""
+    await update.message.reply_text(msg)
+
+
+async def watch_signal(update: Update):
+    msg = """
+👁 زیر نظر گرفتن سیگنال
+
+این قابلیت در مرحله بعدی اضافه می‌شود.
+بعداً با ریپلای روی سیگنال و نوشتن «زیر نظر بگیر» فعال خواهد شد.
 """
     await update.message.reply_text(msg)
 
@@ -238,24 +315,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stats(update)
         return
 
-    if "زیر نظر" in text_lower or "نظر" == text_lower:
-        await update.message.reply_text(
-            "قابلیت زیر نظر گرفتن در مرحله بعدی اضافه می‌شود. بعداً با ریپلای روی سیگنال فعال خواهد شد."
-        )
+    if "زیر نظر" in text_lower or text_lower == "نظر":
+        await watch_signal(update)
         return
 
-    pair = normalize_pair(text_lower)
+    pair = normalize_pair(text)
 
-    if pair and ("تحلیل" in text_lower or "سیگنال" in text_lower or pair):
+    if pair:
         await analyze_pair(update, pair)
         return
 
     await update.message.reply_text(
-        "متوجه نشدم. بنویس مثلا:\nتحلیل یورو دلار\nبهترین سیگنال\nبررسی بازار\nاخبار امروز"
+        "متوجه نشدم. یکی از این‌ها رو بنویس:\n\nتحلیل یورو دلار\nسیگنال طلا\nبهترین سیگنال\nبررسی بازار\nاخبار امروز"
     )
 
 
 def main():
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN تنظیم نشده است.")
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
