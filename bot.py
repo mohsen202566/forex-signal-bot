@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import logging
+import re
 import time
 import traceback
 
@@ -161,25 +162,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"آیدی تلگرام شما:\n{update.effective_user.id}")
 
+def extract_user_id_from_text(text: str):
+    match = re.search(r"\b\d{5,15}\b", text or "")
+    return int(match.group(0)) if match else None
+
 async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         await deny(update)
         return
-    if not context.args or not context.args[0].isdigit():
+    user_id = extract_user_id_from_text(update.message.text)
+    if not user_id:
         await update.message.reply_text("مثال:\n/adduser 123456789")
         return
-    add_user(int(context.args[0]))
-    await update.message.reply_text("✅ کاربر اضافه شد.")
+    add_user(user_id)
+    await update.message.reply_text(f"✅ کاربر اضافه شد.\nآیدی: {user_id}\n\n{list_users_text()}")
 
 async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         await deny(update)
         return
-    if not context.args or not context.args[0].isdigit():
+    user_id = extract_user_id_from_text(update.message.text)
+    if not user_id:
         await update.message.reply_text("مثال:\n/removeuser 123456789")
         return
-    remove_user(int(context.args[0]))
-    await update.message.reply_text("✅ کاربر حذف شد.")
+    if int(user_id) == int(OWNER_ID):
+        await update.message.reply_text("⛔ مالک ربات قابل حذف نیست.")
+        return
+    remove_user(user_id)
+    await update.message.reply_text(f"✅ کاربر حذف شد.\nآیدی: {user_id}\n\n{list_users_text()}")
 
 async def list_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
@@ -205,12 +215,44 @@ async def best_signal(update: Update):
     if not results:
         await update.message.reply_text("❌ هیچ تحلیلی دریافت نشد.")
         return
-    results = sorted(results, key=lambda x: (x.get("status") == "SIGNAL", x.get("prediction_score", 0), x.get("entry_score", 0)), reverse=True)
-    lines = ["🔥 بهترین فرصت‌های فعلی:", ""]
+
+    results = sorted(
+        results,
+        key=lambda x: (
+            x.get("status") == "SIGNAL",
+            x.get("prediction_score", 0),
+            x.get("entry_score", 0),
+        ),
+        reverse=True,
+    )
+
+    lines = ["🔥 بهترین فرصت‌های فعلی", ""]
     for i, r in enumerate(results[:BEST_SIGNAL_COUNT], start=1):
-        lines.append(f"{i}. {r['symbol']} | {direction_fa(r['direction'])} | پیش‌بینی {r['prediction_score']}/100 | ورود {r.get('entry_score', 0)}/100 | {status_fa(r['status'])}")
+        lines.extend([
+            f"#{i} - {r['symbol']}",
+            f"📍 جهت: {direction_fa(r['direction'])}",
+            f"⭐ پیش‌بینی: {r['prediction_score']}/100",
+            f"⚡ ورود: {r.get('entry_score', 0)}/100",
+            f"⚙️ وضعیت: {status_fa(r['status'])}",
+        ])
+
         if r.get("entry") is not None:
-            lines.append(f"   Entry: {r['entry']} | SL: {r['stop_loss']} | TP1: {r['tp1']}")
+            signal_id = make_signal_id(r["symbol"])
+            lines.extend([
+                "",
+                "🎯 سطوح معامله:",
+                f"Entry: {r['entry']}",
+                f"SL: {r['stop_loss']}",
+                f"TP1: {r['tp1']}",
+                f"TP2: {r.get('tp2', '')}",
+                f"شناسه: {signal_id}",
+                "برای زیر نظر گرفتن، روی همین پیام ریپلای کن و بنویس: زیر نظر بگیر",
+            ])
+        else:
+            lines.append("🎯 Entry / SL / TP فعال نیست.")
+
+        lines.append("────────────")
+
     await update.message.reply_text("\n".join(lines))
 
 async def market_overview(update: Update):
@@ -293,6 +335,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text = update.message.text.strip()
         text_lower = text.lower()
+
+        if text_lower.startswith(("adduser", "add user")) or "افزودن کاربر" in text_lower or "اضافه کردن کاربر" in text_lower or "اد کردن کاربر" in text_lower:
+            await add_user_command(update, context)
+            return
+        if text_lower.startswith(("removeuser", "remove user")) or "حذف کاربر" in text_lower or "پاک کردن کاربر" in text_lower:
+            await remove_user_command(update, context)
+            return
+        if "لیست کاربران" in text_lower or "کاربران مجاز" in text_lower:
+            await list_users_command(update, context)
+            return
 
         if "راهنما" in text_lower:
             await start(update, context)
