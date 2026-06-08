@@ -28,7 +28,6 @@ from tracker import (
     check_active_signals,
     format_active_signals,
     make_signal_id,
-    parse_signal_from_result,
     parse_signal_from_text,
 )
 
@@ -313,9 +312,8 @@ async def auto_signal_loop(app: Application):
                     if not r.get("success"):
                         continue
                     if r.get("status") == "SIGNAL" and r.get("prediction_score", 0) >= AUTO_SIGNAL_SCORE:
-                        signal = parse_signal_from_result(r)
-                        if signal:
-                            r["signal_id"] = signal["signal_id"]
+                        # tracker.py در بعضی نسخه‌ها تابع parse_signal_from_result ندارد.
+                        # format_analysis خودش Entry/SL/TP را خط به خط می‌سازد و برای زیرنظر گرفتن کافی است.
                         text = "🚨 اتو سیگنال فارکس\n\n" + format_analysis(r)
                         await app.bot.send_message(chat_id=OWNER_ID, text=text)
                         LAST_AUTO_SIGNALS[pair] = now
