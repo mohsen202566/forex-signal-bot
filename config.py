@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
 
+from forex_pairs import FOREX_PAIRS
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
 
@@ -22,18 +24,6 @@ STATS_FILE = os.path.join(DATA_DIR, "stats.json")
 TRACKER_FILE = os.path.join(DATA_DIR, "active_signals.json")
 USERS_FILE = os.path.join(DATA_DIR, "allowed_users.json")
 
-FOREX_PAIRS = [
-    "EUR/USD",
-    "GBP/USD",
-    "USD/JPY",
-    "USD/CHF",
-    "AUD/USD",
-    "NZD/USD",
-    "USD/CAD",
-    "EUR/JPY",
-    "XAU/USD",
-]
-
 TREND_TF = "4h"
 CONFIRM_TF = "1h"
 SETUP_TF = "15min"
@@ -47,8 +37,13 @@ AUTO_SIGNAL_SCORE = int(os.getenv("AUTO_SIGNAL_SCORE", "80"))
 AUTO_SCAN_INTERVAL_MINUTES = int(os.getenv("AUTO_SCAN_INTERVAL_MINUTES", "5"))
 AUTO_SIGNAL_COOLDOWN_MINUTES = int(os.getenv("AUTO_SIGNAL_COOLDOWN_MINUTES", "120"))
 
-NEWS_BLOCK_BEFORE_MINUTES = int(os.getenv("NEWS_BLOCK_BEFORE_MINUTES", "30"))
-NEWS_BLOCK_AFTER_MINUTES = int(os.getenv("NEWS_BLOCK_AFTER_MINUTES", "30"))
+# این مقادیر فقط برای هشدار خبری استفاده می‌شوند، نه بلاک کردن سیگنال.
+NEWS_WARNING_BEFORE_MINUTES = int(os.getenv("NEWS_WARNING_BEFORE_MINUTES", "30"))
+NEWS_WARNING_AFTER_MINUTES = int(os.getenv("NEWS_WARNING_AFTER_MINUTES", "30"))
+
+# برای سازگاری با نسخه‌های قدیمی نگه داشته شده، اما دیگر سیگنال را بلاک نمی‌کند.
+NEWS_BLOCK_BEFORE_MINUTES = NEWS_WARNING_BEFORE_MINUTES
+NEWS_BLOCK_AFTER_MINUTES = NEWS_WARNING_AFTER_MINUTES
 
 IMPORTANT_NEWS_KEYWORDS = [
     "CPI",
@@ -61,6 +56,9 @@ IMPORTANT_NEWS_KEYWORDS = [
     "Powell",
     "Unemployment Rate",
     "GDP",
+    "War",
+    "Geopolitical Risk",
+    "Oil Inventories",
 ]
 
 DEFAULT_RISK_PERCENT = 1.0
