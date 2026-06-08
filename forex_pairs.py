@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 FOREX_PAIRS = [
     "EUR/USD",
     "GBP/USD",
@@ -24,14 +25,17 @@ PAIR_DISPLAY_NAMES = {
 
 PAIR_ALIASES = {
     "یورو دلار": "EUR/USD",
+    "یورو/دلار": "EUR/USD",
     "eurusd": "EUR/USD",
     "eur/usd": "EUR/USD",
 
     "پوند دلار": "GBP/USD",
+    "پوند/دلار": "GBP/USD",
     "gbpusd": "GBP/USD",
     "gbp/usd": "GBP/USD",
 
     "دلار ین": "USD/JPY",
+    "دلار/ین": "USD/JPY",
     "ین": "USD/JPY",
     "usdjpy": "USD/JPY",
     "usd/jpy": "USD/JPY",
@@ -68,7 +72,6 @@ PAIR_ALIASES = {
     "xau/usd": "XAU/USD",
 }
 
-
 def normalize_pair(text: str):
     if not text:
         return None
@@ -82,12 +85,10 @@ def normalize_pair(text: str):
     for symbol in FOREX_PAIRS:
         symbol_lower = symbol.lower()
         symbol_no_slash = symbol.replace("/", "").lower()
-
         if symbol_lower in text_clean or symbol_no_slash in text_clean:
             return symbol
 
     return None
-
 
 def get_pair_display_name(symbol: str):
     return PAIR_DISPLAY_NAMES.get(symbol, symbol)
