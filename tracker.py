@@ -16,7 +16,7 @@ from statistics import record_signal, update_signal_result
 
 
 PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
-SYMBOL_RE = r"(?:[A-Z]{3}/[A-Z]{3}|XAU/USD|XAG/USD)"
+SYMBOL_RE = r"(?:[A-Z]{2,10}/[A-Z]{2,10}|[A-Z]{2,10})"
 
 
 def _clean_text(text: str) -> str:
