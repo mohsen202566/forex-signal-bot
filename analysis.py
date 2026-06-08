@@ -18,7 +18,14 @@ TIMEFRAMES = {
 def _round_price(value, symbol=""):
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
-    digits = 2 if symbol == "XAU/USD" else (3 if "JPY" in symbol else 5)
+
+    if symbol in ("XAU/USD", "XAG/USD", "WTI/USD", "BRENT/USD", "US30", "NAS100", "SPX500", "DAX40", "DXY", "BTC/USD", "ETH/USD", "SOL/USD"):
+        digits = 2
+    elif "JPY" in symbol:
+        digits = 3
+    else:
+        digits = 5
+
     return round(float(value), digits)
 
 def calculate_indicators(df: pd.DataFrame):
@@ -239,10 +246,8 @@ def analyze_pair(symbol: str) -> Dict:
         else:
             status = "PREDICTION_ONLY"
 
+    # خبر فقط به عنوان هشدار نمایش داده می‌شود و هیچ سیگنالی را بلاک نمی‌کند.
     news = get_news_risk(symbol)
-    if news.get("blocked") and status == "SIGNAL":
-        status = "NEWS_BLOCKED"
-        reasons.append("خبر یا بازه زمانی پرریسک فعال است؛ ورود جدید بهتر است انجام نشود.")
 
     return {
         "success": True,
