@@ -233,15 +233,15 @@ def analyze_pair(symbol: str) -> Dict:
             entry_score += 10
             entry_reasons.append("5M: ADX قابل قبول است.")
 
-        if prediction_score >= 70:
+        if prediction_score >= 65:
             entry_score += 15
 
         entry_score = min(100, entry_score)
 
-        if prediction_score >= 70 and entry_score >= 60:
+        if prediction_score >= 65 and entry_score >= 55:
             entry, stop_loss, tp1, tp2 = _make_levels(symbol, direction, float(price_data["price"]), float(last["atr"] or 0))
             status = "SIGNAL"
-        elif prediction_score < 65:
+        elif prediction_score < 60:
             status = "NO_TRADE"
         else:
             status = "PREDICTION_ONLY"
