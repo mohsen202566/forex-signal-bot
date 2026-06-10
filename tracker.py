@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Signal tracker for Forex Signal Bot.
+"""Two-stage signal tracker for Forex Signal Bot.
 
-UTF-8/Persian safe. Parses both full analysis messages and single best-signal messages.
+Tracks SETUP -> ACTIVATED -> TP1/TP2/SL.
+UTF-8/Persian safe and VPS-safe.
 """
 
 import json
@@ -14,9 +15,12 @@ from config import DATA_DIR, TRACKER_FILE
 from data_provider import get_latest_price
 from statistics import record_signal, update_signal_result
 
-
 PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 SYMBOL_RE = r"(?:[A-Z]{2,10}/[A-Z]{2,10}|[A-Z]{2,10})"
+
+
+def _utc_now():
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
 def _clean_text(text: str) -> str:
@@ -32,8 +36,7 @@ def _to_float(value) -> Optional[float]:
     try:
         if value is None:
             return None
-        value = str(value).translate(PERSIAN_DIGITS).strip()
-        value = value.replace(",", "")
+        value = str(value).translate(PERSIAN_DIGITS).strip().replace(",", "")
         return float(value)
     except Exception:
         return None
@@ -77,14 +80,35 @@ def make_signal_id(symbol: str) -> str:
 
 
 def add_active_signal(signal: Dict):
+    """Add a setup/active signal and record SETUP_CREATED once."""
     data = load_active()
     existing_ids = {str(s.get("signal_id")) for s in data["active"]}
     if str(signal.get("signal_id")) in existing_ids:
         return False
+
+    signal = dict(signal)
+    signal.setdefault("created_at", _utc_now())
+    signal.setdefault("stage", "SETUP")
+    signal.setdefault("result", "SETUP_CREATED")
+    signal.setdefault("tp1_hit", False)
+
     data["active"].append(signal)
     save_active(data)
     record_signal(signal)
     return True
+
+
+def update_active_signal(signal_id: str, **updates):
+    data = load_active()
+    updated = False
+    for item in data.get("active", []):
+        if str(item.get("signal_id")) == str(signal_id):
+            item.update(updates)
+            updated = True
+            break
+    if updated:
+        save_active(data)
+    return updated
 
 
 def remove_active_signal(signal_id: str):
@@ -100,9 +124,9 @@ def list_active_signals() -> List[Dict]:
 
 
 def parse_signal_from_result(result: Dict):
-    """Build a tracker signal directly from analysis result dict.
+    """Build tracker signal from analysis result dict.
 
-    Kept for compatibility with older bot.py versions.
+    Accepts both SETUP and SIGNAL so auto-monitoring can start before activation.
     """
     if not result or result.get("entry") is None:
         return None
@@ -112,10 +136,17 @@ def parse_signal_from_result(result: Dict):
     entry = _to_float(result.get("entry"))
     sl = _to_float(result.get("stop_loss"))
     tp1 = _to_float(result.get("tp1"))
+    tp2 = _to_float(result.get("tp2"))
     score = _to_float(result.get("prediction_score")) or 0
+    entry_score = _to_float(result.get("entry_score")) or 0
+    status = result.get("status")
 
     if not symbol or direction not in ("BUY", "SELL") or entry is None or sl is None or tp1 is None:
         return None
+
+    stage = "ACTIVATED" if status == "SIGNAL" else "SETUP"
+    result_name = "ACTIVATED" if stage == "ACTIVATED" else "SETUP_CREATED"
+    now = _utc_now()
 
     return {
         "signal_id": result.get("signal_id") or make_signal_id(symbol),
@@ -124,20 +155,18 @@ def parse_signal_from_result(result: Dict):
         "entry": entry,
         "stop_loss": sl,
         "tp1": tp1,
+        "tp2": tp2,
         "score": score,
-        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "result": "OPEN",
+        "entry_score": entry_score,
+        "stage": stage,
+        "result": result_name,
+        "created_at": now,
+        "activated_at": now if stage == "ACTIVATED" else "",
+        "tp1_hit": False,
     }
 
 
 def parse_signal_from_text(text: str):
-    """Parse Entry/SL/TP from a Telegram signal message.
-
-    Supported formats:
-    - Full analysis: "تحلیل EUR/USD ... Entry: ..."
-    - Best signal item: "#1 - EUR/USD ... Entry: ..."
-    - Compact format: "EUR/USD | فروش | Entry: ... | SL: ... | TP1: ..."
-    """
     text = _clean_text(text)
     if not text:
         return None
@@ -162,12 +191,14 @@ def parse_signal_from_text(text: str):
     entry = _search(r"(?:Entry|ENTRY|ورود)\s*[:：]\s*" + number, text)
     sl = _search(r"(?:SL|Stop\s*Loss|STOP\s*LOSS|استاپ|حد\s*ضرر)\s*[:：]\s*" + number, text)
     tp1 = _search(r"(?:TP1|TP\s*1|تی\s*پی\s*1|تارگت\s*1)\s*[:：]\s*" + number, text)
+    tp2 = _search(r"(?:TP2|TP\s*2|تی\s*پی\s*2|تارگت\s*2)\s*[:：]\s*" + number, text)
     score = _search(r"(?:امتیاز\s*پیش\s*بینی|پیش\s*بینی|امتیاز)\s*[:：]?\s*" + number, text)
     signal_id = _search(r"شناسه\s*[:：]\s*([A-Z0-9\-/]+)", text)
 
     entry_f = _to_float(entry)
     sl_f = _to_float(sl)
     tp1_f = _to_float(tp1)
+    tp2_f = _to_float(tp2)
     score_f = _to_float(score) or 0
 
     if not symbol or direction not in ("BUY", "SELL") or entry_f is None or sl_f is None or tp1_f is None:
@@ -180,13 +211,36 @@ def parse_signal_from_text(text: str):
         "entry": entry_f,
         "stop_loss": sl_f,
         "tp1": tp1_f,
+        "tp2": tp2_f,
         "score": score_f,
-        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "result": "OPEN",
+        "entry_score": 0,
+        "stage": "SETUP",
+        "created_at": _utc_now(),
+        "result": "SETUP_CREATED",
+        "tp1_hit": False,
     }
 
 
+def activate_signal(signal_id: str, result: Optional[Dict] = None, message_id: Optional[int] = None):
+    updates = {"stage": "ACTIVATED", "result": "ACTIVATED", "activated_at": _utc_now()}
+    if message_id is not None:
+        updates["activation_message_id"] = message_id
+    if result:
+        for key in ("entry", "stop_loss", "tp1", "tp2", "entry_score", "score"):
+            source_key = "prediction_score" if key == "score" else key
+            if result.get(source_key) is not None:
+                updates[key] = result.get(source_key)
+    update_active_signal(signal_id, **updates)
+    update_signal_result(signal_id, "ACTIVATED", "entry activated")
+
+
 def check_active_signals():
+    """Check ACTIVATED signals for TP1/TP2/SL.
+
+    SETUP signals are not checked for TP/SL until bot.py activates them.
+    TP1 is recorded once and signal remains active for possible TP2.
+    Win rate is still based on first TP1 versus SL.
+    """
     data = load_active()
     active = data.get("active", [])
     remaining = []
@@ -194,6 +248,10 @@ def check_active_signals():
 
     for s in active:
         try:
+            if s.get("stage") != "ACTIVATED":
+                remaining.append(s)
+                continue
+
             symbol = s.get("symbol")
             price_data = get_latest_price(symbol)
             if not price_data.get("success"):
@@ -204,20 +262,35 @@ def check_active_signals():
             direction = s.get("direction")
             tp1 = float(s.get("tp1"))
             sl = float(s.get("stop_loss"))
-            hit = None
+            tp2 = _to_float(s.get("tp2"))
+            tp1_hit = bool(s.get("tp1_hit"))
 
+            hit = None
             if direction == "BUY":
-                if price >= tp1:
+                if tp2 is not None and price >= tp2:
+                    hit = "TP2"
+                elif not tp1_hit and price >= tp1:
                     hit = "TP1"
-                elif price <= sl:
+                elif not tp1_hit and price <= sl:
                     hit = "SL"
             elif direction == "SELL":
-                if price <= tp1:
+                if tp2 is not None and price <= tp2:
+                    hit = "TP2"
+                elif not tp1_hit and price <= tp1:
                     hit = "TP1"
-                elif price >= sl:
+                elif not tp1_hit and price >= sl:
                     hit = "SL"
 
-            if hit:
+            if hit == "TP1":
+                s["tp1_hit"] = True
+                s["tp1_hit_at"] = _utc_now()
+                s["result"] = "TP1"
+                update_signal_result(s.get("signal_id"), "TP1", f"price={price}")
+                events.append({"signal": s, "result": "TP1", "price": price})
+                remaining.append(s)
+            elif hit in ("TP2", "SL"):
+                s["result"] = hit
+                s["closed_at"] = _utc_now()
                 update_signal_result(s.get("signal_id"), hit, f"price={price}")
                 events.append({"signal": s, "result": hit, "price": price})
             else:
@@ -235,14 +308,17 @@ def format_active_signals():
     if not active:
         return "👁 هیچ سیگنال فعالی زیر نظر نیست."
 
-    lines = ["👁 سیگنال‌های فعال زیر نظر", ""]
+    lines = ["👁 سیگنال‌های زیر نظر", ""]
     for s in active:
         direction_text = "خرید" if s.get("direction") == "BUY" else "فروش"
+        stage_text = "✅ ورود فعال" if s.get("stage") == "ACTIVATED" else "👀 منتظر فعال‌سازی ورود"
         lines.extend([
             f"• {s.get('symbol')} | {direction_text}",
+            f"وضعیت: {stage_text}",
             f"Entry: {s.get('entry')}",
             f"SL: {s.get('stop_loss')}",
             f"TP1: {s.get('tp1')}",
+            f"TP2: {s.get('tp2')}",
             f"شناسه: {s.get('signal_id')}",
             "────────────",
         ])
