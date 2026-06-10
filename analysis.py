@@ -1,6 +1,15 @@
 # -*- coding: utf-8 -*-
+"""Prediction-focused Forex analysis engine.
+
+Architecture:
+- 4H/1H = market direction context
+- 30M/15M = setup quality and readiness
+- 5M = fast activation trigger
+- News is warning-only and never blocks signals
+"""
+
 import math
-from typing import Dict
+from typing import Dict, Optional
 
 import pandas as pd
 import ta
@@ -11,15 +20,24 @@ from news_engine import get_news_risk
 TIMEFRAMES = {
     "4H": "4h",
     "1H": "1h",
+    "30M": "30min",
     "15M": "15min",
     "5M": "5min",
 }
+
+SETUP_MIN_SCORE = 62
+ACTIVATION_MIN_SCORE = 58
+MIN_DIRECTION_GAP = 6
+
 
 def _round_price(value, symbol=""):
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
 
-    if symbol in ("XAU/USD", "XAG/USD", "WTI/USD", "BRENT/USD", "US30", "NAS100", "SPX500", "DAX40", "DXY", "BTC/USD", "ETH/USD", "SOL/USD"):
+    if symbol in (
+        "XAU/USD", "XAG/USD", "WTI/USD", "BRENT/USD", "US30", "NAS100",
+        "SPX500", "DAX40", "DXY", "BTC/USD", "ETH/USD", "SOL/USD"
+    ):
         digits = 2
     elif "JPY" in symbol:
         digits = 3
@@ -27,6 +45,7 @@ def _round_price(value, symbol=""):
         digits = 5
 
     return round(float(value), digits)
+
 
 def calculate_indicators(df: pd.DataFrame):
     df = df.copy()
@@ -45,16 +64,19 @@ def calculate_indicators(df: pd.DataFrame):
         df["adx"] = 0
     return df
 
+
 def _tf_analysis(symbol: str, label: str, interval: str):
     raw = get_candles(symbol, interval=interval, outputsize=250)
     if not raw.get("success"):
         return {"success": False, "error": raw.get("error", "خطا در دریافت دیتا")}
+
     df = calculate_indicators(raw["data"]).dropna().reset_index(drop=True)
-    if len(df) < 5:
+    if len(df) < 8:
         return {"success": False, "error": "داده کافی برای اندیکاتورها وجود ندارد."}
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
 
     buy = 0
     sell = 0
@@ -62,17 +84,17 @@ def _tf_analysis(symbol: str, label: str, interval: str):
     reasons_sell = []
 
     if last["ema50"] > last["ema200"]:
-        buy += 18
+        buy += 16
         reasons_buy.append(f"{label}: EMA50 بالای EMA200 است.")
     elif last["ema50"] < last["ema200"]:
-        sell += 18
+        sell += 16
         reasons_sell.append(f"{label}: EMA50 پایین EMA200 است.")
 
     if last["close"] > last["ema20"]:
-        buy += 7
+        buy += 8
         reasons_buy.append(f"{label}: قیمت بالای EMA20 است.")
     elif last["close"] < last["ema20"]:
-        sell += 7
+        sell += 8
         reasons_sell.append(f"{label}: قیمت پایین EMA20 است.")
 
     if last["macd"] > last["macd_signal"]:
@@ -82,26 +104,34 @@ def _tf_analysis(symbol: str, label: str, interval: str):
         sell += 9
         reasons_sell.append(f"{label}: MACD نزولی است.")
 
-    if last["macd_hist"] > prev["macd_hist"]:
-        buy += 5
-        reasons_buy.append(f"{label}: هیستوگرام MACD در حال تقویت صعودی است.")
-    elif last["macd_hist"] < prev["macd_hist"]:
-        sell += 5
-        reasons_sell.append(f"{label}: هیستوگرام MACD در حال تقویت نزولی است.")
-
-    if last["rsi"] > prev["rsi"]:
-        buy += 6
-        reasons_buy.append(f"{label}: RSI رو به افزایش است.")
-    elif last["rsi"] < prev["rsi"]:
-        sell += 6
-        reasons_sell.append(f"{label}: RSI رو به کاهش است.")
-
-    if 45 <= last["rsi"] <= 68:
+    if last["macd_hist"] > prev["macd_hist"] > prev2["macd_hist"]:
+        buy += 8
+        reasons_buy.append(f"{label}: هیستوگرام MACD دو کندل پشت‌سرهم صعودی تقویت شده است.")
+    elif last["macd_hist"] < prev["macd_hist"] < prev2["macd_hist"]:
+        sell += 8
+        reasons_sell.append(f"{label}: هیستوگرام MACD دو کندل پشت‌سرهم نزولی تقویت شده است.")
+    elif last["macd_hist"] > prev["macd_hist"]:
         buy += 4
-    if 32 <= last["rsi"] <= 55:
+    elif last["macd_hist"] < prev["macd_hist"]:
         sell += 4
 
-    if last.get("adx", 0) >= 18:
+    if last["rsi"] > prev["rsi"] > prev2["rsi"]:
+        buy += 7
+        reasons_buy.append(f"{label}: شیب RSI دو کندل صعودی است.")
+    elif last["rsi"] < prev["rsi"] < prev2["rsi"]:
+        sell += 7
+        reasons_sell.append(f"{label}: شیب RSI دو کندل نزولی است.")
+    elif last["rsi"] > prev["rsi"]:
+        buy += 3
+    elif last["rsi"] < prev["rsi"]:
+        sell += 3
+
+    if 44 <= last["rsi"] <= 68:
+        buy += 4
+    if 32 <= last["rsi"] <= 56:
+        sell += 4
+
+    if last.get("adx", 0) >= 16:
         if buy > sell:
             buy += 4
         elif sell > buy:
@@ -124,32 +154,86 @@ def _tf_analysis(symbol: str, label: str, interval: str):
             "macd": round(float(last["macd"]), 5),
             "macd_signal": round(float(last["macd_signal"]), 5),
             "macd_hist": round(float(last["macd_hist"]), 5),
+            "prev_macd_hist": round(float(prev["macd_hist"]), 5),
             "atr": _round_price(last["atr"], symbol),
             "adx": round(float(last.get("adx", 0)), 2),
         },
     }
 
+
 def _make_levels(symbol: str, direction: str, price: float, atr: float):
     if not atr or atr <= 0:
         return None, None, None, None
+
+    # Scalp-oriented levels: smaller TP1, moderate SL, TP2 separate.
     if direction == "BUY":
         entry = price
-        sl = price - (atr * 1.2)
-        tp1 = price + (atr * 1.2)
-        tp2 = price + (atr * 2.2)
+        sl = price - (atr * 1.10)
+        tp1 = price + (atr * 0.95)
+        tp2 = price + (atr * 1.65)
     elif direction == "SELL":
         entry = price
-        sl = price + (atr * 1.2)
-        tp1 = price - (atr * 1.2)
-        tp2 = price - (atr * 2.2)
+        sl = price + (atr * 1.10)
+        tp1 = price - (atr * 0.95)
+        tp2 = price - (atr * 1.65)
     else:
         return None, None, None, None
+
     return (
         _round_price(entry, symbol),
         _round_price(sl, symbol),
         _round_price(tp1, symbol),
         _round_price(tp2, symbol),
     )
+
+
+def _fast_entry_score(direction: str, entry_tf: Dict, confirm_tf: Optional[Dict] = None):
+    score = 0
+    reasons = []
+    last = entry_tf["last"]
+
+    if direction == "BUY":
+        if last["close"] > last["ema20"]:
+            score += 24
+            reasons.append("5M: قیمت بالای EMA20 است.")
+        if last["macd_hist"] > last.get("prev_macd_hist", 0):
+            score += 22
+            reasons.append("5M: هیستوگرام MACD در حال تقویت صعودی است.")
+        if last["macd_hist"] > 0:
+            score += 12
+            reasons.append("5M: هیستوگرام MACD مثبت است.")
+        if last["rsi"] >= 50:
+            score += 16
+            reasons.append("5M: RSI بالای 50 است.")
+    elif direction == "SELL":
+        if last["close"] < last["ema20"]:
+            score += 24
+            reasons.append("5M: قیمت پایین EMA20 است.")
+        if last["macd_hist"] < last.get("prev_macd_hist", 0):
+            score += 22
+            reasons.append("5M: هیستوگرام MACD در حال تقویت نزولی است.")
+        if last["macd_hist"] < 0:
+            score += 12
+            reasons.append("5M: هیستوگرام MACD منفی است.")
+        if last["rsi"] <= 50:
+            score += 16
+            reasons.append("5M: RSI پایین 50 است.")
+
+    if last.get("adx", 0) >= 16:
+        score += 10
+        reasons.append("5M: ADX برای اسکالپ قابل قبول است.")
+
+    if confirm_tf:
+        c = confirm_tf["last"]
+        if direction == "BUY" and c["close"] > c["ema20"]:
+            score += 10
+            reasons.append("15M: قیمت با جهت خرید هم‌راستا است.")
+        elif direction == "SELL" and c["close"] < c["ema20"]:
+            score += 10
+            reasons.append("15M: قیمت با جهت فروش هم‌راستا است.")
+
+    return min(100, score), reasons
+
 
 def analyze_pair(symbol: str) -> Dict:
     price_data = get_latest_price(symbol)
@@ -168,7 +252,9 @@ def analyze_pair(symbol: str) -> Dict:
     if not analyses:
         return {"success": False, "error": "تحلیل هیچ تایم‌فریمی موفق نبود. " + " | ".join(errors)}
 
-    weights = {"4H": 1.2, "1H": 1.3, "15M": 1.1, "5M": 1.0}
+    # Futures-like hierarchy for scalp: 5M > 15M > 30M > 1H > 4H.
+    # Higher timeframes still guide direction, but fast TFs decide setup freshness/activation.
+    weights = {"4H": 0.80, "1H": 1.00, "30M": 1.15, "15M": 1.35, "5M": 1.55}
     buy_score = 0
     sell_score = 0
     buy_reasons = []
@@ -187,11 +273,11 @@ def analyze_pair(symbol: str) -> Dict:
     buy_percent = round((buy_score / total) * 100, 1)
     sell_percent = round((sell_score / total) * 100, 1)
 
-    if buy_percent - sell_percent >= 8:
+    if buy_percent - sell_percent >= MIN_DIRECTION_GAP:
         direction = "BUY"
         prediction_score = min(100, round(buy_percent, 1))
         reasons = buy_reasons[:12]
-    elif sell_percent - buy_percent >= 8:
+    elif sell_percent - buy_percent >= MIN_DIRECTION_GAP:
         direction = "SELL"
         prediction_score = min(100, round(sell_percent, 1))
         reasons = sell_reasons[:12]
@@ -202,51 +288,27 @@ def analyze_pair(symbol: str) -> Dict:
 
     entry_score = 0
     entry_reasons = []
-    status = "PREDICTION_ONLY"
+    status = "NO_TRADE"
     entry = stop_loss = tp1 = tp2 = None
 
-    entry_tf = analyses.get("5M")
-    if direction in ("BUY", "SELL") and entry_tf:
-        last = entry_tf["last"]
-        if direction == "BUY":
-            if last["close"] > last["ema20"]:
-                entry_score += 30
-                entry_reasons.append("5M: قیمت بالای EMA20 است.")
-            if last["macd_hist"] > 0:
-                entry_score += 25
-                entry_reasons.append("5M: هیستوگرام MACD مثبت است.")
-            if last["rsi"] >= 50:
-                entry_score += 20
-                entry_reasons.append("5M: RSI بالای 50 است.")
-        else:
-            if last["close"] < last["ema20"]:
-                entry_score += 30
-                entry_reasons.append("5M: قیمت پایین EMA20 است.")
-            if last["macd_hist"] < 0:
-                entry_score += 25
-                entry_reasons.append("5M: هیستوگرام MACD منفی است.")
-            if last["rsi"] <= 50:
-                entry_score += 20
-                entry_reasons.append("5M: RSI پایین 50 است.")
+    if direction in ("BUY", "SELL") and prediction_score >= SETUP_MIN_SCORE:
+        entry_tf = analyses.get("5M") or analyses.get("15M")
+        confirm_tf = analyses.get("15M")
+        if entry_tf:
+            entry_score, entry_reasons = _fast_entry_score(direction, entry_tf, confirm_tf)
+            atr = float((entry_tf.get("last") or {}).get("atr") or 0)
+            entry, stop_loss, tp1, tp2 = _make_levels(symbol, direction, float(price_data["price"]), atr)
 
-        if last["adx"] >= 18:
-            entry_score += 10
-            entry_reasons.append("5M: ADX قابل قبول است.")
-
-        if prediction_score >= 65:
-            entry_score += 15
-
-        entry_score = min(100, entry_score)
-
-        if prediction_score >= 65 and entry_score >= 55:
-            entry, stop_loss, tp1, tp2 = _make_levels(symbol, direction, float(price_data["price"]), float(last["atr"] or 0))
-            status = "SIGNAL"
-        elif prediction_score < 60:
-            status = "NO_TRADE"
+            if entry and stop_loss and tp1:
+                if entry_score >= ACTIVATION_MIN_SCORE:
+                    status = "SIGNAL"
+                else:
+                    status = "SETUP"
         else:
             status = "PREDICTION_ONLY"
+    elif direction in ("BUY", "SELL"):
+        status = "PREDICTION_ONLY"
 
-    # خبر فقط به عنوان هشدار نمایش داده می‌شود و هیچ سیگنالی را بلاک نمی‌کند.
     news = get_news_risk(symbol)
 
     return {
@@ -267,4 +329,5 @@ def analyze_pair(symbol: str) -> Dict:
         "entry_reasons": entry_reasons or ["تریگر ورود سریع هنوز کامل نیست."],
         "tf_summary": tf_summary,
         "news": news,
+        "errors": errors,
     }
