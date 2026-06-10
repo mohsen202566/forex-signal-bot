@@ -47,41 +47,6 @@ def _search(pattern: str, text: str):
     return match.group(1).strip() if match else None
 
 
-def _text_is_activated_signal(text: str) -> bool:
-    """Detect whether a pasted/replied signal text is already an active entry signal.
-
-    This is important because reply-based tracking may be used on either:
-    - setup messages waiting for activation
-    - already activated signal messages
-
-    If an already activated message is stored as SETUP, check_active_signals() will
-    intentionally skip it and TP/SL will never be recorded.
-    """
-    cleaned = _clean_text(text)
-    upper_text = cleaned.upper()
-
-    activated_markers = (
-        "ورود فعال شد",
-        "ورود فعال",
-        "وضعیت: ✅ ورود فعال",
-        "وضعیت: ورود فعال",
-        "ENTRY ACTIVATED",
-        "STATUS: SIGNAL",
-        "SIGNAL",
-    )
-    waiting_markers = (
-        "منتظر فعال سازی",
-        "منتظر فعال‌سازی",
-        "منتظر فعالسازی",
-        "WAITING",
-        "SETUP",
-    )
-
-    if any(marker in cleaned for marker in waiting_markers) or any(marker in upper_text for marker in waiting_markers):
-        return False
-    return any(marker in cleaned for marker in activated_markers) or any(marker in upper_text for marker in activated_markers)
-
-
 def ensure_storage():
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(TRACKER_FILE):
@@ -239,9 +204,6 @@ def parse_signal_from_text(text: str):
     if not symbol or direction not in ("BUY", "SELL") or entry_f is None or sl_f is None or tp1_f is None:
         return None
 
-    stage = "ACTIVATED" if _text_is_activated_signal(text) else "SETUP"
-    now = _utc_now()
-
     return {
         "signal_id": signal_id or make_signal_id(symbol),
         "symbol": symbol,
@@ -252,10 +214,9 @@ def parse_signal_from_text(text: str):
         "tp2": tp2_f,
         "score": score_f,
         "entry_score": 0,
-        "stage": stage,
-        "created_at": now,
-        "activated_at": now if stage == "ACTIVATED" else "",
-        "result": "ACTIVATED" if stage == "ACTIVATED" else "SETUP_CREATED",
+        "stage": "SETUP",
+        "created_at": _utc_now(),
+        "result": "SETUP_CREATED",
         "tp1_hit": False,
     }
 
@@ -280,14 +241,9 @@ def activate_signal(signal_id: str, result: Optional[Dict] = None, message_id: O
 def check_active_signals():
     """Check ACTIVATED signals for TP1/TP2/SL.
 
-    SETUP signals are intentionally kept active but are not checked for TP/SL
-    until bot.py or reply parsing marks them as ACTIVATED.
-
-    Important fixes:
-    - Already activated reply-tracked messages can now be checked.
-    - TP2 hit before TP1 records TP1 first, then TP2, so stats do not miss wins.
-    - SL is recorded only before TP1, keeping win rate based on TP1 vs SL.
-    - Bad/missing data does not remove the signal from tracking.
+    SETUP signals remain in the watchlist and are not checked for TP/SL until
+    bot.py activates them. TP1 is recorded once; after TP1 the signal remains
+    active only for possible TP2. Win rate remains TP1 vs SL.
     """
     data = load_active()
     active = data.get("active", [])
@@ -296,60 +252,52 @@ def check_active_signals():
 
     for s in active:
         try:
-            # Backward compatibility: older records may have result=ACTIVATED but no stage.
-            if s.get("stage") != "ACTIVATED" and s.get("result") == "ACTIVATED":
-                s["stage"] = "ACTIVATED"
-
             if s.get("stage") != "ACTIVATED":
                 remaining.append(s)
                 continue
 
             symbol = s.get("symbol")
             price_data = get_latest_price(symbol)
-            if not isinstance(price_data, dict) or not price_data.get("success"):
+            if not price_data.get("success"):
                 remaining.append(s)
                 continue
 
-            price = _to_float(price_data.get("price"))
+            price = float(price_data["price"])
             direction = s.get("direction")
             tp1 = _to_float(s.get("tp1"))
             sl = _to_float(s.get("stop_loss"))
             tp2 = _to_float(s.get("tp2"))
             tp1_hit = bool(s.get("tp1_hit"))
 
-            if price is None or direction not in ("BUY", "SELL") or tp1 is None or sl is None:
+            if direction not in ("BUY", "SELL") or tp1 is None or sl is None:
                 remaining.append(s)
                 continue
-
-            hit_tp1 = False
-            hit_tp2 = False
-            hit_sl = False
 
             if direction == "BUY":
                 hit_tp1 = price >= tp1
                 hit_tp2 = tp2 is not None and price >= tp2
                 hit_sl = price <= sl
-            elif direction == "SELL":
+            else:
                 hit_tp1 = price <= tp1
                 hit_tp2 = tp2 is not None and price <= tp2
                 hit_sl = price >= sl
 
-            # If TP2 is reached before TP1 was recorded, record TP1 first for win-rate stats.
-            if hit_tp2 and not tp1_hit:
-                s["tp1_hit"] = True
-                s["tp1_hit_at"] = _utc_now()
-                update_signal_result(s.get("signal_id"), "TP1", f"price={price}; auto-recorded before TP2")
-                events.append({"signal": dict(s), "result": "TP1", "price": price})
-                tp1_hit = True
-
+            # Direct TP2 move: first record TP1 so win stats are never missed.
             if hit_tp2:
+                if not tp1_hit:
+                    s["tp1_hit"] = True
+                    s["tp1_hit_at"] = _utc_now()
+                    update_signal_result(s.get("signal_id"), "TP1", f"price={price}; direct_tp2=True")
+                    events.append({"signal": dict(s), "result": "TP1", "price": price})
+
                 s["result"] = "TP2"
+                s["tp2_hit"] = True
                 s["closed_at"] = _utc_now()
                 update_signal_result(s.get("signal_id"), "TP2", f"price={price}")
                 events.append({"signal": dict(s), "result": "TP2", "price": price})
                 continue
 
-            if hit_tp1 and not tp1_hit:
+            if (not tp1_hit) and hit_tp1:
                 s["tp1_hit"] = True
                 s["tp1_hit_at"] = _utc_now()
                 s["result"] = "TP1"
@@ -358,23 +306,23 @@ def check_active_signals():
                 remaining.append(s)
                 continue
 
-            # SL before TP1 closes the signal as a loss. After TP1, SL is not counted as loss.
-            if hit_sl and not tp1_hit:
+            # SL is counted only before TP1, keeping Win Rate = TP1 vs SL.
+            if (not tp1_hit) and hit_sl:
                 s["result"] = "SL"
+                s["sl_hit"] = True
                 s["closed_at"] = _utc_now()
                 update_signal_result(s.get("signal_id"), "SL", f"price={price}")
                 events.append({"signal": dict(s), "result": "SL", "price": price})
                 continue
 
             remaining.append(s)
-        except Exception as exc:
-            s["last_tracker_error"] = str(exc)
-            s["last_tracker_error_at"] = _utc_now()
+        except Exception:
             remaining.append(s)
 
     data["active"] = remaining
     save_active(data)
     return events
+
 
 def format_active_signals():
     active = list_active_signals()
