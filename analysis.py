@@ -26,7 +26,7 @@ TIMEFRAMES = {
 }
 
 SETUP_MIN_SCORE = 62
-ACTIVATION_MIN_SCORE = 70
+ACTIVATION_MIN_SCORE = 58
 MIN_DIRECTION_GAP = 6
 
 
@@ -187,106 +187,6 @@ def _make_levels(symbol: str, direction: str, price: float, atr: float):
     )
 
 
-def _calculate_buy_sell_power(df: pd.DataFrame, candles: int):
-    """Calculate very short-term candle-body buy/sell power for entry confirmation."""
-    try:
-        recent = df.tail(candles)
-        if recent.empty:
-            return 50.0, 50.0
-
-        buy_body = 0.0
-        sell_body = 0.0
-
-        for _, row in recent.iterrows():
-            body = float(row["close"]) - float(row["open"])
-            if body > 0:
-                buy_body += abs(body)
-            elif body < 0:
-                sell_body += abs(body)
-
-        total = buy_body + sell_body
-        if total <= 0:
-            return 50.0, 50.0
-
-        buy_power = round((buy_body / total) * 100, 1)
-        sell_power = round((sell_body / total) * 100, 1)
-        return buy_power, sell_power
-    except Exception:
-        return 50.0, 50.0
-
-
-def _fresh_momentum_confirmation(direction: str, entry_tf: Dict):
-    """Detect newly emerging 5M momentum without adding prediction-score inflation."""
-    df = entry_tf.get("df")
-    if df is None or len(df) < 4:
-        return False, "Fresh Momentum: داده کافی برای بررسی مومنتوم تازه وجود ندارد."
-
-    try:
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        prev2 = df.iloc[-3]
-
-        macd_accel_up = float(last["macd_hist"]) > float(prev["macd_hist"]) > float(prev2["macd_hist"])
-        macd_accel_down = float(last["macd_hist"]) < float(prev["macd_hist"]) < float(prev2["macd_hist"])
-        rsi_up = float(last["rsi"]) > float(prev["rsi"]) > float(prev2["rsi"])
-        rsi_down = float(last["rsi"]) < float(prev["rsi"]) < float(prev2["rsi"])
-        buy2, sell2 = _calculate_buy_sell_power(df, 2)
-        buy3, sell3 = _calculate_buy_sell_power(df, 3)
-
-        if direction == "BUY":
-            ok = macd_accel_up and rsi_up and (buy2 >= POWER_2_CANDLE_MIN or buy3 >= POWER_3_CANDLE_MIN)
-            reason = (
-                f"Fresh Momentum خرید: MACD/RSI تازه صعودی شده و Buy Power 2C={buy2}% | 3C={buy3}% است."
-                if ok else
-                f"Fresh Momentum خرید هنوز کامل نیست: Buy Power 2C={buy2}% | 3C={buy3}%."
-            )
-            return ok, reason
-
-        if direction == "SELL":
-            ok = macd_accel_down and rsi_down and (sell2 >= POWER_2_CANDLE_MIN or sell3 >= POWER_3_CANDLE_MIN)
-            reason = (
-                f"Fresh Momentum فروش: MACD/RSI تازه نزولی شده و Sell Power 2C={sell2}% | 3C={sell3}% است."
-                if ok else
-                f"Fresh Momentum فروش هنوز کامل نیست: Sell Power 2C={sell2}% | 3C={sell3}%."
-            )
-            return ok, reason
-
-    except Exception:
-        return False, "Fresh Momentum: خطا در محاسبه مومنتوم تازه."
-
-    return False, "Fresh Momentum: جهت نامعتبر است."
-
-
-def _power_entry_confirmation(direction: str, entry_tf: Dict):
-    """Buy/Sell Power confirmation layer for activation; not a score source."""
-    df = entry_tf.get("df")
-    if df is None or len(df) < 3:
-        return False, "قدرت خرید/فروش: داده کافی برای تایید 2 و 3 کندلی وجود ندارد."
-
-    buy2, sell2 = _calculate_buy_sell_power(df, 2)
-    buy3, sell3 = _calculate_buy_sell_power(df, 3)
-
-    if direction == "BUY":
-        ok = buy2 >= POWER_2_CANDLE_MIN and buy3 >= POWER_3_CANDLE_MIN
-        reason = (
-            f"تایید قدرت خرید: Buy Power 2C={buy2}% و 3C={buy3}% است."
-            if ok else
-            f"قدرت خرید هنوز کافی نیست: Buy Power 2C={buy2}% و 3C={buy3}%."
-        )
-        return ok, reason
-
-    if direction == "SELL":
-        ok = sell2 >= POWER_2_CANDLE_MIN and sell3 >= POWER_3_CANDLE_MIN
-        reason = (
-            f"تایید قدرت فروش: Sell Power 2C={sell2}% و 3C={sell3}% است."
-            if ok else
-            f"قدرت فروش هنوز کافی نیست: Sell Power 2C={sell2}% و 3C={sell3}%."
-        )
-        return ok, reason
-
-    return False, "قدرت خرید/فروش: جهت نامعتبر است."
-
-
 def _fast_entry_score(direction: str, entry_tf: Dict, confirm_tf: Optional[Dict] = None):
     score = 0
     reasons = []
@@ -332,13 +232,7 @@ def _fast_entry_score(direction: str, entry_tf: Dict, confirm_tf: Optional[Dict]
             score += 10
             reasons.append("15M: قیمت با جهت فروش هم‌راستا است.")
 
-    power_ok, power_reason = _power_entry_confirmation(direction, entry_tf)
-    fresh_ok, fresh_reason = _fresh_momentum_confirmation(direction, entry_tf)
-    reasons.append(power_reason)
-    reasons.append(fresh_reason)
-
-    activation_confirmed = power_ok or fresh_ok
-    return min(100, score), reasons, activation_confirmed
+    return min(100, score), reasons
 
 
 def analyze_pair(symbol: str) -> Dict:
@@ -401,12 +295,12 @@ def analyze_pair(symbol: str) -> Dict:
         entry_tf = analyses.get("5M") or analyses.get("15M")
         confirm_tf = analyses.get("15M")
         if entry_tf:
-            entry_score, entry_reasons, activation_confirmed = _fast_entry_score(direction, entry_tf, confirm_tf)
+            entry_score, entry_reasons = _fast_entry_score(direction, entry_tf, confirm_tf)
             atr = float((entry_tf.get("last") or {}).get("atr") or 0)
             entry, stop_loss, tp1, tp2 = _make_levels(symbol, direction, float(price_data["price"]), atr)
 
             if entry and stop_loss and tp1:
-                if entry_score >= ACTIVATION_MIN_SCORE and activation_confirmed:
+                if entry_score >= ACTIVATION_MIN_SCORE:
                     status = "SIGNAL"
                 else:
                     status = "SETUP"
