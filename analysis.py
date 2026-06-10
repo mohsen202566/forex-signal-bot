@@ -29,6 +29,11 @@ SETUP_MIN_SCORE = 62
 ACTIVATION_MIN_SCORE = 58
 MIN_DIRECTION_GAP = 6
 
+# Soft higher-timeframe context bias.
+# If 4H and 1H agree, the aligned side gets +5 and the opposite side gets -5.
+# This is intentionally soft so the forex scalp engine stays fast and does not become over-filtered.
+HTF_CONTEXT_BIAS_POINTS = 5
+
 
 def _round_price(value, symbol=""):
     if value is None or (isinstance(value, float) and math.isnan(value)):
@@ -235,6 +240,52 @@ def _fast_entry_score(direction: str, entry_tf: Dict, confirm_tf: Optional[Dict]
     return min(100, score), reasons
 
 
+def _simple_tf_direction(item: Optional[Dict]) -> Optional[str]:
+    """Return BUY/SELL/None using the already-calculated TF score."""
+    if not item or not item.get("success"):
+        return None
+
+    buy = float(item.get("buy") or 0)
+    sell = float(item.get("sell") or 0)
+
+    if buy > sell:
+        return "BUY"
+    if sell > buy:
+        return "SELL"
+    return None
+
+
+def _apply_higher_tf_context_bias(buy_score: float, sell_score: float, analyses: Dict):
+    """Apply a soft 4H/1H context bias without hard-blocking counter-trend scalps."""
+    trend_4h = _simple_tf_direction(analyses.get("4H"))
+    trend_1h = _simple_tf_direction(analyses.get("1H"))
+
+    if not trend_4h or not trend_1h or trend_4h != trend_1h:
+        return buy_score, sell_score, None, None
+
+    if trend_4h == "BUY":
+        buy_score += HTF_CONTEXT_BIAS_POINTS
+        sell_score = max(0, sell_score - HTF_CONTEXT_BIAS_POINTS)
+        return (
+            buy_score,
+            sell_score,
+            "BUY",
+            f"4H و 1H هم‌جهت خرید هستند؛ {HTF_CONTEXT_BIAS_POINTS} امتیاز به خرید اضافه و از فروش کم شد.",
+        )
+
+    if trend_4h == "SELL":
+        sell_score += HTF_CONTEXT_BIAS_POINTS
+        buy_score = max(0, buy_score - HTF_CONTEXT_BIAS_POINTS)
+        return (
+            buy_score,
+            sell_score,
+            "SELL",
+            f"4H و 1H هم‌جهت فروش هستند؛ {HTF_CONTEXT_BIAS_POINTS} امتیاز به فروش اضافه و از خرید کم شد.",
+        )
+
+    return buy_score, sell_score, None, None
+
+
 def analyze_pair(symbol: str) -> Dict:
     price_data = get_latest_price(symbol)
     if not price_data.get("success"):
@@ -268,6 +319,18 @@ def analyze_pair(symbol: str) -> Dict:
         buy_reasons.extend(item["reasons_buy"])
         sell_reasons.extend(item["reasons_sell"])
         tf_summary[label] = item["last"]
+
+    buy_score, sell_score, htf_bias_direction, htf_bias_reason = _apply_higher_tf_context_bias(
+        buy_score,
+        sell_score,
+        analyses,
+    )
+
+    if htf_bias_reason:
+        if htf_bias_direction == "BUY":
+            buy_reasons.insert(0, htf_bias_reason)
+        elif htf_bias_direction == "SELL":
+            sell_reasons.insert(0, htf_bias_reason)
 
     total = max(buy_score + sell_score, 1)
     buy_percent = round((buy_score / total) * 100, 1)
