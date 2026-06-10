@@ -336,7 +336,7 @@ def _apply_higher_tf_context_bias(buy_score: float, sell_score: float, analyses:
     return buy_score, sell_score, None, None
 
 
-def analyze_pair(symbol: str) -> Dict:
+def analyze_pair(symbol: str, activation_check: bool = False) -> Dict:
     price_data = get_latest_price(symbol)
     if not price_data.get("success"):
         return {"success": False, "error": price_data.get("error", "خطا در دریافت قیمت")}
@@ -397,7 +397,11 @@ def analyze_pair(symbol: str) -> Dict:
             atr = _safe_float((entry_tf.get("last") or {}).get("atr"))
             entry, stop_loss, tp1, tp2 = _make_levels(symbol, direction, _safe_float(price_data.get("price")), atr)
             if entry is not None and stop_loss is not None and tp1 is not None:
-                if entry_score >= ACTIVATION_MIN_SCORE and activation_confirmed:
+                # Initial analysis must NEVER send an instant entry signal.
+                # It only creates a SETUP. Entry activation is allowed only when
+                # bot.py explicitly calls analyze_pair(..., activation_check=True)
+                # for an already stored setup.
+                if activation_check and entry_score >= ACTIVATION_MIN_SCORE and activation_confirmed:
                     status = "SIGNAL"
                 else:
                     status = "SETUP"
