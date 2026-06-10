@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
+"""Compact futures-like statistics for Forex bot.
+
+Win rate is based only on TP1 vs SL. TP2 is tracked separately.
+"""
+
 import json
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from config import DATA_DIR, STATS_FILE
-
-
-def fa(text: str) -> str:
-    return text.encode("utf-8").decode("unicode_escape")
 
 
 def ensure_storage():
@@ -23,13 +24,10 @@ def load_stats() -> Dict:
     try:
         with open(STATS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-
         if not isinstance(data, dict):
             return {"signals": []}
-
         if "signals" not in data or not isinstance(data["signals"], list):
             data["signals"] = []
-
         return data
     except Exception:
         return {"signals": []}
@@ -45,7 +43,9 @@ def record_signal(signal: Dict):
     data = load_stats()
     signal = dict(signal)
     signal.setdefault("created_at", datetime.utcnow().isoformat(timespec="seconds") + "Z")
-    signal.setdefault("result", "OPEN")
+    signal.setdefault("result", "SETUP_CREATED")
+    signal.setdefault("stage", "SETUP")
+    signal.setdefault("tp1_hit", False)
     data["signals"].append(signal)
     save_stats(data)
 
@@ -53,12 +53,24 @@ def record_signal(signal: Dict):
 def update_signal_result(signal_id: str, result: str, reason: str = ""):
     data = load_stats()
     updated = False
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
     for signal in data["signals"]:
         if str(signal.get("signal_id")) == str(signal_id):
             signal["result"] = result
-            signal["closed_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             signal["close_reason"] = reason
+            if result == "ACTIVATED":
+                signal["stage"] = "ACTIVATED"
+                signal["activated_at"] = now
+            elif result == "TP1":
+                signal["tp1_hit"] = True
+                signal["tp1_hit_at"] = now
+            elif result in ("TP2", "SL", "CANCELLED"):
+                signal["closed_at"] = now
+                if result == "TP2":
+                    signal["tp2_hit"] = True
+                if result == "SL":
+                    signal["sl_hit"] = True
             updated = True
             break
 
@@ -76,67 +88,86 @@ def _filter_by_days(signals: List[Dict], days: Optional[int] = None):
 
     cutoff = datetime.utcnow() - timedelta(days=days)
     filtered = []
-
     for signal in signals:
         created = str(signal.get("created_at", "")).replace("Z", "")
         try:
-            created_at = datetime.fromisoformat(created)
-            if created_at >= cutoff:
+            if datetime.fromisoformat(created) >= cutoff:
                 filtered.append(signal)
         except Exception:
             continue
-
     return filtered
+
+
+def _is_tp1(signal: Dict) -> bool:
+    return bool(signal.get("tp1_hit")) or signal.get("result") in ("TP1", "TP2")
+
+
+def _is_tp2(signal: Dict) -> bool:
+    return bool(signal.get("tp2_hit")) or signal.get("result") == "TP2"
+
+
+def _is_sl(signal: Dict) -> bool:
+    return bool(signal.get("sl_hit")) or signal.get("result") == "SL"
 
 
 def build_stats(days: Optional[int] = None) -> Dict:
     data = load_stats()
     signals = _filter_by_days(data.get("signals", []), days)
 
-    total = len(signals)
-    tp = sum(1 for signal in signals if signal.get("result") == "TP1")
-    sl = sum(1 for signal in signals if signal.get("result") == "SL")
-    open_count = sum(1 for signal in signals if signal.get("result") == "OPEN")
-    closed = tp + sl
-    win_rate = round((tp / closed) * 100, 2) if closed else 0
+    total_setups = len(signals)
+    activated = sum(1 for s in signals if s.get("stage") == "ACTIVATED" or s.get("result") in ("ACTIVATED", "TP1", "TP2", "SL"))
+    cancelled = sum(1 for s in signals if s.get("result") == "CANCELLED")
+    tp1 = sum(1 for s in signals if _is_tp1(s))
+    tp2 = sum(1 for s in signals if _is_tp2(s))
+    sl = sum(1 for s in signals if _is_sl(s))
+    open_count = sum(1 for s in signals if s.get("result") in ("SETUP_CREATED", "ACTIVATED", "TP1"))
 
-    by_symbol = {}
+    closed_for_wr = tp1 + sl
+    win_rate = round((tp1 / closed_for_wr) * 100, 2) if closed_for_wr else 0
+    tp2_rate = round((tp2 / tp1) * 100, 2) if tp1 else 0
+
     by_direction = {
-        "BUY": {"tp": 0, "sl": 0, "open": 0, "total": 0},
-        "SELL": {"tp": 0, "sl": 0, "open": 0, "total": 0},
+        "BUY": {"setups": 0, "activated": 0, "tp1": 0, "tp2": 0, "sl": 0},
+        "SELL": {"setups": 0, "activated": 0, "tp1": 0, "tp2": 0, "sl": 0},
     }
+    by_symbol = {}
 
-    for signal in signals:
-        symbol = signal.get("symbol", "UNKNOWN")
-        direction = signal.get("direction")
-        result = signal.get("result")
-
-        by_symbol.setdefault(symbol, {"tp": 0, "sl": 0, "open": 0, "total": 0})
-        by_symbol[symbol]["total"] += 1
-
-        if result == "TP1":
-            by_symbol[symbol]["tp"] += 1
-        elif result == "SL":
+    for s in signals:
+        symbol = s.get("symbol", "UNKNOWN")
+        direction = s.get("direction")
+        by_symbol.setdefault(symbol, {"setups": 0, "activated": 0, "tp1": 0, "tp2": 0, "sl": 0})
+        by_symbol[symbol]["setups"] += 1
+        if s.get("stage") == "ACTIVATED" or s.get("result") in ("ACTIVATED", "TP1", "TP2", "SL"):
+            by_symbol[symbol]["activated"] += 1
+        if _is_tp1(s):
+            by_symbol[symbol]["tp1"] += 1
+        if _is_tp2(s):
+            by_symbol[symbol]["tp2"] += 1
+        if _is_sl(s):
             by_symbol[symbol]["sl"] += 1
-        else:
-            by_symbol[symbol]["open"] += 1
 
         if direction in by_direction:
-            by_direction[direction]["total"] += 1
-            if result == "TP1":
-                by_direction[direction]["tp"] += 1
-            elif result == "SL":
+            by_direction[direction]["setups"] += 1
+            if s.get("stage") == "ACTIVATED" or s.get("result") in ("ACTIVATED", "TP1", "TP2", "SL"):
+                by_direction[direction]["activated"] += 1
+            if _is_tp1(s):
+                by_direction[direction]["tp1"] += 1
+            if _is_tp2(s):
+                by_direction[direction]["tp2"] += 1
+            if _is_sl(s):
                 by_direction[direction]["sl"] += 1
-            else:
-                by_direction[direction]["open"] += 1
 
     return {
-        "total": total,
-        "tp": tp,
+        "total_setups": total_setups,
+        "activated": activated,
+        "cancelled": cancelled,
+        "tp1": tp1,
+        "tp2": tp2,
         "sl": sl,
         "open": open_count,
-        "closed": closed,
+        "closed_for_wr": closed_for_wr,
         "win_rate": win_rate,
+        "tp2_rate": tp2_rate,
         "by_symbol": by_symbol,
         "by_direction": by_direction,
     }
@@ -144,55 +175,60 @@ def build_stats(days: Optional[int] = None) -> Dict:
 
 def parse_days(text: str):
     text = str(text)
-
     for days in [3, 7, 14, 30, 60, 90]:
         if str(days) in text:
             return days
-
-    if "\u06a9\u0644" in text or "\u0647\u0645\u0647" in text:
+    if "کل" in text or "همه" in text:
         return None
-
     return None
 
 
 def format_stats(days: Optional[int] = None) -> str:
     stats = build_stats(days)
-    title = "\u0622\u0645\u0627\u0631 \u06a9\u0644" if not days else f"\u0622\u0645\u0627\u0631 {days} \u0631\u0648\u0632 \u0627\u062e\u06cc\u0631"
+    title = "آمار کل" if not days else f"آمار {days} روز اخیر"
 
     lines = [
-        f"\U0001f4c8 {title}",
+        f"📈 {title}",
         "",
-        f"\u06a9\u0644 \u0633\u06cc\u06af\u0646\u0627\u0644\u200c\u0647\u0627\u06cc \u062b\u0628\u062a\u200c\u0634\u062f\u0647: {stats['total']}",
-        f"\u062a\u0639\u062f\u0627\u062f TP1: {stats['tp']}",
-        f"\u062a\u0639\u062f\u0627\u062f SL: {stats['sl']}",
-        f"\u0633\u06cc\u06af\u0646\u0627\u0644\u200c\u0647\u0627\u06cc \u0628\u0627\u0632: {stats['open']}",
-        f"\u0648\u06cc\u0646\u200c\u0631\u06cc\u062a \u0633\u06cc\u06af\u0646\u0627\u0644\u200c\u0647\u0627\u06cc \u0628\u0633\u062a\u0647\u200c\u0634\u062f\u0647: {stats['win_rate']}\u066a",
+        f"ستاپ‌های ساخته‌شده: {stats['total_setups']}",
+        f"ورودهای فعال‌شده: {stats['activated']}",
+        f"لغوشده: {stats['cancelled']}",
+        f"TP1: {stats['tp1']}",
+        f"TP2: {stats['tp2']}  | نرخ TP2 بعد از TP1: {stats['tp2_rate']}٪",
+        f"SL: {stats['sl']}",
+        f"باز/درحال پیگیری: {stats['open']}",
+        f"وین‌ریت: {stats['win_rate']}٪",
         "",
-        "\U0001f4ca \u0639\u0645\u0644\u06a9\u0631\u062f \u0628\u0631 \u0627\u0633\u0627\u0633 \u062c\u0647\u062a:",
+        "نکته: وین‌ریت فقط با TP1 و SL حساب شده؛ TP2 جداگانه است.",
+        "",
+        "📊 عملکرد جهت‌ها:",
     ]
 
-    direction_names = {
-        "BUY": "\u062e\u0631\u06cc\u062f",
-        "SELL": "\u0641\u0631\u0648\u0634",
-    }
-
+    direction_names = {"BUY": "خرید", "SELL": "فروش"}
     for direction in ["BUY", "SELL"]:
         item = stats["by_direction"][direction]
-        name = direction_names[direction]
         lines.append(
-            f"\u2022 {name}: \u06a9\u0644 {item['total']} | TP1 {item['tp']} | SL {item['sl']} | \u0628\u0627\u0632 {item['open']}"
+            f"• {direction_names[direction]}: ستاپ {item['setups']} | فعال {item['activated']} | TP1 {item['tp1']} | TP2 {item['tp2']} | SL {item['sl']}"
         )
 
     if stats["by_symbol"]:
         lines.append("")
-        lines.append("\U0001f4cc \u0639\u0645\u0644\u06a9\u0631\u062f \u0628\u0631 \u0627\u0633\u0627\u0633 \u0646\u0645\u0627\u062f:")
-        for symbol, item in stats["by_symbol"].items():
+        lines.append("📌 عملکرد نمادها:")
+        sorted_symbols = sorted(
+            stats["by_symbol"].items(),
+            key=lambda kv: (kv[1].get("tp1", 0), kv[1].get("activated", 0)),
+            reverse=True,
+        )
+        for symbol, item in sorted_symbols[:12]:
             lines.append(
-                f"\u2022 {symbol}: \u06a9\u0644 {item['total']} | TP1 {item['tp']} | SL {item['sl']} | \u0628\u0627\u0632 {item['open']}"
+                f"• {symbol}: ستاپ {item['setups']} | فعال {item['activated']} | TP1 {item['tp1']} | TP2 {item['tp2']} | SL {item['sl']}"
             )
 
-    if stats["total"] == 0:
+    if stats["total_setups"] == 0:
         lines.append("")
-        lines.append("\u0647\u0646\u0648\u0632 \u0647\u06cc\u0686 \u0633\u06cc\u06af\u0646\u0627\u0644\u06cc \u0628\u0631\u0627\u06cc \u0622\u0645\u0627\u0631 \u062b\u0628\u062a \u0646\u0634\u062f\u0647 \u0627\u0633\u062a.")
+        lines.append("هنوز هیچ ستاپی برای آمار ثبت نشده است.")
 
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if len(text) > 3800:
+        text = text[:3700] + "\n\n... گزارش کوتاه شد."
+    return text
