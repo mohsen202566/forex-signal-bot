@@ -37,6 +37,8 @@ AUTO_SIGNAL_SCORE = int(os.getenv("AUTO_SIGNAL_SCORE", "80"))
 AUTO_SCAN_INTERVAL_MINUTES = int(os.getenv("AUTO_SCAN_INTERVAL_MINUTES", "3"))
 AUTO_SIGNAL_COOLDOWN_MINUTES = int(os.getenv("AUTO_SIGNAL_COOLDOWN_MINUTES", "120"))
 
+WATCHLIST_MAX_SETUPS = int(os.getenv("WATCHLIST_MAX_SETUPS", "20"))
+
 # این مقادیر فقط برای هشدار خبری استفاده می‌شوند، نه بلاک کردن سیگنال.
 NEWS_WARNING_BEFORE_MINUTES = int(os.getenv("NEWS_WARNING_BEFORE_MINUTES", "30"))
 NEWS_WARNING_AFTER_MINUTES = int(os.getenv("NEWS_WARNING_AFTER_MINUTES", "30"))
