@@ -42,9 +42,11 @@ except Exception:
 from news_engine import format_news_message
 from statistics import format_stats, parse_days, reset_stats
 from tracker import (
+    activate_signal,
     add_active_signal,
     check_active_signals,
     format_active_signals,
+    list_active_signals,
     make_signal_id,
     parse_signal_from_text,
 )
@@ -53,7 +55,7 @@ try:
     from tracker import parse_signal_from_result
 except Exception:
     def parse_signal_from_result(result: Dict[str, Any]):
-        if not is_valid_trade_signal(result):
+        if not is_trade_setup(result):
             return None
         signal_id = result.get("signal_id") or make_signal_id(result.get("symbol", "SIGNAL"))
         result["signal_id"] = signal_id
@@ -104,20 +106,25 @@ def direction_fa(direction: Optional[str]) -> str:
 
 def status_fa(status: Optional[str]) -> str:
     return {
-        "SIGNAL": "✅ سیگنال فعال",
+        "SIGNAL": "✅ ورود فعال",
+        "SETUP": "👀 منتظر فعال‌سازی ورود",
         "PREDICTION_ONLY": "🔎 فقط پیش‌بینی؛ ورود هنوز کامل نیست",
         "NO_TRADE": "⏸ بدون معامله",
         "NEWS_BLOCKED": "⚠️ هشدار خبر؛ سیگنال نباید به خاطر خبر بلاک شود",
     }.get(status or "", status or "نامشخص")
 
 
-def is_valid_trade_signal(result: Dict[str, Any]) -> bool:
+def is_trade_setup(result: Dict[str, Any]) -> bool:
     return (
-        result.get("status") == "SIGNAL"
+        result.get("status") in ("SETUP", "SIGNAL")
         and result.get("entry") is not None
         and result.get("stop_loss") is not None
         and result.get("tp1") is not None
     )
+
+
+def is_valid_trade_signal(result: Dict[str, Any]) -> bool:
+    return is_trade_setup(result) and result.get("status") == "SIGNAL"
 
 
 def ensure_access(update: Update) -> bool:
@@ -173,53 +180,59 @@ def format_analysis(result: Dict[str, Any]) -> str:
     symbol = result.get("symbol", "UNKNOWN")
     display = get_pair_display_name(symbol)
 
-    reasons = "\n".join([f"• {r}" for r in result.get("reasons", [])])
-    if not reasons:
-        reasons = "• دلیل خاصی ثبت نشد."
-
-    entry_reasons = "\n".join([f"• {r}" for r in result.get("entry_reasons", [])])
-    if not entry_reasons:
-        entry_reasons = "• تریگر ورود هنوز کامل نیست."
+    reasons = "\n".join([f"• {r}" for r in result.get("reasons", [])]) or "• دلیل خاصی ثبت نشد."
+    entry_reasons = "\n".join([f"• {r}" for r in result.get("entry_reasons", [])]) or "• تریگر ورود هنوز کامل نیست."
 
     tf = result.get("tf_summary", {}) or {}
     tf_lines = []
-    for name in ["4H", "1H", "15M", "5M"]:
+    for name in ["4H", "1H", "30M", "15M", "5M"]:
         item = tf.get(name, {})
         if item:
             tf_lines.append(
                 f"{name}: RSI {item.get('rsi')} | ADX {item.get('adx')} | "
                 f"EMA50 {item.get('ema50')} | EMA200 {item.get('ema200')}"
             )
-
     tf_text = "\n".join(tf_lines) if tf_lines else "داده تایم‌فریم‌ها کامل نیست."
 
     signal_id = None
-    if is_valid_trade_signal(result):
+    if is_trade_setup(result):
         signal_id = result.get("signal_id") or make_signal_id(symbol)
         result["signal_id"] = signal_id
 
+    if result.get("status") == "SIGNAL":
+        title = "✅ ورود فعال شد"
+        mode = "PREDICTIVE_TRIGGER"
+    elif result.get("status") == "SETUP":
+        title = "🚨 سیگنال آماده"
+        mode = "PREDICTIVE_SETUP"
+    else:
+        title = f"📊 تحلیل {display} ({symbol})"
+        mode = "PREDICTION_ONLY"
+
     lines = [
-        f"📊 تحلیل {display} ({symbol})",
+        title,
+        f"وضعیت: {status_fa(result.get('status'))}",
+        f"نماد: {display} ({symbol})",
+        f"جهت: {direction_fa(result.get('direction'))}",
+        f"حالت ورود: {mode}",
         "",
         f"💰 قیمت فعلی: {result.get('price')}",
-        f"📍 جهت پیش‌بینی: {direction_fa(result.get('direction'))}",
-        f"⭐ امتیاز پیش‌بینی: {result.get('prediction_score')} / 100",
-        f"🟢 امتیاز خرید: {result.get('buy_score')}",
-        f"🔴 امتیاز فروش: {result.get('sell_score')}",
-        f"⚙️ وضعیت: {status_fa(result.get('status'))}",
+        f"⭐ قدرت پیش‌بینی: {result.get('prediction_score')} / 100",
+        f"⚡ آمادگی ورود سریع: {result.get('entry_score', 0)} / 100",
+        f"🟢 قدرت خرید: {result.get('buy_score')}",
+        f"🔴 قدرت فروش: {result.get('sell_score')}",
         "",
-        "🧭 خلاصه تایم‌فریم‌ها:",
+        "🧭 جهت کلی تایم‌فریم‌ها:",
         tf_text,
         "",
         "🧠 دلایل پیش‌بینی:",
         reasons,
         "",
-        "⚡ وضعیت ورود سریع 5M:",
-        f"امتیاز ورود: {result.get('entry_score', 0)} / 100",
+        "⚡ وضعیت ورود 5M/15M:",
         entry_reasons,
     ]
 
-    if is_valid_trade_signal(result):
+    if is_trade_setup(result):
         lines.extend([
             "",
             "🎯 سطوح معامله:",
@@ -229,17 +242,23 @@ def format_analysis(result: Dict[str, Any]) -> str:
             f"TP2: {result.get('tp2', '')}",
             "",
             f"شناسه: {signal_id}",
-            "برای زیر نظر گرفتن، روی همین پیام ریپلای کن و بنویس: زیر نظر بگیر",
         ])
+        if result.get("status") == "SETUP":
+            lines.append("این ستاپ خودکار زیر نظر می‌ماند؛ وقتی شرایط ورود کامل شد روی همین پیام اعلام می‌شود: ورود فعال شد.")
+        else:
+            lines.append("مانیتورینگ خودکار فعال است تا TP1 / TP2 / SL بررسی شود.")
     else:
         lines.extend([
             "",
-            "❌ این تحلیل هنوز سیگنال قابل ورود نیست.",
+            "❌ این تحلیل هنوز ستاپ قابل معامله نیست.",
             "Entry / SL / TP فعال نیست.",
         ])
 
     lines.extend(["", _format_news_warning(result.get("news", {}) or {})])
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        text = text[:3800] + "\n\n... پیام کوتاه شد."
+    return text
 
 
 async def deny(update: Update):
@@ -368,7 +387,13 @@ async def send_analysis(update: Update, pair: str):
         await update.message.reply_text(f"❌ خطا در تحلیل {display} ({pair})\n\n{result.get('error')}")
         return
 
-    await update.message.reply_text(format_analysis(result))
+    sent = await update.message.reply_text(format_analysis(result))
+    if is_trade_setup(result):
+        signal = parse_signal_from_result(result)
+        if signal:
+            signal["message_id"] = sent.message_id
+            signal["chat_id"] = update.effective_chat.id
+            add_active_signal(signal)
 
 
 async def best_signal(update: Update):
@@ -399,7 +424,7 @@ async def best_signal(update: Update):
         await update.message.reply_text("\n".join(lines))
         return
 
-    valid_signals = [r for r in results if is_valid_trade_signal(r)]
+    valid_signals = [r for r in results if is_trade_setup(r)]
     valid_signals = sorted(
         valid_signals,
         key=lambda x: (_safe_float(x.get("prediction_score")), _safe_float(x.get("entry_score"))),
@@ -407,7 +432,7 @@ async def best_signal(update: Update):
     )
 
     if not valid_signals:
-        msg = "❌ فعلاً سیگنال قابل ورود وجود ندارد."
+        msg = "❌ فعلاً ستاپ قابل معامله وجود ندارد."
         if failed_items:
             msg += f"\nنمادهای بدون دیتای موفق: {len(failed_items)}"
         await update.message.reply_text(msg)
@@ -419,27 +444,13 @@ async def best_signal(update: Update):
         signal_id = r.get("signal_id") or make_signal_id(symbol)
         r["signal_id"] = signal_id
 
-        lines = [
-            f"🔥 سیگنال قابل ورود #{i}",
-            "",
-            f"نماد: {display} ({symbol})",
-            f"📍 جهت: {direction_fa(r.get('direction'))}",
-            f"⭐ پیش‌بینی: {r.get('prediction_score')} / 100",
-            f"⚡ ورود: {r.get('entry_score', 0)} / 100",
-            f"⚙️ وضعیت: {status_fa(r.get('status'))}",
-            "",
-            "🎯 سطوح معامله:",
-            f"Entry: {r.get('entry')}",
-            f"SL: {r.get('stop_loss')}",
-            f"TP1: {r.get('tp1')}",
-            f"TP2: {r.get('tp2', '')}",
-            "",
-            _format_news_warning(r.get("news", {}) or {}),
-            "",
-            f"شناسه: {signal_id}",
-            "برای زیر نظر گرفتن، روی همین پیام ریپلای کن و بنویس: زیر نظر بگیر",
-        ]
-        await update.message.reply_text("\n".join(lines))
+        prefix = f"🔥 بهترین ستاپ #{i}\n\n"
+        sent = await update.message.reply_text(prefix + format_analysis(r))
+        signal = parse_signal_from_result(r)
+        if signal:
+            signal["message_id"] = sent.message_id
+            signal["chat_id"] = update.effective_chat.id
+            add_active_signal(signal)
 
 
 async def market_overview(update: Update):
@@ -646,17 +657,60 @@ async def watch_signal(update: Update):
         await update.message.reply_text("این سیگنال قبلاً زیر نظر گرفته شده بود.")
 
 
+async def check_setup_activations(app: Application):
+    """Activate stored SETUP signals when the fresh 5M/15M trigger becomes valid."""
+    if not OWNER_ID:
+        return
+
+    for s in list_active_signals():
+        try:
+            if s.get("stage") != "SETUP":
+                continue
+
+            symbol = s.get("symbol")
+            r = run_analysis(symbol)
+            if not r.get("success"):
+                continue
+
+            if (
+                r.get("status") == "SIGNAL"
+                and r.get("direction") == s.get("direction")
+                and r.get("entry") is not None
+                and _safe_float(r.get("prediction_score")) >= 58
+            ):
+                r["signal_id"] = s.get("signal_id")
+                text = "✅ ورود فعال شد\n\n" + format_analysis(r)
+                sent = await app.bot.send_message(
+                    chat_id=s.get("chat_id") or OWNER_ID,
+                    text=text,
+                    reply_to_message_id=s.get("message_id"),
+                    allow_sending_without_reply=True,
+                )
+                activate_signal(s.get("signal_id"), r, sent.message_id)
+        except Exception as e:
+            remember_error("check_setup_activations", s.get("symbol", ""), e, traceback.format_exc())
+            logger.warning("Setup activation check failed: %s", e)
+
+
 async def check_tracker_events(app: Application):
     try:
         if not OWNER_ID:
             return
+        await check_setup_activations(app)
         events = check_active_signals()
         for ev in events:
             s = ev["signal"]
-            res = "✅ TP1 خورد" if ev["result"] == "TP1" else "❌ SL خورد"
+            if ev["result"] == "TP1":
+                res = "✅ TP1 خورد"
+            elif ev["result"] == "TP2":
+                res = "🎯 TP2 خورد"
+            else:
+                res = "❌ SL خورد"
             await app.bot.send_message(
-                chat_id=OWNER_ID,
+                chat_id=s.get("chat_id") or OWNER_ID,
                 text=f"{res}\n{s.get('symbol')} | قیمت فعلی: {ev['price']}\nشناسه: {s.get('signal_id')}",
+                reply_to_message_id=s.get("activation_message_id") or s.get("message_id"),
+                allow_sending_without_reply=True,
             )
     except Exception as e:
         remember_error("check_tracker_events", "", e, traceback.format_exc())
@@ -682,12 +736,16 @@ async def auto_signal_loop(app: Application):
                         continue
                     if not r.get("success"):
                         continue
-                    if is_valid_trade_signal(r) and _safe_float(r.get("prediction_score")) >= AUTO_SIGNAL_SCORE:
+                    if is_trade_setup(r) and _safe_float(r.get("prediction_score")) >= AUTO_SIGNAL_SCORE:
                         signal = parse_signal_from_result(r)
                         if signal:
                             r["signal_id"] = signal["signal_id"]
-                        text = "🚨 اتو سیگنال فارکس\n\n" + format_analysis(r)
-                        await app.bot.send_message(chat_id=OWNER_ID, text=text)
+                        text = "🚨 اتو ستاپ فارکس\n\n" + format_analysis(r)
+                        sent = await app.bot.send_message(chat_id=OWNER_ID, text=text)
+                        if signal:
+                            signal["message_id"] = sent.message_id
+                            signal["chat_id"] = OWNER_ID
+                            add_active_signal(signal)
                         LAST_AUTO_SIGNALS[pair] = now
             await asyncio.sleep(max(60, AUTO_SCAN_INTERVAL_MINUTES * 60))
         except Exception as e:
