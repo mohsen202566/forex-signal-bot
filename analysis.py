@@ -336,7 +336,84 @@ def _apply_higher_tf_context_bias(buy_score: float, sell_score: float, analyses:
     return buy_score, sell_score, None, None
 
 
-def analyze_pair(symbol: str) -> Dict:
+
+def _range_and_weakness_context(direction: str, prediction_score: float, buy_percent: float, sell_percent: float, analyses: Dict, entry_confirmations: Dict) -> Dict:
+    """Return compact smart-cancel / weakness context for tracker and bot.
+
+    This is a soft diagnostic layer, not a hard signal generator. It helps the
+    watchlist cancel stale/ranging/reversed setups without deleting any old bot
+    features.
+    """
+    reasons = []
+    weakness = 0
+
+    gap = abs(_safe_float(buy_percent) - _safe_float(sell_percent))
+    if direction == "NEUTRAL" or gap < MIN_DIRECTION_GAP:
+        weakness += 35
+        reasons.append("اختلاف خرید/فروش کم شده و بازار به رنج/خنثی نزدیک است.")
+
+    entry_tf = analyses.get("5M") or analyses.get("15M")
+    if entry_tf and entry_tf.get("last"):
+        last = entry_tf["last"]
+        adx = _safe_float(last.get("adx"))
+        macd_hist = _safe_float(last.get("macd_hist"))
+        prev_macd_hist = _safe_float(last.get("prev_macd_hist"))
+        rsi = _safe_float(last.get("rsi"))
+        prev_rsi = _safe_float(last.get("prev_rsi"))
+
+        if adx < 14:
+            weakness += 25
+            reasons.append("ADX تایم‌فریم ورود پایین است؛ احتمال رنج شدن بازار بالاست.")
+
+        if direction == "BUY":
+            if macd_hist < prev_macd_hist:
+                weakness += 20
+                reasons.append("MACD Histogram در جهت خرید ضعیف شده است.")
+            if rsi < prev_rsi:
+                weakness += 15
+                reasons.append("شیب RSI برخلاف خرید برگشته است.")
+        elif direction == "SELL":
+            if macd_hist > prev_macd_hist:
+                weakness += 20
+                reasons.append("MACD Histogram در جهت فروش ضعیف شده است.")
+            if rsi > prev_rsi:
+                weakness += 15
+                reasons.append("شیب RSI برخلاف فروش برگشته است.")
+
+    power_ok = bool(entry_confirmations.get("power_ok"))
+    fresh_ok = bool(entry_confirmations.get("fresh_momentum_ok"))
+    if direction == "BUY":
+        buy2 = _safe_float(entry_confirmations.get("buy2"), 50)
+        sell2 = _safe_float(entry_confirmations.get("sell2"), 50)
+        if sell2 > buy2:
+            weakness += 25
+            reasons.append("Sell Power کوتاه‌مدت از Buy Power جلو زده است.")
+    elif direction == "SELL":
+        buy2 = _safe_float(entry_confirmations.get("buy2"), 50)
+        sell2 = _safe_float(entry_confirmations.get("sell2"), 50)
+        if buy2 > sell2:
+            weakness += 25
+            reasons.append("Buy Power کوتاه‌مدت از Sell Power جلو زده است.")
+
+    if not power_ok and not fresh_ok:
+        weakness += 15
+        reasons.append("قدرت سریع و Fresh Momentum هنوز تایید نشده‌اند.")
+
+    weakness = min(100, int(weakness))
+    range_detected = direction == "NEUTRAL" or gap < MIN_DIRECTION_GAP or weakness >= 75
+    if range_detected and not reasons:
+        reasons.append("بازار حالت رنج/نامشخص دارد.")
+
+    return {
+        "weakness_score": weakness,
+        "weakness_reasons": reasons[:6],
+        "range_detected": range_detected,
+        "range_gap": round(gap, 2),
+        "smart_cancel": range_detected or weakness >= 75,
+        "cancel_reason": "range_or_momentum_lost" if range_detected or weakness >= 75 else "",
+    }
+
+def analyze_pair(symbol: str, activation_check: bool = False) -> Dict:
     price_data = get_latest_price(symbol)
     if not price_data.get("success"):
         return {"success": False, "error": price_data.get("error", "خطا در دریافت قیمت")}
@@ -397,7 +474,7 @@ def analyze_pair(symbol: str) -> Dict:
             atr = _safe_float((entry_tf.get("last") or {}).get("atr"))
             entry, stop_loss, tp1, tp2 = _make_levels(symbol, direction, _safe_float(price_data.get("price")), atr)
             if entry is not None and stop_loss is not None and tp1 is not None:
-                if entry_score >= ACTIVATION_MIN_SCORE and activation_confirmed:
+                if activation_check and entry_score >= ACTIVATION_MIN_SCORE and activation_confirmed:
                     status = "SIGNAL"
                 else:
                     status = "SETUP"
@@ -405,6 +482,7 @@ def analyze_pair(symbol: str) -> Dict:
             status = "PREDICTION_ONLY"
     elif direction in ("BUY", "SELL"):
         status = "PREDICTION_ONLY"
+    smart_context = _range_and_weakness_context(direction, prediction_score, buy_percent, sell_percent, analyses, entry_confirmations)
     news = get_news_risk(symbol)
     return {
         "success": True,
@@ -423,6 +501,12 @@ def analyze_pair(symbol: str) -> Dict:
         "reasons": reasons or ["دلیل مشخصی ثبت نشد."],
         "entry_reasons": entry_reasons or ["تریگر ورود سریع هنوز کامل نیست."],
         "entry_confirmations": entry_confirmations,
+        "weakness_score": smart_context.get("weakness_score", 0),
+        "weakness_reasons": smart_context.get("weakness_reasons", []),
+        "range_detected": smart_context.get("range_detected", False),
+        "range_gap": smart_context.get("range_gap", 0),
+        "smart_cancel": smart_context.get("smart_cancel", False),
+        "cancel_reason": smart_context.get("cancel_reason", ""),
         "tf_summary": tf_summary,
         "news": news,
         "errors": errors,
