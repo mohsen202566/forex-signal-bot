@@ -33,11 +33,12 @@ MIN_SIGNAL_SCORE = int(os.getenv("MIN_SIGNAL_SCORE", "75"))
 BEST_SIGNAL_COUNT = int(os.getenv("BEST_SIGNAL_COUNT", "5"))
 
 AUTO_SIGNAL_ENABLED = os.getenv("AUTO_SIGNAL_ENABLED", "true").lower() in ("1", "true", "yes", "on")
-AUTO_SIGNAL_SCORE = int(os.getenv("AUTO_SIGNAL_SCORE", "80"))
+AUTO_SIGNAL_SCORE_RAW = int(os.getenv("AUTO_SIGNAL_SCORE", "75"))
+# For setup-only Forex bot, 85 is often too strict and can stop auto setups.
+# Cap the effective threshold to keep scan balanced while still requiring quality setups.
+AUTO_SIGNAL_SCORE = min(AUTO_SIGNAL_SCORE_RAW, 80)
 AUTO_SCAN_INTERVAL_MINUTES = int(os.getenv("AUTO_SCAN_INTERVAL_MINUTES", "3"))
 AUTO_SIGNAL_COOLDOWN_MINUTES = int(os.getenv("AUTO_SIGNAL_COOLDOWN_MINUTES", "120"))
-
-WATCHLIST_MAX_SETUPS = int(os.getenv("WATCHLIST_MAX_SETUPS", "20"))
 
 # این مقادیر فقط برای هشدار خبری استفاده می‌شوند، نه بلاک کردن سیگنال.
 NEWS_WARNING_BEFORE_MINUTES = int(os.getenv("NEWS_WARNING_BEFORE_MINUTES", "30"))
