@@ -66,9 +66,6 @@ DEFAULT_RISK_PERCENT = 1.0
 MAX_RISK_PERCENT = 2.0
 BOT_LANGUAGE = "fa"
 
-WATCHLIST_MAX_SETUPS = int(os.getenv("WATCHLIST_MAX_SETUPS", "20"))
-
-
 # Watchlist / smart setup management
 STALE_SETUP_CANCEL_MINUTES = int(os.getenv("STALE_SETUP_CANCEL_MINUTES", "35"))
 ENABLE_AUTO_REVERSE = os.getenv("ENABLE_AUTO_REVERSE", "true").lower() in ("1", "true", "yes", "on")
