@@ -2,11 +2,12 @@
 """Prediction-focused Forex analysis engine.
 
 Architecture:
+- Classic direct-signal mode: no pending SETUP messages.
 - 4H/1H = soft higher-timeframe market direction context
 - 30M/15M = setup quality and readiness
-- 5M = fast activation trigger
-- Buy/Sell Power 1C/2C = activation confirmation only, not prediction scoring
-- Fresh Momentum = activation confirmation only, not prediction scoring
+- 5M = fast entry trigger
+- Buy/Sell Power 1C/2C = fast entry confirmation
+- Fresh Momentum = fast entry confirmation
 - News is warning-only and never blocks signals
 
 This file is UTF-8/Persian safe and VPS-safe.
@@ -23,7 +24,7 @@ from news_engine import get_news_risk
 
 TIMEFRAMES = {"4H": "4h", "1H": "1h", "30M": "30min", "15M": "15min", "5M": "5min"}
 
-SETUP_MIN_SCORE = 62
+SIGNAL_MIN_SCORE = 62
 ACTIVATION_MIN_SCORE = 70
 MIN_DIRECTION_GAP = 8
 NEUTRAL_SCORE_BASE = 10
@@ -466,18 +467,26 @@ def analyze_pair(symbol: str, activation_check: bool = False) -> Dict:
     entry_confirmations = {}
     status = "NO_TRADE"
     entry = stop_loss = tp1 = tp2 = None
-    if direction in ("BUY", "SELL") and prediction_score >= SETUP_MIN_SCORE:
+    if direction in ("BUY", "SELL") and prediction_score >= SIGNAL_MIN_SCORE:
         entry_tf = analyses.get("5M") or analyses.get("15M")
         confirm_tf = analyses.get("15M")
         if entry_tf:
             entry_score, entry_reasons, activation_confirmed, entry_confirmations = _fast_entry_score(direction, entry_tf, confirm_tf)
             atr = _safe_float((entry_tf.get("last") or {}).get("atr"))
             entry, stop_loss, tp1, tp2 = _make_levels(symbol, direction, _safe_float(price_data.get("price")), atr)
-            if entry is not None and stop_loss is not None and tp1 is not None:
-                if activation_check and entry_score >= ACTIVATION_MIN_SCORE and activation_confirmed:
-                    status = "SIGNAL"
-                else:
-                    status = "SETUP"
+            if (
+                entry is not None
+                and stop_loss is not None
+                and tp1 is not None
+                and entry_score >= ACTIVATION_MIN_SCORE
+                and activation_confirmed
+            ):
+                # Classic mode: only send a trade when the fast entry is already valid.
+                status = "SIGNAL"
+            else:
+                # No pending setup is created anymore. The bot waits for a real entry signal.
+                status = "PREDICTION_ONLY"
+                entry = stop_loss = tp1 = tp2 = None
         else:
             status = "PREDICTION_ONLY"
     elif direction in ("BUY", "SELL"):
