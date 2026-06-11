@@ -39,115 +39,43 @@ def save_stats(data: Dict):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def _utc_now():
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
-
-
-def _find_signal(data: Dict, signal_id: str):
-    for signal in data.get("signals", []):
-        if str(signal.get("signal_id")) == str(signal_id):
-            return signal
-    return None
-
-
-def _apply_result_fields(signal: Dict, result: str, reason: str = "", now: Optional[str] = None):
-    now = now or _utc_now()
-    previous_result = signal.get("result")
-
-    # Preserve TP1 win flag even if result later becomes TP2.
-    if result == "TP2":
-        signal["tp1_hit"] = True
-        signal.setdefault("tp1_hit_at", now)
-
-    signal["result"] = result
-    signal["close_reason"] = reason
-
-    if result == "ACTIVATED":
-        signal["stage"] = "ACTIVATED"
-        signal.setdefault("activated_at", now)
-    elif result == "TP1":
-        signal["stage"] = "ACTIVATED"
-        signal["tp1_hit"] = True
-        signal.setdefault("tp1_hit_at", now)
-    elif result == "TP2":
-        signal["stage"] = "ACTIVATED"
-        signal["tp2_hit"] = True
-        signal["closed_at"] = now
-    elif result == "SL":
-        signal["stage"] = "ACTIVATED"
-        signal["sl_hit"] = True
-        signal["closed_at"] = now
-    elif result == "CANCELLED":
-        signal["closed_at"] = now
-
-    # Keep a compact event trail for debugging without changing old stats format.
-    events = signal.setdefault("events", [])
-    if not events or events[-1].get("result") != result:
-        events.append({"time": now, "result": result, "reason": reason})
-
-
-
 def record_signal(signal: Dict):
-    """Record SETUP_CREATED once per signal_id.
-
-    This prevents duplicate stats if the same setup is added again after restart
-    or reply-based monitoring.
-    """
     data = load_stats()
     signal = dict(signal)
-    signal.setdefault("created_at", _utc_now())
+    signal.setdefault("created_at", datetime.utcnow().isoformat(timespec="seconds") + "Z")
     signal.setdefault("result", "SETUP_CREATED")
     signal.setdefault("stage", "SETUP")
     signal.setdefault("tp1_hit", False)
-
-    signal_id = str(signal.get("signal_id") or "")
-    existing = _find_signal(data, signal_id) if signal_id else None
-    if existing:
-        # Merge useful fields without resetting the current result.
-        for key in ("symbol", "direction", "entry", "stop_loss", "tp1", "tp2", "score", "entry_score", "message_id", "chat_id"):
-            incoming = signal.get(key)
-            current = existing.get(key)
-            if incoming is not None and (current is None or current == "" or current == "UNKNOWN"):
-                existing[key] = incoming
-    else:
-        data["signals"].append(signal)
-
+    data["signals"].append(signal)
     save_stats(data)
 
 
 def update_signal_result(signal_id: str, result: str, reason: str = ""):
-    """Update a signal result; if stats are missing, backfill a minimal row.
-
-    This fixes the case where active_signals.json still has old tracked signals
-    but stats.json was reset/replaced during an update. TP/SL will no longer be
-    sent in Telegram while stats stay zero.
-    """
     data = load_stats()
-    now = _utc_now()
-    signal_id = str(signal_id or "")
-    if not signal_id:
-        return False
+    updated = False
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
-    signal = _find_signal(data, signal_id)
-    created_missing = False
+    for signal in data["signals"]:
+        if str(signal.get("signal_id")) == str(signal_id):
+            signal["result"] = result
+            signal["close_reason"] = reason
+            if result == "ACTIVATED":
+                signal["stage"] = "ACTIVATED"
+                signal["activated_at"] = now
+            elif result == "TP1":
+                signal["tp1_hit"] = True
+                signal["tp1_hit_at"] = now
+            elif result in ("TP2", "SL", "CANCELLED"):
+                signal["closed_at"] = now
+                if result == "TP2":
+                    signal["tp2_hit"] = True
+                if result == "SL":
+                    signal["sl_hit"] = True
+            updated = True
+            break
 
-    if signal is None:
-        signal = {
-            "signal_id": signal_id,
-            "symbol": "UNKNOWN",
-            "direction": "",
-            "created_at": now,
-            "stage": "ACTIVATED" if result in ("ACTIVATED", "TP1", "TP2", "SL") else "SETUP",
-            "result": "SETUP_CREATED",
-            "tp1_hit": False,
-            "backfilled": True,
-        }
-        data["signals"].append(signal)
-        created_missing = True
-
-    _apply_result_fields(signal, result, reason, now)
     save_stats(data)
-    return not created_missing
+    return updated
 
 
 def reset_stats():
