@@ -29,12 +29,6 @@ from config import (
     FOREX_PAIRS,
     OWNER_ID,
     TWELVE_DATA_API_KEY,
-    STALE_SETUP_CANCEL_MINUTES,
-    ENABLE_AUTO_REVERSE,
-    ENABLE_SMART_CANCEL,
-    ENABLE_WEAKNESS_WARNING,
-    SMART_CANCEL_MIN_PREDICTION_SCORE,
-    SMART_CANCEL_WEAKNESS_SCORE,
 )
 from data_provider import get_candles, get_latest_price
 from forex_pairs import normalize_pair
@@ -48,15 +42,12 @@ except Exception:
 from news_engine import format_news_message
 from statistics import format_stats, parse_days, reset_stats
 from tracker import (
-    activate_signal,
     add_active_signal,
     check_active_signals,
     format_active_signals,
     list_active_signals,
     make_signal_id,
     parse_signal_from_text,
-    prune_stale_setups,
-    cancel_setup_signal,
 )
 
 try:
@@ -114,8 +105,7 @@ def direction_fa(direction: Optional[str]) -> str:
 
 def status_fa(status: Optional[str]) -> str:
     return {
-        "SIGNAL": "✅ ورود فعال",
-        "SETUP": "👀 منتظر فعال‌سازی ورود",
+        "SIGNAL": "✅ سیگنال ورود فعال",
         "PREDICTION_ONLY": "🔎 فقط پیش‌بینی؛ ورود هنوز کامل نیست",
         "NO_TRADE": "⏸ بدون معامله",
         "NEWS_BLOCKED": "⚠️ هشدار خبر؛ سیگنال نباید به خاطر خبر بلاک شود",
@@ -123,21 +113,22 @@ def status_fa(status: Optional[str]) -> str:
 
 
 def is_trade_setup(result: Dict[str, Any]) -> bool:
+    # Backward-compatible name; in classic mode only active SIGNAL is tradable.
+    return is_valid_trade_signal(result)
+
+
+def is_initial_setup(result: Dict[str, Any]) -> bool:
+    # Setup mode is removed. Keep this helper for older call sites.
+    return is_valid_trade_signal(result)
+
+
+def is_valid_trade_signal(result: Dict[str, Any]) -> bool:
     return (
-        result.get("status") in ("SETUP", "SIGNAL")
+        result.get("status") == "SIGNAL"
         and result.get("entry") is not None
         and result.get("stop_loss") is not None
         and result.get("tp1") is not None
     )
-
-
-def is_initial_setup(result: Dict[str, Any]) -> bool:
-    """Initial and auto messages must be SETUP only; SIGNAL is only for activation replies."""
-    return is_trade_setup(result) and result.get("status") == "SETUP"
-
-
-def is_valid_trade_signal(result: Dict[str, Any]) -> bool:
-    return is_trade_setup(result) and result.get("status") == "SIGNAL"
 
 
 def _symbol_already_watched(symbol: str) -> bool:
@@ -146,8 +137,11 @@ def _symbol_already_watched(symbol: str) -> bool:
 
 
 def can_add_to_watchlist(symbol: str) -> bool:
-    """No watchlist/max-slot limit. Keep this helper for old call sites."""
-    return True
+    """Classic mode has no max-slot limit.
+
+    Duplicate symbols are still avoided to prevent repeated tracking of the same active signal.
+    """
+    return not _symbol_already_watched(symbol)
 
 
 def ensure_access(update: Update) -> bool:
@@ -174,46 +168,6 @@ def _short_error(value: Any, max_len: int = 140) -> str:
     if len(text) > max_len:
         text = text[:max_len - 3] + "..."
     return text
-
-
-def safe_format_stats(days: Optional[int] = None) -> str:
-    """Format stats safely even if statistics.py is from a mixed setup/direct version."""
-    try:
-        return format_stats(days)
-    except KeyError as e:
-        if str(e).strip("'\"") != "total_setups":
-            raise
-        try:
-            from statistics import build_stats
-            stats = build_stats(days)
-            total = stats.get("total_setups", stats.get("total_signals", 0))
-            activated = stats.get("activated", 0)
-            cancelled = stats.get("cancelled", 0)
-            tp1 = stats.get("tp1", 0)
-            tp2 = stats.get("tp2", 0)
-            sl = stats.get("sl", 0)
-            open_count = stats.get("open", 0)
-            win_rate = stats.get("win_rate", 0)
-            tp2_rate = stats.get("tp2_rate", 0)
-            title = "آمار کل" if not days else f"آمار {days} روز اخیر"
-            lines = [
-                f"📈 {title}",
-                "",
-                f"ستاپ/سیگنال‌های ثبت‌شده: {total}",
-                f"ورودهای فعال‌شده: {activated}",
-                f"کنسل‌شده: {cancelled}",
-                f"باز: {open_count}",
-                "",
-                f"✅ TP1: {tp1}",
-                f"🎯 TP2: {tp2}",
-                f"❌ SL: {sl}",
-                "",
-                f"وین‌ریت بر اساس TP1/SL: {win_rate}٪",
-                f"نرخ TP2 نسبت به TP1: {tp2_rate}٪",
-            ]
-            return "\n".join(lines)
-        except Exception as inner:
-            return f"❌ خطا در ساخت گزارش آمار: {inner}"
 
 
 def _format_news_warning(news: Dict[str, Any]) -> str:
@@ -263,11 +217,8 @@ def format_analysis(result: Dict[str, Any]) -> str:
         result["signal_id"] = signal_id
 
     if result.get("status") == "SIGNAL":
-        title = "✅ ورود فعال شد"
-        mode = "PREDICTIVE_TRIGGER"
-    elif result.get("status") == "SETUP":
-        title = "🚨 سیگنال آماده"
-        mode = "PREDICTIVE_SETUP"
+        title = "🚨 سیگنال ورود فارکس"
+        mode = "CLASSIC_DIRECT_SIGNAL"
     else:
         title = f"📊 تحلیل {display} ({symbol})"
         mode = "PREDICTION_ONLY"
@@ -306,14 +257,11 @@ def format_analysis(result: Dict[str, Any]) -> str:
             "",
             f"شناسه: {signal_id}",
         ])
-        if result.get("status") == "SETUP":
-            lines.append("این ستاپ خودکار زیر نظر می‌ماند؛ وقتی شرایط ورود کامل شد روی همین پیام اعلام می‌شود: ورود فعال شد.")
-        else:
-            lines.append("مانیتورینگ خودکار فعال است تا TP1 / TP2 / SL بررسی شود.")
+        lines.append("مانیتورینگ خودکار فعال است تا TP1 / TP2 / SL بررسی شود.")
     else:
         lines.extend([
             "",
-            "❌ این تحلیل هنوز ستاپ قابل معامله نیست.",
+            "❌ این تحلیل هنوز سیگنال ورود کامل نیست.",
             "Entry / SL / TP فعال نیست.",
         ])
 
@@ -375,7 +323,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /listusers
 
 اتو سیگنال: {'فعال' if AUTO_SIGNAL_ENABLED else 'غیرفعال'}
-حداقل امتیاز اتو ستاپ: {AUTO_SIGNAL_SCORE}\nمحدودیت تعداد ستاپ/سیگنال فعال: حذف شده\nکنسل ستاپ غیرفعال بعد از: {STALE_SETUP_CANCEL_MINUTES} دقیقه
+حداقل امتیاز اتو سیگنال: {AUTO_SIGNAL_SCORE}\nمحدودیت تعداد سیگنال فعال: حذف شده
 """
     await update.message.reply_text(msg)
 
@@ -451,7 +399,7 @@ async def send_analysis(update: Update, pair: str):
         return
 
     sent = await update.message.reply_text(format_analysis(result))
-    if is_initial_setup(result):
+    if is_valid_trade_signal(result):
         signal = parse_signal_from_result(result)
         if signal:
             signal["message_id"] = sent.message_id
@@ -495,7 +443,7 @@ async def best_signal(update: Update):
     )
 
     if not valid_signals:
-        msg = "❌ فعلاً ستاپ قابل معامله وجود ندارد."
+        msg = "❌ فعلاً سیگنال ورود کامل وجود ندارد."
         if failed_items:
             msg += f"\nنمادهای بدون دیتای موفق: {len(failed_items)}"
         await update.message.reply_text(msg)
@@ -507,14 +455,13 @@ async def best_signal(update: Update):
         signal_id = r.get("signal_id") or make_signal_id(symbol)
         r["signal_id"] = signal_id
 
-        prefix = f"🔥 بهترین ستاپ #{i}\n\n"
+        prefix = f"🔥 بهترین سیگنال #{i}\n\n"
         sent = await update.message.reply_text(prefix + format_analysis(r))
-        if can_add_to_watchlist(symbol):
-            signal = parse_signal_from_result(r)
-            if signal:
-                signal["message_id"] = sent.message_id
-                signal["chat_id"] = update.effective_chat.id
-                add_active_signal(signal)
+        signal = parse_signal_from_result(r)
+        if signal:
+            signal["message_id"] = sent.message_id
+            signal["chat_id"] = update.effective_chat.id
+            add_active_signal(signal)
 
 
 async def market_overview(update: Update):
@@ -628,7 +575,7 @@ async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"OWNER_ID: {'✅ تنظیم شده' if OWNER_ID else '❌ تنظیم نشده'}",
         f"TWELVE_DATA_API_KEY: {'✅ تنظیم شده' if TWELVE_DATA_API_KEY else '❌ تنظیم نشده'}",
         f"اتو سیگنال: {'✅ فعال' if AUTO_SIGNAL_ENABLED else '⏸ غیرفعال'}",
-        f"حداقل امتیاز اتو ستاپ: {AUTO_SIGNAL_SCORE}\nمحدودیت تعداد ستاپ/سیگنال فعال: حذف شده\nکنسل ستاپ غیرفعال بعد از: {STALE_SETUP_CANCEL_MINUTES} دقیقه",
+        f"حداقل امتیاز اتو سیگنال: {AUTO_SIGNAL_SCORE}\nمحدودیت تعداد سیگنال فعال: حذف شده",
         f"تعداد نمادها: {len(FOREX_PAIRS)}",
         "",
     ]
@@ -721,98 +668,13 @@ async def watch_signal(update: Update):
         await update.message.reply_text("این سیگنال قبلاً زیر نظر گرفته شده بود.")
 
 
-async def check_setup_activations(app: Application):
-    """Activate, smart-cancel, or auto-reverse stored SETUP signals."""
-    if not OWNER_ID:
-        return
-
-    for s in list_active_signals():
-        try:
-            if s.get("stage") != "SETUP":
-                continue
-
-            symbol = s.get("symbol")
-            old_direction = s.get("direction")
-            r = run_analysis(symbol, activation_check=True)
-            if not r.get("success"):
-                continue
-
-            new_direction = r.get("direction")
-            prediction_ok = _safe_float(r.get("prediction_score")) >= SMART_CANCEL_MIN_PREDICTION_SCORE
-
-            # Smart cancel: range, lost momentum, or weak setup before activation.
-            if ENABLE_SMART_CANCEL and old_direction in ("BUY", "SELL"):
-                smart_cancel = bool(r.get("smart_cancel")) or bool(r.get("range_detected")) or _safe_float(r.get("weakness_score")) >= SMART_CANCEL_WEAKNESS_SCORE
-                if smart_cancel and (new_direction == "NEUTRAL" or new_direction == old_direction):
-                    reason = r.get("cancel_reason") or "smart_cancel_range_or_momentum_lost"
-                    cancel_events = cancel_setup_signal(s.get("signal_id"), reason)
-                    for _ in cancel_events:
-                        await app.bot.send_message(
-                            chat_id=s.get("chat_id") or OWNER_ID,
-                            text=f"🚫 ستاپ کنسل شد\n{symbol} | جهت قبلی: {old_direction}\nدلیل: رنج شدن/ضعف مومنتوم\nشناسه: {s.get('signal_id')}",
-                            reply_to_message_id=s.get("message_id"),
-                            allow_sending_without_reply=True,
-                        )
-                    continue
-
-            # Direction-change auto-reverse: cancel old setup and create a new opposite SETUP.
-            if (
-                ENABLE_AUTO_REVERSE
-                and new_direction in ("BUY", "SELL")
-                and old_direction in ("BUY", "SELL")
-                and new_direction != old_direction
-                and is_trade_setup(r)
-                and prediction_ok
-            ):
-                reason = f"direction_changed:{old_direction}->{new_direction}"
-                cancel_events = cancel_setup_signal(s.get("signal_id"), reason)
-                for _ in cancel_events:
-                    await app.bot.send_message(
-                        chat_id=s.get("chat_id") or OWNER_ID,
-                        text=f"🚫 ستاپ قبلی کنسل شد\n{symbol} | {old_direction} → {new_direction}\nدلیل: تغییر جهت بازار\nشناسه: {s.get('signal_id')}",
-                        reply_to_message_id=s.get("message_id"),
-                        allow_sending_without_reply=True,
-                    )
-
-                r["status"] = "SETUP"  # New direction must also start as setup.
-                r["signal_id"] = make_signal_id(symbol)
-                text = "🚨 ستاپ جدید بعد از تغییر جهت\n\n" + format_analysis(r)
-                sent = await app.bot.send_message(chat_id=s.get("chat_id") or OWNER_ID, text=text)
-                signal = parse_signal_from_result(r)
-                if signal:
-                    signal["message_id"] = sent.message_id
-                    signal["chat_id"] = s.get("chat_id") or OWNER_ID
-                    add_active_signal(signal)
-                continue
-
-            # Normal activation: reply to original setup, preserving result threading.
-            if (
-                r.get("status") == "SIGNAL"
-                and r.get("direction") == old_direction
-                and r.get("entry") is not None
-                and _safe_float(r.get("prediction_score")) >= SMART_CANCEL_MIN_PREDICTION_SCORE
-            ):
-                r["signal_id"] = s.get("signal_id")
-                text = "✅ ورود فعال شد\n\n" + format_analysis(r)
-                sent = await app.bot.send_message(
-                    chat_id=s.get("chat_id") or OWNER_ID,
-                    text=text,
-                    reply_to_message_id=s.get("message_id"),
-                    allow_sending_without_reply=True,
-                )
-                activate_signal(s.get("signal_id"), r, sent.message_id)
-
-        except Exception as e:
-            remember_error("check_setup_activations", s.get("symbol", ""), e, traceback.format_exc())
-            logger.warning("Setup activation check failed: %s", e)
 
 
 async def check_tracker_events(app: Application):
     try:
         if not OWNER_ID:
             return
-        await check_setup_activations(app)
-        events = prune_stale_setups(STALE_SETUP_CANCEL_MINUTES) + check_active_signals()
+        events = check_active_signals()
         for ev in events:
             s = ev["signal"]
             if ev["result"] == "TP1":
@@ -821,16 +683,11 @@ async def check_tracker_events(app: Application):
                 res = "🎯 TP2 خورد"
             elif ev["result"] == "SL":
                 res = "❌ SL خورد"
-            elif ev["result"] == "CANCELLED":
-                res = "🚫 ستاپ کنسل شد"
             else:
                 res = str(ev.get("result") or "رویداد")
-            price_text = ev.get("price")
-            reason_text = ev.get("reason") or s.get("cancel_reason") or ""
-            extra = f"\nدلیل: {reason_text}" if reason_text else ""
             await app.bot.send_message(
                 chat_id=s.get("chat_id") or OWNER_ID,
-                text=f"{res}\n{s.get('symbol')} | قیمت فعلی: {price_text}{extra}\nشناسه: {s.get('signal_id')}",
+                text=f"{res}\n{s.get('symbol')} | قیمت فعلی: {ev['price']}\nشناسه: {s.get('signal_id')}",
                 reply_to_message_id=s.get("activation_message_id") or s.get("message_id"),
                 allow_sending_without_reply=True,
             )
@@ -858,11 +715,11 @@ async def auto_signal_loop(app: Application):
                         continue
                     if not r.get("success"):
                         continue
-                    if is_initial_setup(r) and _safe_float(r.get("prediction_score")) >= AUTO_SIGNAL_SCORE and can_add_to_watchlist(r.get("symbol")):
+                    if is_valid_trade_signal(r) and _safe_float(r.get("prediction_score")) >= AUTO_SIGNAL_SCORE and can_add_to_watchlist(r.get("symbol")):
                         signal = parse_signal_from_result(r)
                         if signal:
                             r["signal_id"] = signal["signal_id"]
-                        text = "🚨 اتو ستاپ فارکس\n\n" + format_analysis(r)
+                        text = "🚨 اتو سیگنال فارکس\n\n" + format_analysis(r)
                         sent = await app.bot.send_message(chat_id=OWNER_ID, text=text)
                         if signal:
                             signal["message_id"] = sent.message_id
@@ -938,7 +795,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if "آمار" in text_lower:
-            await update.message.reply_text(safe_format_stats(parse_days(text_lower)))
+            await update.message.reply_text(format_stats(parse_days(text_lower)))
             return
 
         if "سیگنال‌های فعال" in text_lower or "سیگنال های فعال" in text_lower:
