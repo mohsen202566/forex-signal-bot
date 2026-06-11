@@ -43,8 +43,8 @@ def record_signal(signal: Dict):
     data = load_stats()
     signal = dict(signal)
     signal.setdefault("created_at", datetime.utcnow().isoformat(timespec="seconds") + "Z")
-    signal.setdefault("result", "SETUP_CREATED")
-    signal.setdefault("stage", "SETUP")
+    signal.setdefault("result", "ACTIVATED")
+    signal.setdefault("stage", "ACTIVATED")
     signal.setdefault("tp1_hit", False)
     data["signals"].append(signal)
     save_stats(data)
@@ -114,7 +114,7 @@ def build_stats(days: Optional[int] = None) -> Dict:
     data = load_stats()
     signals = _filter_by_days(data.get("signals", []), days)
 
-    total_setups = len(signals)
+    total_signals = len(signals)
     activated = sum(1 for s in signals if s.get("stage") == "ACTIVATED" or s.get("result") in ("ACTIVATED", "TP1", "TP2", "SL"))
     cancelled = sum(1 for s in signals if s.get("result") == "CANCELLED")
     tp1 = sum(1 for s in signals if _is_tp1(s))
@@ -127,16 +127,16 @@ def build_stats(days: Optional[int] = None) -> Dict:
     tp2_rate = round((tp2 / tp1) * 100, 2) if tp1 else 0
 
     by_direction = {
-        "BUY": {"setups": 0, "activated": 0, "tp1": 0, "tp2": 0, "sl": 0},
-        "SELL": {"setups": 0, "activated": 0, "tp1": 0, "tp2": 0, "sl": 0},
+        "BUY": {"signals": 0, "activated": 0, "tp1": 0, "tp2": 0, "sl": 0},
+        "SELL": {"signals": 0, "activated": 0, "tp1": 0, "tp2": 0, "sl": 0},
     }
     by_symbol = {}
 
     for s in signals:
         symbol = s.get("symbol", "UNKNOWN")
         direction = s.get("direction")
-        by_symbol.setdefault(symbol, {"setups": 0, "activated": 0, "tp1": 0, "tp2": 0, "sl": 0})
-        by_symbol[symbol]["setups"] += 1
+        by_symbol.setdefault(symbol, {"signals": 0, "activated": 0, "tp1": 0, "tp2": 0, "sl": 0})
+        by_symbol[symbol]["signals"] += 1
         if s.get("stage") == "ACTIVATED" or s.get("result") in ("ACTIVATED", "TP1", "TP2", "SL"):
             by_symbol[symbol]["activated"] += 1
         if _is_tp1(s):
@@ -147,7 +147,7 @@ def build_stats(days: Optional[int] = None) -> Dict:
             by_symbol[symbol]["sl"] += 1
 
         if direction in by_direction:
-            by_direction[direction]["setups"] += 1
+            by_direction[direction]["signals"] += 1
             if s.get("stage") == "ACTIVATED" or s.get("result") in ("ACTIVATED", "TP1", "TP2", "SL"):
                 by_direction[direction]["activated"] += 1
             if _is_tp1(s):
@@ -158,7 +158,7 @@ def build_stats(days: Optional[int] = None) -> Dict:
                 by_direction[direction]["sl"] += 1
 
     return {
-        "total_setups": total_setups,
+        "total_signals": total_signals,
         "activated": activated,
         "cancelled": cancelled,
         "tp1": tp1,
@@ -190,9 +190,9 @@ def format_stats(days: Optional[int] = None) -> str:
     lines = [
         f"📈 {title}",
         "",
-        f"ستاپ‌های ساخته‌شده: {stats['total_setups']}",
-        f"ورودهای فعال‌شده: {stats['activated']}",
-        f"لغوشده: {stats['cancelled']}",
+        f"سیگنال‌های صادرشده: {stats['total_signals']}",
+        f"سیگنال‌های فعال: {stats['activated']}",
+        f"لغوشده/قدیمی: {stats['cancelled']}",
         f"TP1: {stats['tp1']}",
         f"TP2: {stats['tp2']}  | نرخ TP2 بعد از TP1: {stats['tp2_rate']}٪",
         f"SL: {stats['sl']}",
@@ -208,7 +208,7 @@ def format_stats(days: Optional[int] = None) -> str:
     for direction in ["BUY", "SELL"]:
         item = stats["by_direction"][direction]
         lines.append(
-            f"• {direction_names[direction]}: ستاپ {item['setups']} | فعال {item['activated']} | TP1 {item['tp1']} | TP2 {item['tp2']} | SL {item['sl']}"
+            f"• {direction_names[direction]}: سیگنال {item['signals']} | فعال {item['activated']} | TP1 {item['tp1']} | TP2 {item['tp2']} | SL {item['sl']}"
         )
 
     if stats["by_symbol"]:
@@ -221,12 +221,12 @@ def format_stats(days: Optional[int] = None) -> str:
         )
         for symbol, item in sorted_symbols[:12]:
             lines.append(
-                f"• {symbol}: ستاپ {item['setups']} | فعال {item['activated']} | TP1 {item['tp1']} | TP2 {item['tp2']} | SL {item['sl']}"
+                f"• {symbol}: سیگنال {item['signals']} | فعال {item['activated']} | TP1 {item['tp1']} | TP2 {item['tp2']} | SL {item['sl']}"
             )
 
     if stats["total_setups"] == 0:
         lines.append("")
-        lines.append("هنوز هیچ ستاپی برای آمار ثبت نشده است.")
+        lines.append("هنوز هیچ سیگنالی برای آمار ثبت نشده است.")
 
     text = "\n".join(lines)
     if len(text) > 3800:
