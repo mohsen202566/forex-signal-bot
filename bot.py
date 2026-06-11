@@ -31,6 +31,11 @@ from config import (
     TWELVE_DATA_API_KEY,
     WATCHLIST_MAX_SETUPS,
     STALE_SETUP_CANCEL_MINUTES,
+    ENABLE_AUTO_REVERSE,
+    ENABLE_SMART_CANCEL,
+    ENABLE_WEAKNESS_WARNING,
+    SMART_CANCEL_MIN_PREDICTION_SCORE,
+    SMART_CANCEL_WEAKNESS_SCORE,
 )
 from data_provider import get_candles, get_latest_price
 from forex_pairs import normalize_pair
@@ -128,15 +133,16 @@ def is_trade_setup(result: Dict[str, Any]) -> bool:
 
 
 def is_initial_setup(result: Dict[str, Any]) -> bool:
-    """Initial/auto messages must be SETUP only; SIGNAL is only for activation replies."""
+    """Initial and auto messages must be SETUP only; SIGNAL is only for activation replies."""
     return is_trade_setup(result) and result.get("status") == "SETUP"
 
 
+def is_valid_trade_signal(result: Dict[str, Any]) -> bool:
+    return is_trade_setup(result) and result.get("status") == "SIGNAL"
+
+
 def _watchlist_count() -> int:
-    return sum(
-        1 for s in list_active_signals()
-        if s.get("stage") in ("SETUP", "ACTIVATED") or s.get("result") == "TP1"
-    )
+    return sum(1 for s in list_active_signals() if s.get("stage") in ("SETUP", "ACTIVATED") or s.get("result") == "TP1")
 
 
 def _symbol_already_watched(symbol: str) -> bool:
@@ -146,10 +152,6 @@ def _symbol_already_watched(symbol: str) -> bool:
 
 def can_add_to_watchlist(symbol: str) -> bool:
     return _watchlist_count() < WATCHLIST_MAX_SETUPS and not _symbol_already_watched(symbol)
-
-
-def is_valid_trade_signal(result: Dict[str, Any]) -> bool:
-    return is_trade_setup(result) and result.get("status") == "SIGNAL"
 
 
 def ensure_access(update: Update) -> bool:
@@ -414,16 +416,11 @@ async def send_analysis(update: Update, pair: str):
 
     sent = await update.message.reply_text(format_analysis(result))
     if is_initial_setup(result):
-        if can_add_to_watchlist(result.get("symbol")):
-            signal = parse_signal_from_result(result)
-            if signal:
-                signal["message_id"] = sent.message_id
-                signal["chat_id"] = update.effective_chat.id
-                add_active_signal(signal)
-        else:
-            await update.message.reply_text(
-                f"⚠️ واچ‌لیست پر است یا {result.get('symbol')} قبلاً زیر نظر است. حداکثر: {WATCHLIST_MAX_SETUPS}"
-            )
+        signal = parse_signal_from_result(result)
+        if signal:
+            signal["message_id"] = sent.message_id
+            signal["chat_id"] = update.effective_chat.id
+            add_active_signal(signal)
 
 
 async def best_signal(update: Update):
@@ -691,7 +688,7 @@ async def watch_signal(update: Update):
 
 
 async def check_setup_activations(app: Application):
-    """Activate SETUPs or cancel/reverse them when market direction changes."""
+    """Activate, smart-cancel, or auto-reverse stored SETUP signals."""
     if not OWNER_ID:
         return
 
@@ -707,18 +704,35 @@ async def check_setup_activations(app: Application):
                 continue
 
             new_direction = r.get("direction")
+            prediction_ok = _safe_float(r.get("prediction_score")) >= SMART_CANCEL_MIN_PREDICTION_SCORE
 
-            # If market direction flips before activation, cancel old setup and create a fresh opposite setup.
+            # Smart cancel: range, lost momentum, or weak setup before activation.
+            if ENABLE_SMART_CANCEL and old_direction in ("BUY", "SELL"):
+                smart_cancel = bool(r.get("smart_cancel")) or bool(r.get("range_detected")) or _safe_float(r.get("weakness_score")) >= SMART_CANCEL_WEAKNESS_SCORE
+                if smart_cancel and (new_direction == "NEUTRAL" or new_direction == old_direction):
+                    reason = r.get("cancel_reason") or "smart_cancel_range_or_momentum_lost"
+                    cancel_events = cancel_setup_signal(s.get("signal_id"), reason)
+                    for _ in cancel_events:
+                        await app.bot.send_message(
+                            chat_id=s.get("chat_id") or OWNER_ID,
+                            text=f"🚫 ستاپ کنسل شد\n{symbol} | جهت قبلی: {old_direction}\nدلیل: رنج شدن/ضعف مومنتوم\nشناسه: {s.get('signal_id')}",
+                            reply_to_message_id=s.get("message_id"),
+                            allow_sending_without_reply=True,
+                        )
+                    continue
+
+            # Direction-change auto-reverse: cancel old setup and create a new opposite SETUP.
             if (
-                new_direction in ("BUY", "SELL")
+                ENABLE_AUTO_REVERSE
+                and new_direction in ("BUY", "SELL")
                 and old_direction in ("BUY", "SELL")
                 and new_direction != old_direction
                 and is_trade_setup(r)
-                and _safe_float(r.get("prediction_score")) >= 58
+                and prediction_ok
             ):
                 reason = f"direction_changed:{old_direction}->{new_direction}"
                 cancel_events = cancel_setup_signal(s.get("signal_id"), reason)
-                for ev in cancel_events:
+                for _ in cancel_events:
                     await app.bot.send_message(
                         chat_id=s.get("chat_id") or OWNER_ID,
                         text=f"🚫 ستاپ قبلی کنسل شد\n{symbol} | {old_direction} → {new_direction}\nدلیل: تغییر جهت بازار\nشناسه: {s.get('signal_id')}",
@@ -726,8 +740,7 @@ async def check_setup_activations(app: Application):
                         allow_sending_without_reply=True,
                     )
 
-                # New direction must start as SETUP only, even if activation_check says SIGNAL.
-                r["status"] = "SETUP"
+                r["status"] = "SETUP"  # New direction must also start as setup.
                 r["signal_id"] = make_signal_id(symbol)
                 text = "🚨 ستاپ جدید بعد از تغییر جهت\n\n" + format_analysis(r)
                 sent = await app.bot.send_message(chat_id=s.get("chat_id") or OWNER_ID, text=text)
@@ -738,11 +751,12 @@ async def check_setup_activations(app: Application):
                     add_active_signal(signal)
                 continue
 
+            # Normal activation: reply to original setup, preserving result threading.
             if (
                 r.get("status") == "SIGNAL"
                 and r.get("direction") == old_direction
                 and r.get("entry") is not None
-                and _safe_float(r.get("prediction_score")) >= 58
+                and _safe_float(r.get("prediction_score")) >= SMART_CANCEL_MIN_PREDICTION_SCORE
             ):
                 r["signal_id"] = s.get("signal_id")
                 text = "✅ ورود فعال شد\n\n" + format_analysis(r)
@@ -753,6 +767,7 @@ async def check_setup_activations(app: Application):
                     allow_sending_without_reply=True,
                 )
                 activate_signal(s.get("signal_id"), r, sent.message_id)
+
         except Exception as e:
             remember_error("check_setup_activations", s.get("symbol", ""), e, traceback.format_exc())
             logger.warning("Setup activation check failed: %s", e)
@@ -770,15 +785,11 @@ async def check_tracker_events(app: Application):
                 res = "✅ TP1 خورد"
             elif ev["result"] == "TP2":
                 res = "🎯 TP2 خورد"
-            elif ev["result"] == "CANCELLED":
-                res = "🚫 ستاپ کنسل شد"
             else:
                 res = "❌ SL خورد"
-
-            price_text = f"قیمت فعلی: {ev['price']}" if ev.get("price") is not None else f"دلیل: {ev.get('reason', 'cancelled')}"
             await app.bot.send_message(
                 chat_id=s.get("chat_id") or OWNER_ID,
-                text=f"{res}\n{s.get('symbol')} | {price_text}\nشناسه: {s.get('signal_id')}",
+                text=f"{res}\n{s.get('symbol')} | قیمت فعلی: {ev['price']}\nشناسه: {s.get('signal_id')}",
                 reply_to_message_id=s.get("activation_message_id") or s.get("message_id"),
                 allow_sending_without_reply=True,
             )
