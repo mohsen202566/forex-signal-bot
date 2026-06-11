@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Classic direct-signal tracker for Forex Signal Bot.
+"""Two-stage signal tracker for Forex Signal Bot.
 
-Tracks ACTIVATED -> TP1/TP2/SL. Pending SETUP mode is removed.
+Tracks SETUP -> ACTIVATED -> TP1/TP2/SL.
 UTF-8/Persian safe and VPS-safe.
 """
 
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from config import DATA_DIR, TRACKER_FILE
@@ -51,6 +51,22 @@ def _search(pattern: str, text: str):
     return match.group(1).strip() if match else None
 
 
+def _parse_utc(value: str):
+    try:
+        if not value:
+            return None
+        return datetime.fromisoformat(str(value).replace("Z", ""))
+    except Exception:
+        return None
+
+
+def _update_stats_result(signal: Dict, result: str, reason: str = ""):
+    try:
+        return update_signal_result(signal.get("signal_id"), result, reason)
+    except Exception:
+        return False
+
+
 def ensure_storage():
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(TRACKER_FILE):
@@ -84,24 +100,21 @@ def make_signal_id(symbol: str) -> str:
 
 
 def add_active_signal(signal: Dict):
-    """Add an already-active classic signal and record ACTIVATED once."""
+    """Add a setup/active signal and record SETUP_CREATED once."""
     data = load_active()
     existing_ids = {str(s.get("signal_id")) for s in data["active"]}
     if str(signal.get("signal_id")) in existing_ids:
         return False
 
     signal = dict(signal)
-    now = _utc_now()
-    signal.setdefault("created_at", now)
-    signal.setdefault("activated_at", now)
-    signal["stage"] = "ACTIVATED"
-    signal["result"] = "ACTIVATED"
+    signal.setdefault("created_at", _utc_now())
+    signal.setdefault("stage", "SETUP")
+    signal.setdefault("result", "SETUP_CREATED")
     signal.setdefault("tp1_hit", False)
 
     data["active"].append(signal)
     save_active(data)
     record_signal(signal)
-    update_signal_result(signal.get("signal_id"), "ACTIVATED", "classic direct signal")
     return True
 
 
@@ -131,7 +144,10 @@ def list_active_signals() -> List[Dict]:
 
 
 def parse_signal_from_result(result: Dict):
-    """Build tracker signal from an active SIGNAL analysis result dict."""
+    """Build tracker signal from analysis result dict.
+
+    Accepts both SETUP and SIGNAL so auto-monitoring can start before activation.
+    """
     if not result or result.get("entry") is None:
         return None
 
@@ -145,11 +161,11 @@ def parse_signal_from_result(result: Dict):
     entry_score = _to_float(result.get("entry_score")) or 0
     status = result.get("status")
 
-    if status != "SIGNAL" or not symbol or direction not in ("BUY", "SELL") or entry is None or sl is None or tp1 is None:
+    if not symbol or direction not in ("BUY", "SELL") or entry is None or sl is None or tp1 is None:
         return None
 
-    stage = "ACTIVATED"
-    result_name = "ACTIVATED"
+    stage = "ACTIVATED" if status == "SIGNAL" else "SETUP"
+    result_name = "ACTIVATED" if stage == "ACTIVATED" else "SETUP_CREATED"
     now = _utc_now()
 
     return {
@@ -218,10 +234,9 @@ def parse_signal_from_text(text: str):
         "tp2": tp2_f,
         "score": score_f,
         "entry_score": 0,
-        "stage": "ACTIVATED",
+        "stage": "SETUP",
         "created_at": _utc_now(),
-        "activated_at": _utc_now(),
-        "result": "ACTIVATED",
+        "result": "SETUP_CREATED",
         "tp1_hit": False,
     }
 
@@ -240,8 +255,9 @@ def activate_signal(signal_id: str, result: Optional[Dict] = None, message_id: O
 
 
 def check_active_signals():
-    """Check active classic signals for TP1/TP2/SL.
+    """Check ACTIVATED signals for TP1/TP2/SL.
 
+    SETUP signals are not checked for TP/SL until bot.py activates them.
     TP1 is recorded once and signal remains active for possible TP2.
     Win rate is still based on first TP1 versus SL.
     """
@@ -308,20 +324,6 @@ def check_active_signals():
 
 
 
-
-def _parse_utc(value: str):
-    try:
-        text = str(value or "").replace("Z", "")
-        if not text:
-            return None
-        return datetime.fromisoformat(text)
-    except Exception:
-        return None
-
-
-def _update_stats_result(signal: Dict, result: str, reason: str = ""):
-    return update_signal_result(signal.get("signal_id"), result, reason)
-
 def cancel_setup_signal(signal_id: str, reason: str = "cancelled"):
     """Cancel a pending SETUP and remove it from the active watchlist."""
     data = load_active()
@@ -385,7 +387,7 @@ def format_active_signals():
     lines = ["👁 سیگنال‌های زیر نظر", ""]
     for s in active:
         direction_text = "خرید" if s.get("direction") == "BUY" else "فروش"
-        stage_text = "✅ ورود فعال"
+        stage_text = "✅ ورود فعال" if s.get("stage") == "ACTIVATED" else "👀 منتظر فعال‌سازی ورود"
         lines.extend([
             f"• {s.get('symbol')} | {direction_text}",
             f"وضعیت: {stage_text}",
