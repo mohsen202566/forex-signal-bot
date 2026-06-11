@@ -26,7 +26,6 @@ USERS_FILE = os.path.join(DATA_DIR, "allowed_users.json")
 
 TREND_TF = "4h"
 CONFIRM_TF = "1h"
-SETUP_TF = "15min"
 ENTRY_TF = "5min"
 
 MIN_SIGNAL_SCORE = int(os.getenv("MIN_SIGNAL_SCORE", "75"))
@@ -66,10 +65,6 @@ DEFAULT_RISK_PERCENT = 1.0
 MAX_RISK_PERCENT = 2.0
 BOT_LANGUAGE = "fa"
 
+
+
 # Watchlist / smart setup management
-STALE_SETUP_CANCEL_MINUTES = int(os.getenv("STALE_SETUP_CANCEL_MINUTES", "35"))
-ENABLE_AUTO_REVERSE = os.getenv("ENABLE_AUTO_REVERSE", "true").lower() in ("1", "true", "yes", "on")
-ENABLE_SMART_CANCEL = os.getenv("ENABLE_SMART_CANCEL", "true").lower() in ("1", "true", "yes", "on")
-ENABLE_WEAKNESS_WARNING = os.getenv("ENABLE_WEAKNESS_WARNING", "true").lower() in ("1", "true", "yes", "on")
-SMART_CANCEL_MIN_PREDICTION_SCORE = int(os.getenv("SMART_CANCEL_MIN_PREDICTION_SCORE", "58"))
-SMART_CANCEL_WEAKNESS_SCORE = int(os.getenv("SMART_CANCEL_WEAKNESS_SCORE", "75"))
