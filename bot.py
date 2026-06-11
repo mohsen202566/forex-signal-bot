@@ -29,7 +29,6 @@ from config import (
     FOREX_PAIRS,
     OWNER_ID,
     TWELVE_DATA_API_KEY,
-    WATCHLIST_MAX_SETUPS,
     STALE_SETUP_CANCEL_MINUTES,
     ENABLE_AUTO_REVERSE,
     ENABLE_SMART_CANCEL,
@@ -141,17 +140,14 @@ def is_valid_trade_signal(result: Dict[str, Any]) -> bool:
     return is_trade_setup(result) and result.get("status") == "SIGNAL"
 
 
-def _watchlist_count() -> int:
-    return sum(1 for s in list_active_signals() if s.get("stage") in ("SETUP", "ACTIVATED") or s.get("result") == "TP1")
-
-
 def _symbol_already_watched(symbol: str) -> bool:
     symbol = str(symbol or "")
     return any(str(s.get("symbol") or "") == symbol for s in list_active_signals())
 
 
 def can_add_to_watchlist(symbol: str) -> bool:
-    return _watchlist_count() < WATCHLIST_MAX_SETUPS and not _symbol_already_watched(symbol)
+    """No watchlist/max-slot limit. Keep this helper for old call sites."""
+    return True
 
 
 def ensure_access(update: Update) -> bool:
@@ -379,7 +375,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /listusers
 
 اتو سیگنال: {'فعال' if AUTO_SIGNAL_ENABLED else 'غیرفعال'}
-حداقل امتیاز اتو ستاپ: {AUTO_SIGNAL_SCORE}\nحداکثر واچ‌لیست: {WATCHLIST_MAX_SETUPS}\nکنسل ستاپ غیرفعال بعد از: {STALE_SETUP_CANCEL_MINUTES} دقیقه
+حداقل امتیاز اتو ستاپ: {AUTO_SIGNAL_SCORE}\nمحدودیت تعداد ستاپ/سیگنال فعال: حذف شده\nکنسل ستاپ غیرفعال بعد از: {STALE_SETUP_CANCEL_MINUTES} دقیقه
 """
     await update.message.reply_text(msg)
 
@@ -519,8 +515,6 @@ async def best_signal(update: Update):
                 signal["message_id"] = sent.message_id
                 signal["chat_id"] = update.effective_chat.id
                 add_active_signal(signal)
-        else:
-            await update.message.reply_text(f"⚠️ {symbol} به واچ‌لیست اضافه نشد؛ واچ‌لیست پر است یا این نماد قبلاً زیر نظر است.")
 
 
 async def market_overview(update: Update):
@@ -634,7 +628,7 @@ async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"OWNER_ID: {'✅ تنظیم شده' if OWNER_ID else '❌ تنظیم نشده'}",
         f"TWELVE_DATA_API_KEY: {'✅ تنظیم شده' if TWELVE_DATA_API_KEY else '❌ تنظیم نشده'}",
         f"اتو سیگنال: {'✅ فعال' if AUTO_SIGNAL_ENABLED else '⏸ غیرفعال'}",
-        f"حداقل امتیاز اتو ستاپ: {AUTO_SIGNAL_SCORE}\nحداکثر واچ‌لیست: {WATCHLIST_MAX_SETUPS}\nکنسل ستاپ غیرفعال بعد از: {STALE_SETUP_CANCEL_MINUTES} دقیقه",
+        f"حداقل امتیاز اتو ستاپ: {AUTO_SIGNAL_SCORE}\nمحدودیت تعداد ستاپ/سیگنال فعال: حذف شده\nکنسل ستاپ غیرفعال بعد از: {STALE_SETUP_CANCEL_MINUTES} دقیقه",
         f"تعداد نمادها: {len(FOREX_PAIRS)}",
         "",
     ]
