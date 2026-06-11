@@ -1,433 +1,948 @@
 # -*- coding: utf-8 -*-
-"""Prediction-focused Forex analysis engine.
-
-Architecture:
-- 4H/1H = soft higher-timeframe market direction context
-- 30M/15M = setup quality and readiness
-- 5M = fast activation trigger
-- Buy/Sell Power 1C/2C = activation confirmation only, not prediction scoring
-- Fresh Momentum = activation confirmation only, not prediction scoring
-- News is warning-only and never blocks signals
-
-This file is UTF-8/Persian safe and VPS-safe.
+"""
+Forex Signal Bot - Diagnostic Safe Persian Version
+- Persian text commands
+- News is warning-only, not signal-blocking
+- Market overview reports bullish/bearish/range percentages
+- Built-in health/debug command: عیب یابی / سلامت ربات / /health
 """
 
-import math
-from typing import Dict, Optional, Tuple
+import asyncio
+import logging
+import re
+import time
+import traceback
+from typing import Any, Dict, List, Optional
 
-import pandas as pd
-import ta
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from data_provider import get_latest_price, get_candles
-from news_engine import get_news_risk
+from access_control import add_user, is_allowed, is_owner, list_users_text, remove_user
+from analysis import analyze_pair as run_analysis
+from config import (
+    AUTO_SCAN_INTERVAL_MINUTES,
+    AUTO_SIGNAL_COOLDOWN_MINUTES,
+    AUTO_SIGNAL_ENABLED,
+    AUTO_SIGNAL_SCORE,
+    BEST_SIGNAL_COUNT,
+    BOT_TOKEN,
+    FOREX_PAIRS,
+    OWNER_ID,
+    TWELVE_DATA_API_KEY,
+)
+from data_provider import get_candles, get_latest_price
+from forex_pairs import normalize_pair
 
-TIMEFRAMES = {"4H": "4h", "1H": "1h", "30M": "30min", "15M": "15min", "5M": "5min"}
+try:
+    from forex_pairs import get_pair_display_name
+except Exception:
+    def get_pair_display_name(symbol: str) -> str:
+        return symbol
 
-SETUP_MIN_SCORE = 62
-ACTIVATION_MIN_SCORE = 70
-MIN_DIRECTION_GAP = 8
-NEUTRAL_SCORE_BASE = 10
-POWER_1_CANDLE_MIN = 70
-POWER_2_CANDLE_MIN = 60
-HTF_CONTEXT_BIAS_POINTS = 5
+from news_engine import format_news_message
+from statistics import format_stats, parse_days, reset_stats
+from tracker import (
+    activate_signal,
+    add_active_signal,
+    check_active_signals,
+    format_active_signals,
+    list_active_signals,
+    make_signal_id,
+    parse_signal_from_text,
+)
+try:
+    from tracker import prune_stale_setups
+except Exception:
+    def prune_stale_setups(*args, **kwargs):
+        return []
 
-SCALP_SYMBOLS_2_DIGITS = {
-    "XAU/USD", "XAG/USD", "WTI/USD", "BRENT/USD", "US30", "NAS100",
-    "SPX500", "DAX40", "DXY", "BTC/USD", "ETH/USD", "SOL/USD",
-}
+try:
+    from tracker import parse_signal_from_result
+except Exception:
+    def parse_signal_from_result(result: Dict[str, Any]):
+        if not is_trade_setup(result):
+            return None
+        signal_id = result.get("signal_id") or make_signal_id(result.get("symbol", "SIGNAL"))
+        result["signal_id"] = signal_id
+        return {
+            "signal_id": signal_id,
+            "symbol": result.get("symbol"),
+            "direction": result.get("direction"),
+            "entry": result.get("entry"),
+            "stop_loss": result.get("stop_loss"),
+            "tp1": result.get("tp1"),
+            "tp2": result.get("tp2"),
+        }
 
 
-def _safe_float(value, default: float = 0.0) -> float:
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+LAST_AUTO_SIGNALS: Dict[str, float] = {}
+LAST_ERRORS: List[Dict[str, Any]] = []
+MAX_ERROR_LOG = 30
+
+
+def remember_error(area: str, symbol: str = "", error: Any = "", detail: Any = "") -> None:
+    """Store recent errors in memory so the bot can report them in Telegram."""
     try:
-        if value is None:
-            return default
-        value = float(value)
-        if math.isnan(value) or math.isinf(value):
-            return default
-        return value
+        item = {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "area": str(area),
+            "symbol": str(symbol or ""),
+            "error": str(error or ""),
+            "detail": str(detail or ""),
+        }
+        LAST_ERRORS.append(item)
+        del LAST_ERRORS[:-MAX_ERROR_LOG]
+    except Exception:
+        pass
+
+
+def direction_fa(direction: Optional[str]) -> str:
+    return {
+        "BUY": "صعودی / خرید",
+        "SELL": "نزولی / فروش",
+        "NEUTRAL": "رنج / خنثی",
+    }.get(direction or "", direction or "نامشخص")
+
+
+def status_fa(status: Optional[str]) -> str:
+    return {
+        "SIGNAL": "✅ ورود فعال",
+        "SETUP": "👀 منتظر فعال‌سازی ورود",
+        "PREDICTION_ONLY": "🔎 فقط پیش‌بینی؛ ورود هنوز کامل نیست",
+        "NO_TRADE": "⏸ بدون معامله",
+        "NEWS_BLOCKED": "⚠️ هشدار خبر؛ سیگنال نباید به خاطر خبر بلاک شود",
+    }.get(status or "", status or "نامشخص")
+
+
+def is_trade_setup(result: Dict[str, Any]) -> bool:
+    return (
+        result.get("status") in ("SETUP", "SIGNAL")
+        and result.get("entry") is not None
+        and result.get("stop_loss") is not None
+        and result.get("tp1") is not None
+    )
+
+
+def is_valid_trade_signal(result: Dict[str, Any]) -> bool:
+    return is_trade_setup(result) and result.get("status") == "SIGNAL"
+
+
+def ensure_access(update: Update) -> bool:
+    user = update.effective_user
+    if not user:
+        return False
+    return is_allowed(user.id)
+
+
+def extract_user_id_from_text(text: str) -> Optional[int]:
+    match = re.search(r"\b\d{5,15}\b", text or "")
+    return int(match.group(0)) if match else None
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
     except Exception:
         return default
 
 
-def _round_price(value, symbol: str = ""):
-    value = _safe_float(value, default=float("nan"))
-    if math.isnan(value):
-        return None
-    if symbol in SCALP_SYMBOLS_2_DIGITS:
-        digits = 2
-    elif "JPY" in symbol:
-        digits = 3
+def _short_error(value: Any, max_len: int = 140) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    if len(text) > max_len:
+        text = text[:max_len - 3] + "..."
+    return text
+
+
+async def safe_reply_text(update: Update, text: str, **kwargs):
+    """Reply with Telegram timeouts and a normal fallback path."""
+    try:
+        return await update.message.reply_text(
+            text,
+            read_timeout=30,
+            write_timeout=30,
+            connect_timeout=20,
+            pool_timeout=20,
+            **kwargs,
+        )
+    except Exception as e:
+        remember_error("safe_reply_text", "", e, traceback.format_exc())
+        try:
+            return await update.effective_chat.send_message(
+                text,
+                read_timeout=30,
+                write_timeout=30,
+                connect_timeout=20,
+                pool_timeout=20,
+                **kwargs,
+            )
+        except Exception:
+            raise
+
+
+async def safe_bot_send(bot, chat_id: int, text: str, **kwargs):
+    try:
+        return await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            read_timeout=30,
+            write_timeout=30,
+            connect_timeout=20,
+            pool_timeout=20,
+            **kwargs,
+        )
+    except Exception:
+        # Retry once without reply_to_message_id if Telegram cannot attach to the old message.
+        kwargs.pop("reply_to_message_id", None)
+        kwargs.pop("allow_sending_without_reply", None)
+        return await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            read_timeout=30,
+            write_timeout=30,
+            connect_timeout=20,
+            pool_timeout=20,
+            **kwargs,
+        )
+
+
+def _format_news_warning(news: Dict[str, Any]) -> str:
+    risk = news.get("risk_level", "LOW")
+    note = news.get("note", "")
+
+    if risk == "HIGH":
+        icon = "🚨"
+    elif risk == "MEDIUM":
+        icon = "⚠️"
     else:
-        digits = 5
-    return round(value, digits)
+        icon = "🟡"
+
+    lines = [
+        "📰 هشدار خبر:",
+        f"{icon} سطح ریسک: {risk}",
+        "اثر خبر: فقط هشدار است و سیگنال را بلاک نمی‌کند.",
+    ]
+
+    if note:
+        lines.append(note)
+
+    return "\n".join(lines)
 
 
-def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["ema20"] = ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()
-    df["ema50"] = ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()
-    df["ema200"] = ta.trend.EMAIndicator(df["close"], window=200).ema_indicator()
-    df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
-    macd = ta.trend.MACD(df["close"])
-    df["macd"] = macd.macd()
-    df["macd_signal"] = macd.macd_signal()
-    df["macd_hist"] = macd.macd_diff()
-    df["atr"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range()
-    try:
-        df["adx"] = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14).adx()
-    except Exception:
-        df["adx"] = 0
-    return df
+def format_analysis(result: Dict[str, Any]) -> str:
+    symbol = result.get("symbol", "UNKNOWN")
+    display = get_pair_display_name(symbol)
 
+    reasons = "\n".join([f"• {r}" for r in result.get("reasons", [])]) or "• دلیل خاصی ثبت نشد."
+    entry_reasons = "\n".join([f"• {r}" for r in result.get("entry_reasons", [])]) or "• تریگر ورود هنوز کامل نیست."
 
-def _tf_analysis(symbol: str, label: str, interval: str) -> Dict:
-    raw = get_candles(symbol, interval=interval, outputsize=250)
-    if not raw.get("success"):
-        return {"success": False, "error": raw.get("error", "خطا در دریافت دیتا")}
-    df = calculate_indicators(raw["data"]).dropna().reset_index(drop=True)
-    if len(df) < 8:
-        return {"success": False, "error": "داده کافی برای اندیکاتورها وجود ندارد."}
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    prev2 = df.iloc[-3]
-    buy = 0
-    sell = 0
-    reasons_buy = []
-    reasons_sell = []
-    if last["ema50"] > last["ema200"]:
-        buy += 16
-        reasons_buy.append(f"{label}: EMA50 بالای EMA200 است.")
-    elif last["ema50"] < last["ema200"]:
-        sell += 16
-        reasons_sell.append(f"{label}: EMA50 پایین EMA200 است.")
-    if last["close"] > last["ema20"]:
-        buy += 8
-        reasons_buy.append(f"{label}: قیمت بالای EMA20 است.")
-    elif last["close"] < last["ema20"]:
-        sell += 8
-        reasons_sell.append(f"{label}: قیمت پایین EMA20 است.")
-    if last["macd"] > last["macd_signal"]:
-        buy += 9
-        reasons_buy.append(f"{label}: MACD صعودی است.")
-    elif last["macd"] < last["macd_signal"]:
-        sell += 9
-        reasons_sell.append(f"{label}: MACD نزولی است.")
-    if last["macd_hist"] > prev["macd_hist"] > prev2["macd_hist"]:
-        buy += 8
-        reasons_buy.append(f"{label}: هیستوگرام MACD دو کندل پشت‌سرهم صعودی تقویت شده است.")
-    elif last["macd_hist"] < prev["macd_hist"] < prev2["macd_hist"]:
-        sell += 8
-        reasons_sell.append(f"{label}: هیستوگرام MACD دو کندل پشت‌سرهم نزولی تقویت شده است.")
-    elif last["macd_hist"] > prev["macd_hist"]:
-        buy += 4
-    elif last["macd_hist"] < prev["macd_hist"]:
-        sell += 4
-    if last["rsi"] > prev["rsi"] > prev2["rsi"]:
-        buy += 7
-        reasons_buy.append(f"{label}: شیب RSI دو کندل صعودی است.")
-    elif last["rsi"] < prev["rsi"] < prev2["rsi"]:
-        sell += 7
-        reasons_sell.append(f"{label}: شیب RSI دو کندل نزولی است.")
-    elif last["rsi"] > prev["rsi"]:
-        buy += 3
-    elif last["rsi"] < prev["rsi"]:
-        sell += 3
-    if 44 <= last["rsi"] <= 68:
-        buy += 4
-    if 32 <= last["rsi"] <= 56:
-        sell += 4
-    if last.get("adx", 0) >= 16:
-        if buy > sell:
-            buy += 4
-        elif sell > buy:
-            sell += 4
-    return {
-        "success": True,
-        "label": label,
-        "df": df,
-        "buy": buy,
-        "sell": sell,
-        "reasons_buy": reasons_buy,
-        "reasons_sell": reasons_sell,
-        "last": {
-            "close": _round_price(last["close"], symbol),
-            "ema20": _round_price(last["ema20"], symbol),
-            "ema50": _round_price(last["ema50"], symbol),
-            "ema200": _round_price(last["ema200"], symbol),
-            "rsi": round(_safe_float(last["rsi"]), 2),
-            "macd": round(_safe_float(last["macd"]), 5),
-            "macd_signal": round(_safe_float(last["macd_signal"]), 5),
-            "macd_hist": round(_safe_float(last["macd_hist"]), 5),
-            "prev_macd_hist": round(_safe_float(prev["macd_hist"]), 5),
-            "prev2_macd_hist": round(_safe_float(prev2["macd_hist"]), 5),
-            "prev_rsi": round(_safe_float(prev["rsi"]), 2),
-            "prev2_rsi": round(_safe_float(prev2["rsi"]), 2),
-            "atr": _round_price(last["atr"], symbol),
-            "adx": round(_safe_float(last.get("adx", 0)), 2),
-        },
-    }
+    tf = result.get("tf_summary", {}) or {}
+    tf_lines = []
+    for name in ["4H", "1H", "30M", "15M", "5M"]:
+        item = tf.get(name, {})
+        if item:
+            tf_lines.append(
+                f"{name}: RSI {item.get('rsi')} | ADX {item.get('adx')} | "
+                f"EMA50 {item.get('ema50')} | EMA200 {item.get('ema200')}"
+            )
+    tf_text = "\n".join(tf_lines) if tf_lines else "داده تایم‌فریم‌ها کامل نیست."
 
+    signal_id = None
+    if is_trade_setup(result):
+        signal_id = result.get("signal_id") or make_signal_id(symbol)
+        result["signal_id"] = signal_id
 
-def _make_levels(symbol: str, direction: str, price: float, atr: float):
-    atr = _safe_float(atr)
-    price = _safe_float(price)
-    if atr <= 0 or price <= 0:
-        return None, None, None, None
-    if direction == "BUY":
-        entry = price
-        sl = price - (atr * 1.10)
-        tp1 = price + (atr * 0.95)
-        tp2 = price + (atr * 1.65)
-    elif direction == "SELL":
-        entry = price
-        sl = price + (atr * 1.10)
-        tp1 = price - (atr * 0.95)
-        tp2 = price - (atr * 1.65)
+    if result.get("status") == "SIGNAL":
+        title = "✅ ورود فعال شد"
+        mode = "PREDICTIVE_TRIGGER"
+    elif result.get("status") == "SETUP":
+        title = "🚨 سیگنال آماده"
+        mode = "PREDICTIVE_SETUP"
     else:
-        return None, None, None, None
-    return (_round_price(entry, symbol), _round_price(sl, symbol), _round_price(tp1, symbol), _round_price(tp2, symbol))
+        title = f"📊 تحلیل {display} ({symbol})"
+        mode = "PREDICTION_ONLY"
 
+    lines = [
+        title,
+        f"وضعیت: {status_fa(result.get('status'))}",
+        f"نماد: {display} ({symbol})",
+        f"جهت: {direction_fa(result.get('direction'))}",
+        f"حالت ورود: {mode}",
+        "",
+        f"💰 قیمت فعلی: {result.get('price')}",
+        f"⭐ قدرت پیش‌بینی: {result.get('prediction_score')} / 100",
+        f"⚡ آمادگی ورود سریع: {result.get('entry_score', 0)} / 100",
+        f"🟢 قدرت خرید: {result.get('buy_score')}",
+        f"🔴 قدرت فروش: {result.get('sell_score')}",
+        "",
+        "🧭 جهت کلی تایم‌فریم‌ها:",
+        tf_text,
+        "",
+        "🧠 دلایل پیش‌بینی:",
+        reasons,
+        "",
+        "⚡ وضعیت ورود 5M/15M:",
+        entry_reasons,
+    ]
 
-def _calculate_buy_sell_power(df: pd.DataFrame, candles: int) -> Tuple[float, float]:
-    try:
-        if df is None or len(df) < candles:
-            return 50.0, 50.0
-        recent = df.tail(candles)
-        buy_body = 0.0
-        sell_body = 0.0
-        for _, row in recent.iterrows():
-            body = _safe_float(row.get("close")) - _safe_float(row.get("open"))
-            if body > 0:
-                buy_body += abs(body)
-            elif body < 0:
-                sell_body += abs(body)
-        total = buy_body + sell_body
-        if total <= 0:
-            return 50.0, 50.0
-        return round((buy_body / total) * 100, 1), round((sell_body / total) * 100, 1)
-    except Exception:
-        return 50.0, 50.0
-
-
-def _power_entry_confirmation(direction: str, entry_tf: Dict) -> Tuple[bool, str, Dict]:
-    df = entry_tf.get("df")
-    buy1, sell1 = _calculate_buy_sell_power(df, 1)
-    buy2, sell2 = _calculate_buy_sell_power(df, 2)
-    power_info = {"buy1": buy1, "sell1": sell1, "buy2": buy2, "sell2": sell2}
-    if direction == "BUY":
-        ok = buy1 >= POWER_1_CANDLE_MIN and buy2 >= POWER_2_CANDLE_MIN
-        reason = f"تایید قدرت خرید سریع: Buy Power 1C={buy1}% و 2C={buy2}% است." if ok else f"قدرت خرید سریع هنوز کافی نیست: Buy Power 1C={buy1}% و 2C={buy2}%."
-        return ok, reason, power_info
-    if direction == "SELL":
-        ok = sell1 >= POWER_1_CANDLE_MIN and sell2 >= POWER_2_CANDLE_MIN
-        reason = f"تایید قدرت فروش سریع: Sell Power 1C={sell1}% و 2C={sell2}% است." if ok else f"قدرت فروش سریع هنوز کافی نیست: Sell Power 1C={sell1}% و 2C={sell2}%."
-        return ok, reason, power_info
-    return False, "قدرت خرید/فروش: جهت نامعتبر است.", power_info
-
-
-def _fresh_momentum_confirmation(direction: str, entry_tf: Dict, power_info: Dict) -> Tuple[bool, str]:
-    df = entry_tf.get("df")
-    if df is None or len(df) < 3:
-        return False, "Fresh Momentum: داده کافی برای بررسی مومنتوم تازه وجود ندارد."
-    try:
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        macd_last = _safe_float(last.get("macd_hist"))
-        macd_prev = _safe_float(prev.get("macd_hist"))
-        rsi_last = _safe_float(last.get("rsi"))
-        rsi_prev = _safe_float(prev.get("rsi"))
-        macd_turn_up = macd_last > macd_prev
-        macd_turn_down = macd_last < macd_prev
-        rsi_up = rsi_last > rsi_prev
-        rsi_down = rsi_last < rsi_prev
-        buy1 = _safe_float(power_info.get("buy1"), 50.0)
-        buy2 = _safe_float(power_info.get("buy2"), 50.0)
-        sell1 = _safe_float(power_info.get("sell1"), 50.0)
-        sell2 = _safe_float(power_info.get("sell2"), 50.0)
-        if direction == "BUY":
-            ok = macd_turn_up and rsi_up and buy1 >= POWER_1_CANDLE_MIN and buy2 >= POWER_2_CANDLE_MIN
-            if ok:
-                return True, f"Fresh Momentum خرید تایید شد: MACD/RSI تازه صعودی شده و Buy Power 1C={buy1}% | 2C={buy2}% است."
-            return False, f"Fresh Momentum خرید هنوز کامل نیست: Buy Power 1C={buy1}% | 2C={buy2}%."
-        if direction == "SELL":
-            ok = macd_turn_down and rsi_down and sell1 >= POWER_1_CANDLE_MIN and sell2 >= POWER_2_CANDLE_MIN
-            if ok:
-                return True, f"Fresh Momentum فروش تایید شد: MACD/RSI تازه نزولی شده و Sell Power 1C={sell1}% | 2C={sell2}% است."
-            return False, f"Fresh Momentum فروش هنوز کامل نیست: Sell Power 1C={sell1}% | 2C={sell2}%."
-    except Exception:
-        return False, "Fresh Momentum: خطا در محاسبه مومنتوم تازه."
-    return False, "Fresh Momentum: جهت نامعتبر است."
-
-
-def _fast_entry_score(direction: str, entry_tf: Dict, confirm_tf: Optional[Dict] = None) -> Tuple[int, list, bool, Dict]:
-    score = 0
-    reasons = []
-    last = entry_tf["last"]
-    if direction == "BUY":
-        if last["close"] > last["ema20"]:
-            score += 20
-            reasons.append("5M: قیمت بالای EMA20 است.")
-        if last["macd_hist"] > last.get("prev_macd_hist", 0):
-            score += 18
-            reasons.append("5M: هیستوگرام MACD در حال تقویت صعودی است.")
-        if last["macd_hist"] > 0:
-            score += 10
-            reasons.append("5M: هیستوگرام MACD مثبت است.")
-        if last["rsi"] >= 50:
-            score += 14
-            reasons.append("5M: RSI بالای 50 است.")
-    elif direction == "SELL":
-        if last["close"] < last["ema20"]:
-            score += 20
-            reasons.append("5M: قیمت پایین EMA20 است.")
-        if last["macd_hist"] < last.get("prev_macd_hist", 0):
-            score += 18
-            reasons.append("5M: هیستوگرام MACD در حال تقویت نزولی است.")
-        if last["macd_hist"] < 0:
-            score += 10
-            reasons.append("5M: هیستوگرام MACD منفی است.")
-        if last["rsi"] <= 50:
-            score += 14
-            reasons.append("5M: RSI پایین 50 است.")
-    if last.get("adx", 0) >= 16:
-        score += 8
-        reasons.append("5M: ADX برای اسکالپ قابل قبول است.")
-    if confirm_tf:
-        c = confirm_tf["last"]
-        if direction == "BUY" and c["close"] > c["ema20"]:
-            score += 10
-            reasons.append("15M: قیمت با جهت خرید هم‌راستا است.")
-        elif direction == "SELL" and c["close"] < c["ema20"]:
-            score += 10
-            reasons.append("15M: قیمت با جهت فروش هم‌راستا است.")
-    power_ok, power_reason, power_info = _power_entry_confirmation(direction, entry_tf)
-    fresh_ok, fresh_reason = _fresh_momentum_confirmation(direction, entry_tf, power_info)
-    reasons.append(power_reason)
-    reasons.append(fresh_reason)
-    activation_confirmed = power_ok or fresh_ok
-    return min(100, int(score)), reasons, activation_confirmed, {"power_ok": power_ok, "fresh_momentum_ok": fresh_ok, **power_info}
-
-
-def _simple_tf_direction(item: Optional[Dict]) -> Optional[str]:
-    if not item or not item.get("success"):
-        return None
-    buy = _safe_float(item.get("buy"))
-    sell = _safe_float(item.get("sell"))
-    if buy > sell:
-        return "BUY"
-    if sell > buy:
-        return "SELL"
-    return None
-
-
-def _apply_higher_tf_context_bias(buy_score: float, sell_score: float, analyses: Dict) -> Tuple[float, float, Optional[str], Optional[str]]:
-    trend_4h = _simple_tf_direction(analyses.get("4H"))
-    trend_1h = _simple_tf_direction(analyses.get("1H"))
-    if not trend_4h or not trend_1h or trend_4h != trend_1h:
-        return buy_score, sell_score, None, None
-    if trend_4h == "BUY":
-        buy_score += HTF_CONTEXT_BIAS_POINTS
-        sell_score = max(0, sell_score - HTF_CONTEXT_BIAS_POINTS)
-        return buy_score, sell_score, "BUY", f"4H و 1H هم‌جهت خرید هستند؛ {HTF_CONTEXT_BIAS_POINTS} امتیاز به خرید اضافه و از فروش کم شد."
-    if trend_4h == "SELL":
-        sell_score += HTF_CONTEXT_BIAS_POINTS
-        buy_score = max(0, buy_score - HTF_CONTEXT_BIAS_POINTS)
-        return buy_score, sell_score, "SELL", f"4H و 1H هم‌جهت فروش هستند؛ {HTF_CONTEXT_BIAS_POINTS} امتیاز به فروش اضافه و از خرید کم شد."
-    return buy_score, sell_score, None, None
-
-
-def analyze_pair(symbol: str, activation_check: bool = False) -> Dict:
-    price_data = get_latest_price(symbol)
-    if not price_data.get("success"):
-        return {"success": False, "error": price_data.get("error", "خطا در دریافت قیمت")}
-    analyses = {}
-    errors = []
-    for label, interval in TIMEFRAMES.items():
-        item = _tf_analysis(symbol, label, interval)
-        if item.get("success"):
-            analyses[label] = item
+    if is_trade_setup(result):
+        lines.extend([
+            "",
+            "🎯 سطوح معامله:",
+            f"Entry: {result.get('entry')}",
+            f"SL: {result.get('stop_loss')}",
+            f"TP1: {result.get('tp1')}",
+            f"TP2: {result.get('tp2', '')}",
+            "",
+            f"شناسه: {signal_id}",
+        ])
+        if result.get("status") == "SETUP":
+            lines.append("این ستاپ خودکار زیر نظر می‌ماند؛ وقتی شرایط ورود کامل شد روی همین پیام اعلام می‌شود: ورود فعال شد.")
         else:
-            errors.append(f"{label}: {item.get('error')}")
-    if not analyses:
-        return {"success": False, "error": "تحلیل هیچ تایم‌فریمی موفق نبود. " + " | ".join(errors)}
-    weights = {"4H": 0.80, "1H": 1.00, "30M": 1.15, "15M": 1.35, "5M": 1.55}
-    buy_score = 0.0
-    sell_score = 0.0
-    buy_reasons = []
-    sell_reasons = []
-    tf_summary = {}
-    for label, item in analyses.items():
-        w = weights.get(label, 1.0)
-        buy_score += item["buy"] * w
-        sell_score += item["sell"] * w
-        buy_reasons.extend(item["reasons_buy"])
-        sell_reasons.extend(item["reasons_sell"])
-        tf_summary[label] = item["last"]
-    buy_score, sell_score, htf_bias_direction, htf_bias_reason = _apply_higher_tf_context_bias(buy_score, sell_score, analyses)
-    if htf_bias_reason:
-        if htf_bias_direction == "BUY":
-            buy_reasons.insert(0, htf_bias_reason)
-        elif htf_bias_direction == "SELL":
-            sell_reasons.insert(0, htf_bias_reason)
-    total = max(buy_score + sell_score + (NEUTRAL_SCORE_BASE * 2), 1)
-    buy_percent = round(((buy_score + NEUTRAL_SCORE_BASE) / total) * 100, 1)
-    sell_percent = round(((sell_score + NEUTRAL_SCORE_BASE) / total) * 100, 1)
-    if buy_percent - sell_percent >= MIN_DIRECTION_GAP:
-        direction = "BUY"
-        prediction_score = min(100, round(buy_percent, 1))
-        reasons = buy_reasons[:12]
-    elif sell_percent - buy_percent >= MIN_DIRECTION_GAP:
-        direction = "SELL"
-        prediction_score = min(100, round(sell_percent, 1))
-        reasons = sell_reasons[:12]
+            lines.append("مانیتورینگ خودکار فعال است تا TP1 / TP2 / SL بررسی شود.")
     else:
-        direction = "NEUTRAL"
-        prediction_score = round(max(buy_percent, sell_percent), 1)
-        reasons = ["اختلاف امتیاز خرید و فروش کافی نیست؛ بازار خنثی یا نامشخص است."]
-    entry_score = 0
-    entry_reasons = []
-    entry_confirmations = {}
-    status = "NO_TRADE"
-    entry = stop_loss = tp1 = tp2 = None
-    if direction in ("BUY", "SELL") and prediction_score >= SETUP_MIN_SCORE:
-        entry_tf = analyses.get("5M") or analyses.get("15M")
-        confirm_tf = analyses.get("15M")
-        if entry_tf:
-            entry_score, entry_reasons, activation_confirmed, entry_confirmations = _fast_entry_score(direction, entry_tf, confirm_tf)
-            atr = _safe_float((entry_tf.get("last") or {}).get("atr"))
-            entry, stop_loss, tp1, tp2 = _make_levels(symbol, direction, _safe_float(price_data.get("price")), atr)
-            if entry is not None and stop_loss is not None and tp1 is not None:
-                # Initial analysis must NEVER send an instant entry signal.
-                # It only creates a SETUP. Entry activation is allowed only when
-                # bot.py explicitly calls analyze_pair(..., activation_check=True)
-                # for an already stored setup.
-                if activation_check and entry_score >= ACTIVATION_MIN_SCORE and activation_confirmed:
-                    status = "SIGNAL"
-                else:
-                    status = "SETUP"
+        lines.extend([
+            "",
+            "❌ این تحلیل هنوز ستاپ قابل معامله نیست.",
+            "Entry / SL / TP فعال نیست.",
+        ])
+
+    lines.extend(["", _format_news_warning(result.get("news", {}) or {})])
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        text = text[:3800] + "\n\n... پیام کوتاه شد."
+    return text
+
+
+async def deny(update: Update):
+    user_id = update.effective_user.id if update.effective_user else "نامشخص"
+    await update.message.reply_text(
+        f"⛔ دسترسی شما مجاز نیست.\n"
+        f"آیدی شما: {user_id}\n"
+        "مالک ربات باید این آیدی را اضافه کند."
+    )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else "نامشخص"
+
+    if not OWNER_ID:
+        await update.message.reply_text(f"⚠️ OWNER_ID روی VPS تنظیم نشده است.\nآیدی شما: {user_id}")
+        return
+
+    if not ensure_access(update):
+        await deny(update)
+        return
+
+    msg = f"""
+سلام 👋
+ربات تحلیل و پیش‌بینی فارکس فعال است.
+
+آیدی شما: {user_id}
+
+دستورهای اصلی:
+طلا
+نقره
+نفت
+نفت برنت
+بیتکوین
+یورو دلار
+پوند دلار
+بهترین سیگنال
+بررسی بازار
+عیب یابی
+اخبار امروز
+آمار
+آمار 7 روز
+حذف آمار
+سیگنال‌های فعال
+زیر نظر بگیر  ← با ریپلای روی پیام سیگنال
+/id
+
+دستورات مالک:
+/adduser USER_ID
+/removeuser USER_ID
+/listusers
+
+اتو سیگنال: {'فعال' if AUTO_SIGNAL_ENABLED else 'غیرفعال'}
+حداقل امتیاز اتو سیگنال: {AUTO_SIGNAL_SCORE}
+"""
+    await update.message.reply_text(msg)
+
+
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"آیدی تلگرام شما:\n{update.effective_user.id}")
+
+
+async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await deny(update)
+        return
+
+    user_id = None
+    if context.args and context.args[0].isdigit():
+        user_id = int(context.args[0])
+    else:
+        user_id = extract_user_id_from_text(update.message.text)
+
+    if not user_id:
+        await update.message.reply_text("مثال:\n/adduser 123456789")
+        return
+
+    add_user(user_id)
+    await update.message.reply_text(f"✅ کاربر اضافه شد.\nآیدی: {user_id}\n\n{list_users_text()}")
+
+
+async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await deny(update)
+        return
+
+    user_id = None
+    if context.args and context.args[0].isdigit():
+        user_id = int(context.args[0])
+    else:
+        user_id = extract_user_id_from_text(update.message.text)
+
+    if not user_id:
+        await update.message.reply_text("مثال:\n/removeuser 123456789")
+        return
+
+    if int(user_id) == int(OWNER_ID):
+        await update.message.reply_text("⛔ مالک ربات قابل حذف نیست.")
+        return
+
+    remove_user(user_id)
+    await update.message.reply_text(f"✅ کاربر حذف شد.\nآیدی: {user_id}\n\n{list_users_text()}")
+
+
+async def list_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await deny(update)
+        return
+    await update.message.reply_text(list_users_text())
+
+
+async def send_analysis(update: Update, pair: str):
+    display = get_pair_display_name(pair)
+    await update.message.reply_text(f"⏳ در حال تحلیل {display} ({pair})...")
+
+    try:
+        result = run_analysis(pair)
+    except Exception as e:
+        remember_error("send_analysis/run_analysis", pair, e, traceback.format_exc())
+        logger.error("Analysis crashed for %s: %s\n%s", pair, e, traceback.format_exc())
+        await update.message.reply_text(f"❌ خطای داخلی هنگام تحلیل {display} ({pair}) رخ داد.\nبرای بررسی دقیق بنویس: عیب یابی")
+        return
+
+    if not result.get("success"):
+        remember_error("send_analysis/analyze_pair", pair, result.get("error"), result.get("raw"))
+        await update.message.reply_text(f"❌ خطا در تحلیل {display} ({pair})\n\n{result.get('error')}")
+        return
+
+    sent = await update.message.reply_text(format_analysis(result))
+    if is_trade_setup(result):
+        signal = parse_signal_from_result(result)
+        if signal:
+            signal["message_id"] = sent.message_id
+            signal["chat_id"] = update.effective_chat.id
+            add_active_signal(signal)
+
+
+async def best_signal(update: Update):
+    """Timeout-safe best setup command.
+
+    It scans symbols one by one, sends the best setups as soon as enough are found,
+    and keeps the response short so Telegram does not time out.
+    """
+    await safe_reply_text(update, "⏳ در حال بررسی بهترین ستاپ‌ها...")
+
+    candidates = []
+    failed_items = []
+    started = time.time()
+
+    for pair in FOREX_PAIRS:
+        # Keep manual command responsive. Auto loop will continue scanning later.
+        if time.time() - started > 75:
+            remember_error("best_signal/soft_timeout", pair, "scan stopped after 75s", "")
+            break
+
+        try:
+            r = run_analysis(pair)
+            if r.get("success"):
+                if is_initial_setup(r):
+                    candidates.append(r)
+            else:
+                failed_items.append((pair, r.get("error", "خطای نامشخص")))
+                remember_error("best_signal/analyze_pair", pair, r.get("error"), r.get("raw"))
+        except Exception as e:
+            failed_items.append((pair, str(e)))
+            remember_error("best_signal/crash", pair, e, traceback.format_exc())
+            logger.warning("Best signal analysis failed for %s: %s", pair, e)
+
+    candidates = sorted(
+        candidates,
+        key=lambda x: (_safe_float(x.get("prediction_score")), _safe_float(x.get("entry_score"))),
+        reverse=True,
+    )
+
+    if not candidates:
+        msg = "❌ فعلاً ستاپ قابل معامله وجود ندارد."
+        if failed_items:
+            msg += f"\nنمادهای بدون دیتای موفق: {len(failed_items)}"
+        msg += "\n\nنکته: اتو ستاپ در پس‌زمینه ادامه دارد."
+        await safe_reply_text(update, msg)
+        return
+
+    sent_count = 0
+    for i, r in enumerate(candidates[:BEST_SIGNAL_COUNT], start=1):
+        symbol = r.get("symbol")
+        signal_id = r.get("signal_id") or make_signal_id(symbol)
+        r["signal_id"] = signal_id
+        prefix = f"🔥 بهترین ستاپ #{i}\n\n"
+
+        try:
+            sent = await safe_reply_text(update, prefix + format_analysis(r))
+            sent_count += 1
+            if can_add_to_watchlist(symbol):
+                signal = parse_signal_from_result(r)
+                if signal:
+                    signal["message_id"] = sent.message_id
+                    signal["chat_id"] = update.effective_chat.id
+                    add_active_signal(signal)
+            else:
+                await safe_reply_text(
+                    update,
+                    f"⚠️ {symbol} به واچ‌لیست اضافه نشد؛ واچ‌لیست پر است یا این نماد قبلاً زیر نظر است."
+                )
+        except Exception as e:
+            remember_error("best_signal/send", symbol, e, traceback.format_exc())
+            logger.warning("Best signal send failed for %s: %s", symbol, e)
+
+    if sent_count == 0:
+        await safe_reply_text(update, "❌ ستاپ پیدا شد ولی ارسال تلگرام ناموفق بود. برای جزئیات بنویس: عیب یابی")
+
+
+async def market_overview(update: Update):
+    await update.message.reply_text("⏳ در حال بررسی سریع بازار...")
+
+    results = []
+    failed_items = []
+
+    for pair in FOREX_PAIRS:
+        try:
+            r = run_analysis(pair)
+            if r.get("success"):
+                results.append(r)
+            else:
+                failed_items.append((pair, r.get("error", "خطای نامشخص")))
+                remember_error("market_overview/analyze_pair", pair, r.get("error"), r.get("raw"))
+                logger.info("Market overview skipped %s: %s", pair, r.get("error"))
+        except Exception as e:
+            failed_items.append((pair, str(e)))
+            remember_error("market_overview/crash", pair, e, traceback.format_exc())
+            logger.warning("Market overview failed for %s: %s", pair, e)
+
+    if not results:
+        lines = [
+            "❌ بررسی بازار ناموفق بود.",
+            "هیچ نمادی دیتای قابل تحلیل نداد.",
+            "",
+            "نمونه خطاها:",
+        ]
+        for pair, err in failed_items[:10]:
+            lines.append(f"• {pair}: {_short_error(err)}")
+        lines.extend(["", "برای تست کامل‌تر بنویس: عیب یابی"])
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    total = len(results)
+    bullish = sum(1 for r in results if r.get("direction") == "BUY")
+    bearish = sum(1 for r in results if r.get("direction") == "SELL")
+    neutral = sum(1 for r in results if r.get("direction") == "NEUTRAL")
+
+    bullish_pct = round((bullish / total) * 100)
+    bearish_pct = round((bearish / total) * 100)
+    neutral_pct = round((neutral / total) * 100)
+
+    if neutral_pct >= 50:
+        if bearish > bullish:
+            mood = "بازار بیشتر رنج است، اما تمایل نزولی دارد."
+            advice = "سیگنال‌های فروش اعتبار بیشتری دارند، ولی چون بازار رنج است با احتیاط وارد شو."
+        elif bullish > bearish:
+            mood = "بازار بیشتر رنج است، اما تمایل صعودی دارد."
+            advice = "سیگنال‌های خرید اعتبار بیشتری دارند، ولی چون بازار رنج است با احتیاط وارد شو."
         else:
-            status = "PREDICTION_ONLY"
-    elif direction in ("BUY", "SELL"):
-        status = "PREDICTION_ONLY"
-    news = get_news_risk(symbol)
-    return {
-        "success": True,
-        "symbol": symbol,
-        "price": _round_price(price_data.get("price"), symbol),
-        "direction": direction,
-        "prediction_score": prediction_score,
-        "buy_score": buy_percent,
-        "sell_score": sell_percent,
-        "status": status,
-        "entry_score": entry_score,
-        "entry": entry,
-        "stop_loss": stop_loss,
-        "tp1": tp1,
-        "tp2": tp2,
-        "reasons": reasons or ["دلیل مشخصی ثبت نشد."],
-        "entry_reasons": entry_reasons or ["تریگر ورود سریع هنوز کامل نیست."],
-        "entry_confirmations": entry_confirmations,
-        "tf_summary": tf_summary,
-        "news": news,
-        "errors": errors,
-    }
+            mood = "بازار عمدتاً رنج و بدون جهت قوی است."
+            advice = "فعلاً فقط سیگنال‌های خیلی قوی ارزش بررسی دارند."
+    elif bearish > bullish:
+        mood = "قدرت نزولی بازار بیشتر است."
+        advice = "سیگنال‌های فروش اعتبار بیشتری دارند."
+    elif bullish > bearish:
+        mood = "قدرت صعودی بازار بیشتر است."
+        advice = "سیگنال‌های خرید اعتبار بیشتری دارند."
+    else:
+        mood = "بازار متعادل و بدون برتری واضح است."
+        advice = "بهتر است تا شکل‌گیری جهت واضح‌تر صبر شود."
+
+    lines = [
+        "🌍 بررسی سریع بازار",
+        "",
+        f"تعداد نمادهای بررسی‌شده: {total}",
+    ]
+
+    if failed_items:
+        lines.append(f"نمادهای بدون دیتای موفق: {len(failed_items)}")
+
+    lines.extend([
+        "",
+        f"🟢 صعودی: {bullish} نماد / {bullish_pct}٪",
+        f"🔴 نزولی: {bearish} نماد / {bearish_pct}٪",
+        f"⚪ رنج/خنثی: {neutral} نماد / {neutral_pct}٪",
+        "",
+        f"📌 جمع‌بندی: {mood}",
+        f"⚠️ نتیجه: {advice}",
+        "",
+        "نمادهای قوی‌تر:",
+    ])
+
+    sorted_results = sorted(results, key=lambda r: _safe_float(r.get("prediction_score")), reverse=True)
+    for r in sorted_results[:10]:
+        symbol = r.get("symbol", "")
+        display = get_pair_display_name(symbol)
+        lines.append(
+            f"• {display} ({symbol}): {direction_fa(r.get('direction'))} | "
+            f"امتیاز {r.get('prediction_score')}/100"
+        )
+
+    if failed_items:
+        lines.extend(["", "نمونه نمادهای ناموفق:"])
+        for pair, err in failed_items[:5]:
+            lines.append(f"• {pair}: {_short_error(err, 80)}")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Telegram-side diagnostic report for API/symbol/analysis problems."""
+    await update.message.reply_text("🧪 در حال عیب‌یابی ربات...")
+
+    lines = [
+        "🧪 گزارش سلامت ربات",
+        "",
+        f"BOT_TOKEN: {'✅ تنظیم شده' if BOT_TOKEN else '❌ تنظیم نشده'}",
+        f"OWNER_ID: {'✅ تنظیم شده' if OWNER_ID else '❌ تنظیم نشده'}",
+        f"TWELVE_DATA_API_KEY: {'✅ تنظیم شده' if TWELVE_DATA_API_KEY else '❌ تنظیم نشده'}",
+        f"اتو سیگنال: {'✅ فعال' if AUTO_SIGNAL_ENABLED else '⏸ غیرفعال'}",
+        f"حداقل امتیاز اتو سیگنال: {AUTO_SIGNAL_SCORE}",
+        f"تعداد نمادها: {len(FOREX_PAIRS)}",
+        "",
+    ]
+
+    if not TWELVE_DATA_API_KEY:
+        lines.append("❌ مشکل اصلی: TWELVE_DATA_API_KEY تنظیم نشده است.")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    # Test all symbols but keep output short.
+    ok_price = 0
+    ok_candle = 0
+    ok_analysis = 0
+    failed = []
+
+    for pair in FOREX_PAIRS:
+        display = get_pair_display_name(pair)
+        try:
+            price = get_latest_price(pair)
+            if not price.get("success"):
+                failed.append((pair, display, "price", price.get("error", "خطا در دریافت قیمت")))
+                continue
+            ok_price += 1
+
+            candles = get_candles(pair, interval="5min", outputsize=80)
+            if not candles.get("success"):
+                failed.append((pair, display, "candles 5min", candles.get("error", "خطا در دریافت کندل")))
+                continue
+            ok_candle += 1
+
+            analysis = run_analysis(pair)
+            if not analysis.get("success"):
+                failed.append((pair, display, "analysis", analysis.get("error", "تحلیل ناموفق")))
+                continue
+            ok_analysis += 1
+        except Exception as e:
+            failed.append((pair, display, "exception", str(e)))
+            remember_error("health_check", pair, e, traceback.format_exc())
+
+    lines.extend([
+        "نتیجه تست نمادها:",
+        f"✅ قیمت موفق: {ok_price} از {len(FOREX_PAIRS)}",
+        f"✅ کندل 5M موفق: {ok_candle} از {len(FOREX_PAIRS)}",
+        f"✅ تحلیل کامل موفق: {ok_analysis} از {len(FOREX_PAIRS)}",
+        f"❌ ناموفق: {len(failed)}",
+        "",
+    ])
+
+    if failed:
+        lines.append("نمونه خطاهای مهم:")
+        for pair, display, stage, err in failed[:12]:
+            lines.append(f"• {display} ({pair}) | {stage}: {_short_error(err, 90)}")
+        lines.extend([
+            "",
+            "تشخیص احتمالی:",
+            "اگر بیشتر نمادها خطا دارند، API Key یا محدودیت Twelve Data مشکل دارد.",
+            "اگر فقط چند نماد مثل نفت/شاخص‌ها خطا دارند، آن نماد توسط پلن فعلی API پشتیبانی نمی‌شود.",
+        ])
+    else:
+        lines.append("✅ همه نمادها در تست سریع سالم بودند.")
+
+    if LAST_ERRORS:
+        lines.extend(["", "آخرین خطاهای ذخیره‌شده:"])
+        for item in LAST_ERRORS[-5:]:
+            sym = f" | {item.get('symbol')}" if item.get("symbol") else ""
+            lines.append(f"• {item.get('area')}{sym}: {_short_error(item.get('error'), 80)}")
+
+    # Telegram max message is 4096 chars; keep it safe.
+    text = "\n".join(lines)
+    if len(text) > 3800:
+        text = text[:3700] + "\n\n... گزارش کوتاه شد."
+    await update.message.reply_text(text)
+
+
+async def watch_signal(update: Update):
+    reply = update.message.reply_to_message
+    if not reply or not reply.text:
+        await update.message.reply_text("برای زیر نظر گرفتن، روی پیام سیگنال ریپلای کن و بنویس: زیر نظر بگیر")
+        return
+
+    signal = parse_signal_from_text(reply.text)
+    if not signal:
+        await update.message.reply_text("❌ نتونستم Entry/SL/TP سیگنال رو بخونم.")
+        return
+
+    added = add_active_signal(signal)
+    if added:
+        await update.message.reply_text(f"👁 سیگنال {signal['symbol']} زیر نظر گرفته شد.\nشناسه: {signal['signal_id']}")
+    else:
+        await update.message.reply_text("این سیگنال قبلاً زیر نظر گرفته شده بود.")
+
+
+async def check_setup_activations(app: Application):
+    """Activate stored SETUP signals when the fresh 5M/15M trigger becomes valid."""
+    if not OWNER_ID:
+        return
+
+    for s in list_active_signals():
+        try:
+            if s.get("stage") != "SETUP":
+                continue
+
+            symbol = s.get("symbol")
+            r = run_analysis(symbol)
+            if not r.get("success"):
+                continue
+
+            if (
+                r.get("status") == "SIGNAL"
+                and r.get("direction") == s.get("direction")
+                and r.get("entry") is not None
+                and _safe_float(r.get("prediction_score")) >= 58
+            ):
+                r["signal_id"] = s.get("signal_id")
+                text = "✅ ورود فعال شد\n\n" + format_analysis(r)
+                sent = await safe_bot_send(
+                    app.bot,
+                    chat_id=s.get("chat_id") or OWNER_ID,
+                    text=text,
+                    reply_to_message_id=s.get("message_id"),
+                    allow_sending_without_reply=True,
+                )
+                activate_signal(s.get("signal_id"), r, sent.message_id)
+        except Exception as e:
+            remember_error("check_setup_activations", s.get("symbol", ""), e, traceback.format_exc())
+            logger.warning("Setup activation check failed: %s", e)
+
+
+async def check_tracker_events(app: Application):
+    try:
+        if not OWNER_ID:
+            return
+        await check_setup_activations(app)
+        cancel_events = prune_stale_setups()
+        events = cancel_events + check_active_signals()
+        for ev in events:
+            s = ev["signal"]
+            if ev["result"] == "TP1":
+                res = "✅ TP1 خورد"
+            elif ev["result"] == "TP2":
+                res = "🎯 TP2 خورد"
+            else:
+                res = "❌ SL خورد"
+            await app.bot.send_message(
+                chat_id=s.get("chat_id") or OWNER_ID,
+                text=f"{res}\n{s.get('symbol')} | قیمت فعلی: {ev['price']}\nشناسه: {s.get('signal_id')}",
+                reply_to_message_id=s.get("activation_message_id") or s.get("message_id"),
+                allow_sending_without_reply=True,
+            )
+    except Exception as e:
+        remember_error("check_tracker_events", "", e, traceback.format_exc())
+        logger.warning("Tracker check failed: %s", e)
+
+
+async def auto_signal_loop(app: Application):
+    await asyncio.sleep(10)
+    while True:
+        try:
+            await check_tracker_events(app)
+            if AUTO_SIGNAL_ENABLED and OWNER_ID:
+                now = time.time()
+                for pair in FOREX_PAIRS:
+                    last_ts = LAST_AUTO_SIGNALS.get(pair, 0)
+                    if now - last_ts < AUTO_SIGNAL_COOLDOWN_MINUTES * 60:
+                        continue
+                    try:
+                        r = run_analysis(pair)
+                    except Exception as e:
+                        remember_error("auto_signal_loop/run_analysis", pair, e, traceback.format_exc())
+                        logger.warning("Auto analysis failed for %s: %s", pair, e)
+                        continue
+                    if not r.get("success"):
+                        continue
+                    if is_trade_setup(r) and _safe_float(r.get("prediction_score")) >= AUTO_SIGNAL_SCORE:
+                        signal = parse_signal_from_result(r)
+                        if signal:
+                            r["signal_id"] = signal["signal_id"]
+                        text = "🚨 اتو ستاپ فارکس\n\n" + format_analysis(r)
+                        sent = await safe_bot_send(app.bot, chat_id=OWNER_ID, text=text)
+                        if signal:
+                            signal["message_id"] = sent.message_id
+                            signal["chat_id"] = OWNER_ID
+                            add_active_signal(signal)
+                        LAST_AUTO_SIGNALS[pair] = now
+            await asyncio.sleep(max(60, AUTO_SCAN_INTERVAL_MINUTES * 60))
+        except Exception as e:
+            remember_error("auto_signal_loop", "", e, traceback.format_exc())
+            logger.error("Auto signal loop error: %s\n%s", e, traceback.format_exc())
+            await asyncio.sleep(60)
+
+
+async def post_init(app: Application):
+    app.create_task(auto_signal_loop(app))
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not ensure_access(update):
+            await deny(update)
+            return
+
+        text = (update.message.text or "").strip()
+        text_lower = text.lower()
+        if not text_lower:
+            return
+
+        if (
+            text_lower.startswith(("adduser", "add user"))
+            or "افزودن کاربر" in text_lower
+            or "اضافه کردن کاربر" in text_lower
+            or "اد کردن کاربر" in text_lower
+        ):
+            await add_user_command(update, context)
+            return
+
+        if (
+            text_lower.startswith(("removeuser", "remove user"))
+            or "حذف کاربر" in text_lower
+            or "پاک کردن کاربر" in text_lower
+        ):
+            await remove_user_command(update, context)
+            return
+
+        if "لیست کاربران" in text_lower or "کاربران مجاز" in text_lower:
+            await list_users_command(update, context)
+            return
+
+        if "راهنما" in text_lower:
+            await start(update, context)
+            return
+
+        if "عیب" in text_lower or "دیباگ" in text_lower or "سلامت" in text_lower or text_lower in ("health", "debug"):
+            await health_check(update, context)
+            return
+
+        if "بهترین سیگنال" in text_lower:
+            await best_signal(update)
+            return
+
+        if text_lower in ("بررسی", "بررسی بازار", "وضعیت بازار", "وضعیت"):
+            await market_overview(update)
+            return
+
+        if "اخبار" in text_lower:
+            await update.message.reply_text(format_news_message())
+            return
+
+        if "حذف آمار" in text_lower or "ریست آمار" in text_lower:
+            reset_stats()
+            await update.message.reply_text("🗑 آمار سیگنال‌ها حذف شد.")
+            return
+
+        if "آمار" in text_lower:
+            await update.message.reply_text(format_stats(parse_days(text_lower)))
+            return
+
+        if "سیگنال‌های فعال" in text_lower or "سیگنال های فعال" in text_lower:
+            await update.message.reply_text(format_active_signals())
+            return
+
+        if "زیر نظر" in text_lower or text_lower == "نظر":
+            await watch_signal(update)
+            return
+
+        pair = normalize_pair(text)
+        if pair:
+            await send_analysis(update, pair)
+            return
+
+        await update.message.reply_text(
+            "متوجه نشدم. بنویس مثلا:\n"
+            "طلا\n"
+            "نقره\n"
+            "نفت\n"
+            "یورو دلار\n"
+            "بهترین سیگنال\n"
+            "بررسی بازار\n"
+            "عیب یابی\n"
+            "اخبار امروز\n"
+            "آمار"
+        )
+    except Exception as e:
+        remember_error("handle_message", "", e, traceback.format_exc())
+        logger.error("Unhandled error: %s\n%s", e, traceback.format_exc())
+        await update.message.reply_text(f"❌ خطای داخلی ربات رخ داد:\n{e}\n\nبرای بررسی دقیق بنویس: عیب یابی")
+
+
+def main():
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN تنظیم نشده است.")
+
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("id", id_command))
+    app.add_handler(CommandHandler("health", health_check))
+    app.add_handler(CommandHandler("debug", health_check))
+    app.add_handler(CommandHandler("adduser", add_user_command))
+    app.add_handler(CommandHandler("removeuser", remove_user_command))
+    app.add_handler(CommandHandler("listusers", list_users_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("Forex bot is running...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
