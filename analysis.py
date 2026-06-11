@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """Prediction-focused Forex analysis engine.
 
-Fixed version:
-- No circular import.
-- Exposes analyze_pair().
-- Normal scan creates SETUP only.
-- activation_check=True may return SIGNAL for reply-based activation.
-- News is warning-only.
+Architecture:
+- 4H/1H = soft higher-timeframe market direction context
+- 30M/15M = setup quality and readiness
+- 5M = fast activation trigger
+- Buy/Sell Power 1C/2C = activation confirmation only, not prediction scoring
+- Fresh Momentum = activation confirmation only, not prediction scoring
+- News is warning-only and never blocks signals
+
+This file is UTF-8/Persian safe and VPS-safe.
 """
 
 import math
@@ -81,41 +84,34 @@ def _tf_analysis(symbol: str, label: str, interval: str) -> Dict:
     raw = get_candles(symbol, interval=interval, outputsize=250)
     if not raw.get("success"):
         return {"success": False, "error": raw.get("error", "خطا در دریافت دیتا")}
-
     df = calculate_indicators(raw["data"]).dropna().reset_index(drop=True)
     if len(df) < 8:
         return {"success": False, "error": "داده کافی برای اندیکاتورها وجود ندارد."}
-
     last = df.iloc[-1]
     prev = df.iloc[-2]
     prev2 = df.iloc[-3]
-
     buy = 0
     sell = 0
     reasons_buy = []
     reasons_sell = []
-
     if last["ema50"] > last["ema200"]:
         buy += 16
         reasons_buy.append(f"{label}: EMA50 بالای EMA200 است.")
     elif last["ema50"] < last["ema200"]:
         sell += 16
         reasons_sell.append(f"{label}: EMA50 پایین EMA200 است.")
-
     if last["close"] > last["ema20"]:
         buy += 8
         reasons_buy.append(f"{label}: قیمت بالای EMA20 است.")
     elif last["close"] < last["ema20"]:
         sell += 8
         reasons_sell.append(f"{label}: قیمت پایین EMA20 است.")
-
     if last["macd"] > last["macd_signal"]:
         buy += 9
         reasons_buy.append(f"{label}: MACD صعودی است.")
     elif last["macd"] < last["macd_signal"]:
         sell += 9
         reasons_sell.append(f"{label}: MACD نزولی است.")
-
     if last["macd_hist"] > prev["macd_hist"] > prev2["macd_hist"]:
         buy += 8
         reasons_buy.append(f"{label}: هیستوگرام MACD دو کندل پشت‌سرهم صعودی تقویت شده است.")
@@ -126,7 +122,6 @@ def _tf_analysis(symbol: str, label: str, interval: str) -> Dict:
         buy += 4
     elif last["macd_hist"] < prev["macd_hist"]:
         sell += 4
-
     if last["rsi"] > prev["rsi"] > prev2["rsi"]:
         buy += 7
         reasons_buy.append(f"{label}: شیب RSI دو کندل صعودی است.")
@@ -137,18 +132,15 @@ def _tf_analysis(symbol: str, label: str, interval: str) -> Dict:
         buy += 3
     elif last["rsi"] < prev["rsi"]:
         sell += 3
-
     if 44 <= last["rsi"] <= 68:
         buy += 4
     if 32 <= last["rsi"] <= 56:
         sell += 4
-
-    if _safe_float(last.get("adx", 0)) >= 16:
+    if last.get("adx", 0) >= 16:
         if buy > sell:
             buy += 4
         elif sell > buy:
             sell += 4
-
     return {
         "success": True,
         "label": label,
@@ -181,24 +173,19 @@ def _make_levels(symbol: str, direction: str, price: float, atr: float):
     price = _safe_float(price)
     if atr <= 0 or price <= 0:
         return None, None, None, None
-
     if direction == "BUY":
-        return (
-            _round_price(price, symbol),
-            _round_price(price - (atr * 1.10), symbol),
-            _round_price(price + (atr * 0.95), symbol),
-            _round_price(price + (atr * 1.65), symbol),
-        )
-
-    if direction == "SELL":
-        return (
-            _round_price(price, symbol),
-            _round_price(price + (atr * 1.10), symbol),
-            _round_price(price - (atr * 0.95), symbol),
-            _round_price(price - (atr * 1.65), symbol),
-        )
-
-    return None, None, None, None
+        entry = price
+        sl = price - (atr * 1.10)
+        tp1 = price + (atr * 0.95)
+        tp2 = price + (atr * 1.65)
+    elif direction == "SELL":
+        entry = price
+        sl = price + (atr * 1.10)
+        tp1 = price - (atr * 0.95)
+        tp2 = price - (atr * 1.65)
+    else:
+        return None, None, None, None
+    return (_round_price(entry, symbol), _round_price(sl, symbol), _round_price(tp1, symbol), _round_price(tp2, symbol))
 
 
 def _calculate_buy_sell_power(df: pd.DataFrame, candles: int) -> Tuple[float, float]:
@@ -226,26 +213,22 @@ def _power_entry_confirmation(direction: str, entry_tf: Dict) -> Tuple[bool, str
     df = entry_tf.get("df")
     buy1, sell1 = _calculate_buy_sell_power(df, 1)
     buy2, sell2 = _calculate_buy_sell_power(df, 2)
-    info = {"buy1": buy1, "sell1": sell1, "buy2": buy2, "sell2": sell2}
-
+    power_info = {"buy1": buy1, "sell1": sell1, "buy2": buy2, "sell2": sell2}
     if direction == "BUY":
         ok = buy1 >= POWER_1_CANDLE_MIN and buy2 >= POWER_2_CANDLE_MIN
         reason = f"تایید قدرت خرید سریع: Buy Power 1C={buy1}% و 2C={buy2}% است." if ok else f"قدرت خرید سریع هنوز کافی نیست: Buy Power 1C={buy1}% و 2C={buy2}%."
-        return ok, reason, info
-
+        return ok, reason, power_info
     if direction == "SELL":
         ok = sell1 >= POWER_1_CANDLE_MIN and sell2 >= POWER_2_CANDLE_MIN
         reason = f"تایید قدرت فروش سریع: Sell Power 1C={sell1}% و 2C={sell2}% است." if ok else f"قدرت فروش سریع هنوز کافی نیست: Sell Power 1C={sell1}% و 2C={sell2}%."
-        return ok, reason, info
-
-    return False, "قدرت خرید/فروش: جهت نامعتبر است.", info
+        return ok, reason, power_info
+    return False, "قدرت خرید/فروش: جهت نامعتبر است.", power_info
 
 
 def _fresh_momentum_confirmation(direction: str, entry_tf: Dict, power_info: Dict) -> Tuple[bool, str]:
     df = entry_tf.get("df")
     if df is None or len(df) < 3:
         return False, "Fresh Momentum: داده کافی برای بررسی مومنتوم تازه وجود ندارد."
-
     try:
         last = df.iloc[-1]
         prev = df.iloc[-2]
@@ -253,31 +236,26 @@ def _fresh_momentum_confirmation(direction: str, entry_tf: Dict, power_info: Dic
         macd_prev = _safe_float(prev.get("macd_hist"))
         rsi_last = _safe_float(last.get("rsi"))
         rsi_prev = _safe_float(prev.get("rsi"))
-
+        macd_turn_up = macd_last > macd_prev
+        macd_turn_down = macd_last < macd_prev
+        rsi_up = rsi_last > rsi_prev
+        rsi_down = rsi_last < rsi_prev
+        buy1 = _safe_float(power_info.get("buy1"), 50.0)
+        buy2 = _safe_float(power_info.get("buy2"), 50.0)
+        sell1 = _safe_float(power_info.get("sell1"), 50.0)
+        sell2 = _safe_float(power_info.get("sell2"), 50.0)
         if direction == "BUY":
-            ok = (
-                macd_last > macd_prev
-                and rsi_last > rsi_prev
-                and _safe_float(power_info.get("buy1"), 50.0) >= POWER_1_CANDLE_MIN
-                and _safe_float(power_info.get("buy2"), 50.0) >= POWER_2_CANDLE_MIN
-            )
+            ok = macd_turn_up and rsi_up and buy1 >= POWER_1_CANDLE_MIN and buy2 >= POWER_2_CANDLE_MIN
             if ok:
-                return True, "Fresh Momentum خرید تایید شد."
-            return False, "Fresh Momentum خرید هنوز کامل نیست."
-
+                return True, f"Fresh Momentum خرید تایید شد: MACD/RSI تازه صعودی شده و Buy Power 1C={buy1}% | 2C={buy2}% است."
+            return False, f"Fresh Momentum خرید هنوز کامل نیست: Buy Power 1C={buy1}% | 2C={buy2}%."
         if direction == "SELL":
-            ok = (
-                macd_last < macd_prev
-                and rsi_last < rsi_prev
-                and _safe_float(power_info.get("sell1"), 50.0) >= POWER_1_CANDLE_MIN
-                and _safe_float(power_info.get("sell2"), 50.0) >= POWER_2_CANDLE_MIN
-            )
+            ok = macd_turn_down and rsi_down and sell1 >= POWER_1_CANDLE_MIN and sell2 >= POWER_2_CANDLE_MIN
             if ok:
-                return True, "Fresh Momentum فروش تایید شد."
-            return False, "Fresh Momentum فروش هنوز کامل نیست."
+                return True, f"Fresh Momentum فروش تایید شد: MACD/RSI تازه نزولی شده و Sell Power 1C={sell1}% | 2C={sell2}% است."
+            return False, f"Fresh Momentum فروش هنوز کامل نیست: Sell Power 1C={sell1}% | 2C={sell2}%."
     except Exception:
         return False, "Fresh Momentum: خطا در محاسبه مومنتوم تازه."
-
     return False, "Fresh Momentum: جهت نامعتبر است."
 
 
@@ -285,7 +263,6 @@ def _fast_entry_score(direction: str, entry_tf: Dict, confirm_tf: Optional[Dict]
     score = 0
     reasons = []
     last = entry_tf["last"]
-
     if direction == "BUY":
         if last["close"] > last["ema20"]:
             score += 20
@@ -299,7 +276,6 @@ def _fast_entry_score(direction: str, entry_tf: Dict, confirm_tf: Optional[Dict]
         if last["rsi"] >= 50:
             score += 14
             reasons.append("5M: RSI بالای 50 است.")
-
     elif direction == "SELL":
         if last["close"] < last["ema20"]:
             score += 20
@@ -313,11 +289,9 @@ def _fast_entry_score(direction: str, entry_tf: Dict, confirm_tf: Optional[Dict]
         if last["rsi"] <= 50:
             score += 14
             reasons.append("5M: RSI پایین 50 است.")
-
     if last.get("adx", 0) >= 16:
         score += 8
         reasons.append("5M: ADX برای اسکالپ قابل قبول است.")
-
     if confirm_tf:
         c = confirm_tf["last"]
         if direction == "BUY" and c["close"] > c["ema20"]:
@@ -326,18 +300,12 @@ def _fast_entry_score(direction: str, entry_tf: Dict, confirm_tf: Optional[Dict]
         elif direction == "SELL" and c["close"] < c["ema20"]:
             score += 10
             reasons.append("15M: قیمت با جهت فروش هم‌راستا است.")
-
     power_ok, power_reason, power_info = _power_entry_confirmation(direction, entry_tf)
     fresh_ok, fresh_reason = _fresh_momentum_confirmation(direction, entry_tf, power_info)
     reasons.append(power_reason)
     reasons.append(fresh_reason)
-
     activation_confirmed = power_ok or fresh_ok
-    return min(100, int(score)), reasons, activation_confirmed, {
-        "power_ok": power_ok,
-        "fresh_momentum_ok": fresh_ok,
-        **power_info,
-    }
+    return min(100, int(score)), reasons, activation_confirmed, {"power_ok": power_ok, "fresh_momentum_ok": fresh_ok, **power_info}
 
 
 def _simple_tf_direction(item: Optional[Dict]) -> Optional[str]:
@@ -355,33 +323,23 @@ def _simple_tf_direction(item: Optional[Dict]) -> Optional[str]:
 def _apply_higher_tf_context_bias(buy_score: float, sell_score: float, analyses: Dict) -> Tuple[float, float, Optional[str], Optional[str]]:
     trend_4h = _simple_tf_direction(analyses.get("4H"))
     trend_1h = _simple_tf_direction(analyses.get("1H"))
-
     if not trend_4h or not trend_1h or trend_4h != trend_1h:
         return buy_score, sell_score, None, None
-
     if trend_4h == "BUY":
         buy_score += HTF_CONTEXT_BIAS_POINTS
         sell_score = max(0, sell_score - HTF_CONTEXT_BIAS_POINTS)
         return buy_score, sell_score, "BUY", f"4H و 1H هم‌جهت خرید هستند؛ {HTF_CONTEXT_BIAS_POINTS} امتیاز به خرید اضافه و از فروش کم شد."
-
     if trend_4h == "SELL":
         sell_score += HTF_CONTEXT_BIAS_POINTS
         buy_score = max(0, buy_score - HTF_CONTEXT_BIAS_POINTS)
         return buy_score, sell_score, "SELL", f"4H و 1H هم‌جهت فروش هستند؛ {HTF_CONTEXT_BIAS_POINTS} امتیاز به فروش اضافه و از خرید کم شد."
-
     return buy_score, sell_score, None, None
 
 
-def analyze_pair(symbol: str, activation_check: bool = False) -> Dict:
-    """Analyze symbol and return bot-compatible dict.
-
-    activation_check=False: first message is always SETUP, never direct SIGNAL.
-    activation_check=True: may return SIGNAL for reply activation.
-    """
+def analyze_pair(symbol: str) -> Dict:
     price_data = get_latest_price(symbol)
     if not price_data.get("success"):
         return {"success": False, "error": price_data.get("error", "خطا در دریافت قیمت")}
-
     analyses = {}
     errors = []
     for label, interval in TIMEFRAMES.items():
@@ -390,17 +348,14 @@ def analyze_pair(symbol: str, activation_check: bool = False) -> Dict:
             analyses[label] = item
         else:
             errors.append(f"{label}: {item.get('error')}")
-
     if not analyses:
         return {"success": False, "error": "تحلیل هیچ تایم‌فریمی موفق نبود. " + " | ".join(errors)}
-
     weights = {"4H": 0.80, "1H": 1.00, "30M": 1.15, "15M": 1.35, "5M": 1.55}
     buy_score = 0.0
     sell_score = 0.0
     buy_reasons = []
     sell_reasons = []
     tf_summary = {}
-
     for label, item in analyses.items():
         w = weights.get(label, 1.0)
         buy_score += item["buy"] * w
@@ -408,18 +363,15 @@ def analyze_pair(symbol: str, activation_check: bool = False) -> Dict:
         buy_reasons.extend(item["reasons_buy"])
         sell_reasons.extend(item["reasons_sell"])
         tf_summary[label] = item["last"]
-
     buy_score, sell_score, htf_bias_direction, htf_bias_reason = _apply_higher_tf_context_bias(buy_score, sell_score, analyses)
     if htf_bias_reason:
         if htf_bias_direction == "BUY":
             buy_reasons.insert(0, htf_bias_reason)
         elif htf_bias_direction == "SELL":
             sell_reasons.insert(0, htf_bias_reason)
-
     total = max(buy_score + sell_score + (NEUTRAL_SCORE_BASE * 2), 1)
     buy_percent = round(((buy_score + NEUTRAL_SCORE_BASE) / total) * 100, 1)
     sell_percent = round(((sell_score + NEUTRAL_SCORE_BASE) / total) * 100, 1)
-
     if buy_percent - sell_percent >= MIN_DIRECTION_GAP:
         direction = "BUY"
         prediction_score = min(100, round(buy_percent, 1))
@@ -432,13 +384,11 @@ def analyze_pair(symbol: str, activation_check: bool = False) -> Dict:
         direction = "NEUTRAL"
         prediction_score = round(max(buy_percent, sell_percent), 1)
         reasons = ["اختلاف امتیاز خرید و فروش کافی نیست؛ بازار خنثی یا نامشخص است."]
-
     entry_score = 0
     entry_reasons = []
     entry_confirmations = {}
     status = "NO_TRADE"
     entry = stop_loss = tp1 = tp2 = None
-
     if direction in ("BUY", "SELL") and prediction_score >= SETUP_MIN_SCORE:
         entry_tf = analyses.get("5M") or analyses.get("15M")
         confirm_tf = analyses.get("15M")
@@ -447,7 +397,7 @@ def analyze_pair(symbol: str, activation_check: bool = False) -> Dict:
             atr = _safe_float((entry_tf.get("last") or {}).get("atr"))
             entry, stop_loss, tp1, tp2 = _make_levels(symbol, direction, _safe_float(price_data.get("price")), atr)
             if entry is not None and stop_loss is not None and tp1 is not None:
-                if activation_check and entry_score >= ACTIVATION_MIN_SCORE and activation_confirmed:
+                if entry_score >= ACTIVATION_MIN_SCORE and activation_confirmed:
                     status = "SIGNAL"
                 else:
                     status = "SETUP"
@@ -455,7 +405,7 @@ def analyze_pair(symbol: str, activation_check: bool = False) -> Dict:
             status = "PREDICTION_ONLY"
     elif direction in ("BUY", "SELL"):
         status = "PREDICTION_ONLY"
-
+    news = get_news_risk(symbol)
     return {
         "success": True,
         "symbol": symbol,
@@ -474,6 +424,6 @@ def analyze_pair(symbol: str, activation_check: bool = False) -> Dict:
         "entry_reasons": entry_reasons or ["تریگر ورود سریع هنوز کامل نیست."],
         "entry_confirmations": entry_confirmations,
         "tf_summary": tf_summary,
-        "news": get_news_risk(symbol),
+        "news": news,
         "errors": errors,
     }
