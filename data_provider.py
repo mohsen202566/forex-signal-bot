@@ -65,25 +65,6 @@ YAHOO_SYMBOLS = {
     "SOL/USD": "SOL-USD",
 }
 
-
-# Alternative Yahoo tickers used only if the main ticker returns Not Found / no data.
-# This is especially useful for metals on some VPS/IP regions where XAUUSD=X or XAGUSD=X may fail.
-YAHOO_FALLBACK_SYMBOLS = {
-    "XAU/USD": ["GC=F", "MGC=F"],
-    "XAG/USD": ["SI=F", "SIL=F"],
-}
-
-
-def _get_yahoo_tickers(symbol: str):
-    main = YAHOO_SYMBOLS.get(symbol)
-    tickers = []
-    if main:
-        tickers.append(main)
-    for alt in YAHOO_FALLBACK_SYMBOLS.get(symbol, []):
-        if alt and alt not in tickers:
-            tickers.append(alt)
-    return tickers
-
 STOOQ_SYMBOLS = {
     "EUR/USD": "eurusd",
     "GBP/USD": "gbpusd",
@@ -196,110 +177,94 @@ def _resample_4h(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 
 
 def _yahoo_direct_candles(symbol: str, interval: str, outputsize: int):
-    tickers = _get_yahoo_tickers(symbol)
-    if not tickers:
+    ticker = YAHOO_SYMBOLS.get(symbol)
+    if not ticker:
         return {"success": False, "error": f"Yahoo ticker برای {symbol} تعریف نشده است."}
 
     yahoo_interval = INTERVAL_MAP_YAHOO.get(interval, interval)
     yahoo_range = RANGE_BY_INTERVAL.get(yahoo_interval, "60d")
-    errors = []
 
-    for ticker in tickers:
-        try:
-            response = requests.get(
-                YAHOO_CHART_URL.format(ticker=ticker),
-                params={"interval": yahoo_interval, "range": yahoo_range, "includePrePost": "false"},
-                timeout=25,
-                headers={"User-Agent": "Mozilla/5.0"},
-            )
-            data = response.json()
+    try:
+        response = requests.get(
+            YAHOO_CHART_URL.format(ticker=ticker),
+            params={"interval": yahoo_interval, "range": yahoo_range, "includePrePost": "false"},
+            timeout=25,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        data = response.json()
 
-            chart = data.get("chart", {})
-            if chart.get("error"):
-                errors.append(f"{ticker}: {chart.get('error')}")
-                continue
+        chart = data.get("chart", {})
+        if chart.get("error"):
+            return {"success": False, "error": str(chart.get("error"))}
 
-            result = (chart.get("result") or [None])[0]
-            if not result:
-                errors.append(f"{ticker}: Yahoo داده‌ای برنگرداند.")
-                continue
+        result = (chart.get("result") or [None])[0]
+        if not result:
+            return {"success": False, "error": "Yahoo داده‌ای برنگرداند."}
 
-            timestamps = result.get("timestamp") or []
-            quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+        timestamps = result.get("timestamp") or []
+        quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
 
-            if not timestamps or not quote:
-                errors.append(f"{ticker}: Yahoo کندل معتبر نداد.")
-                continue
+        if not timestamps or not quote:
+            return {"success": False, "error": "Yahoo کندل معتبر نداد."}
 
-            df = pd.DataFrame({
-                "datetime": pd.to_datetime(timestamps, unit="s", utc=True).tz_localize(None),
-                "open": quote.get("open"),
-                "high": quote.get("high"),
-                "low": quote.get("low"),
-                "close": quote.get("close"),
-            })
+        df = pd.DataFrame({
+            "datetime": pd.to_datetime(timestamps, unit="s", utc=True).tz_localize(None),
+            "open": quote.get("open"),
+            "high": quote.get("high"),
+            "low": quote.get("low"),
+            "close": quote.get("close"),
+        })
 
-            df = _normalize_df(df)
-            if df is None:
-                errors.append(f"{ticker}: ساختار دیتای Yahoo قابل استفاده نبود.")
-                continue
+        df = _normalize_df(df)
+        if df is None:
+            return {"success": False, "error": "ساختار دیتای Yahoo قابل استفاده نبود."}
 
-            if interval == "4h":
-                df = _resample_4h(df)
+        if interval == "4h":
+            df = _resample_4h(df)
 
-            if df is None or len(df) < 60:
-                errors.append(f"{ticker}: Yahoo کندل کافی برای تحلیل نداد.")
-                continue
+        if df is None or len(df) < 60:
+            return {"success": False, "error": "Yahoo کندل کافی برای تحلیل نداد."}
 
-            df = df.tail(outputsize).reset_index(drop=True)
-            source = "yahoo_direct" if ticker == tickers[0] else f"yahoo_direct_fallback:{ticker}"
-            return {"success": True, "symbol": symbol, "interval": interval, "data": df, "source": source}
+        df = df.tail(outputsize).reset_index(drop=True)
+        return {"success": True, "symbol": symbol, "interval": interval, "data": df, "source": "yahoo_direct"}
 
-        except Exception as e:
-            errors.append(f"{ticker}: Yahoo direct error: {e}")
-
-    return {"success": False, "error": " | ".join(errors) if errors else "Yahoo داده‌ای برنگرداند."}
+    except Exception as e:
+        return {"success": False, "error": f"Yahoo direct error: {e}"}
 
 
 def _yfinance_candles(symbol: str, interval: str, outputsize: int):
     if yf is None:
         return {"success": False, "error": "پکیج yfinance نصب نیست."}
 
-    tickers = _get_yahoo_tickers(symbol)
-    if not tickers:
+    ticker = YAHOO_SYMBOLS.get(symbol)
+    if not ticker:
         return {"success": False, "error": f"yfinance ticker برای {symbol} تعریف نشده است."}
 
     yahoo_interval = INTERVAL_MAP_YAHOO.get(interval, interval)
     period = RANGE_BY_INTERVAL.get(yahoo_interval, "60d")
-    errors = []
 
-    for ticker in tickers:
-        try:
-            df = yf.download(
-                tickers=ticker,
-                period=period,
-                interval=yahoo_interval,
-                progress=False,
-                auto_adjust=False,
-                threads=False,
-            )
-            df = _normalize_df(df)
+    try:
+        df = yf.download(
+            tickers=ticker,
+            period=period,
+            interval=yahoo_interval,
+            progress=False,
+            auto_adjust=False,
+            threads=False,
+        )
+        df = _normalize_df(df)
 
-            if interval == "4h":
-                df = _resample_4h(df)
+        if interval == "4h":
+            df = _resample_4h(df)
 
-            if df is None or len(df) < 60:
-                errors.append(f"{ticker}: yfinance کندل کافی برای تحلیل نداد.")
-                continue
+        if df is None or len(df) < 60:
+            return {"success": False, "error": "yfinance کندل کافی برای تحلیل نداد."}
 
-            df = df.tail(outputsize).reset_index(drop=True)
-            source = "yfinance" if ticker == tickers[0] else f"yfinance_fallback:{ticker}"
-            return {"success": True, "symbol": symbol, "interval": interval, "data": df, "source": source}
+        df = df.tail(outputsize).reset_index(drop=True)
+        return {"success": True, "symbol": symbol, "interval": interval, "data": df, "source": "yfinance"}
 
-        except Exception as e:
-            errors.append(f"{ticker}: yfinance error: {e}")
-
-    return {"success": False, "error": " | ".join(errors) if errors else "yfinance داده‌ای برنگرداند."}
+    except Exception as e:
+        return {"success": False, "error": f"yfinance error: {e}"}
 
 
 def _stooq_candles(symbol: str, interval: str, outputsize: int):
