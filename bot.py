@@ -180,6 +180,46 @@ def _short_error(value: Any, max_len: int = 140) -> str:
     return text
 
 
+def safe_format_stats(days: Optional[int] = None) -> str:
+    """Format stats safely even if statistics.py is from a mixed setup/direct version."""
+    try:
+        return format_stats(days)
+    except KeyError as e:
+        if str(e).strip("'\"") != "total_setups":
+            raise
+        try:
+            from statistics import build_stats
+            stats = build_stats(days)
+            total = stats.get("total_setups", stats.get("total_signals", 0))
+            activated = stats.get("activated", 0)
+            cancelled = stats.get("cancelled", 0)
+            tp1 = stats.get("tp1", 0)
+            tp2 = stats.get("tp2", 0)
+            sl = stats.get("sl", 0)
+            open_count = stats.get("open", 0)
+            win_rate = stats.get("win_rate", 0)
+            tp2_rate = stats.get("tp2_rate", 0)
+            title = "آمار کل" if not days else f"آمار {days} روز اخیر"
+            lines = [
+                f"📈 {title}",
+                "",
+                f"ستاپ/سیگنال‌های ثبت‌شده: {total}",
+                f"ورودهای فعال‌شده: {activated}",
+                f"کنسل‌شده: {cancelled}",
+                f"باز: {open_count}",
+                "",
+                f"✅ TP1: {tp1}",
+                f"🎯 TP2: {tp2}",
+                f"❌ SL: {sl}",
+                "",
+                f"وین‌ریت بر اساس TP1/SL: {win_rate}٪",
+                f"نرخ TP2 نسبت به TP1: {tp2_rate}٪",
+            ]
+            return "\n".join(lines)
+        except Exception as inner:
+            return f"❌ خطا در ساخت گزارش آمار: {inner}"
+
+
 def _format_news_warning(news: Dict[str, Any]) -> str:
     risk = news.get("risk_level", "LOW")
     note = news.get("note", "")
@@ -904,7 +944,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if "آمار" in text_lower:
-            await update.message.reply_text(format_stats(parse_days(text_lower)))
+            await update.message.reply_text(safe_format_stats(parse_days(text_lower)))
             return
 
         if "سیگنال‌های فعال" in text_lower or "سیگنال های فعال" in text_lower:
