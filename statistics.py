@@ -120,7 +120,7 @@ def build_stats(days: Optional[int] = None) -> Dict:
     tp1 = sum(1 for s in signals if _is_tp1(s))
     tp2 = sum(1 for s in signals if _is_tp2(s))
     sl = sum(1 for s in signals if _is_sl(s))
-    open_count = sum(1 for s in signals if s.get("result") in ("SETUP_CREATED", "ACTIVATED", "TP1"))
+    open_count = sum(1 for s in signals if s.get("result") in ("ACTIVATED", "TP1"))
 
     closed_for_wr = tp1 + sl
     win_rate = round((tp1 / closed_for_wr) * 100, 2) if closed_for_wr else 0
