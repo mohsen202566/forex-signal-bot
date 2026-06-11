@@ -66,5 +66,13 @@ DEFAULT_RISK_PERCENT = 1.0
 MAX_RISK_PERCENT = 2.0
 BOT_LANGUAGE = "fa"
 
-WATCHLIST_MAX_SETUPS = int(os.getenv("WATCHLIST_MAX_SETUPS", "35"))
-STALE_SETUP_CANCEL_MINUTES = int(os.getenv("STALE_SETUP_CANCEL_MINUTES", "25"))
+WATCHLIST_MAX_SETUPS = int(os.getenv("WATCHLIST_MAX_SETUPS", "20"))
+
+
+# Watchlist / smart setup management
+STALE_SETUP_CANCEL_MINUTES = int(os.getenv("STALE_SETUP_CANCEL_MINUTES", "35"))
+ENABLE_AUTO_REVERSE = os.getenv("ENABLE_AUTO_REVERSE", "true").lower() in ("1", "true", "yes", "on")
+ENABLE_SMART_CANCEL = os.getenv("ENABLE_SMART_CANCEL", "true").lower() in ("1", "true", "yes", "on")
+ENABLE_WEAKNESS_WARNING = os.getenv("ENABLE_WEAKNESS_WARNING", "true").lower() in ("1", "true", "yes", "on")
+SMART_CANCEL_MIN_PREDICTION_SCORE = int(os.getenv("SMART_CANCEL_MIN_PREDICTION_SCORE", "58"))
+SMART_CANCEL_WEAKNESS_SCORE = int(os.getenv("SMART_CANCEL_WEAKNESS_SCORE", "75"))
