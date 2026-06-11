@@ -8,14 +8,14 @@ UTF-8/Persian safe and VPS-safe.
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from config import DATA_DIR, TRACKER_FILE
 try:
     from config import STALE_SETUP_CANCEL_MINUTES
 except Exception:
-    STALE_SETUP_CANCEL_MINUTES = 25
+    STALE_SETUP_CANCEL_MINUTES = 35
 from data_provider import get_latest_price
 from statistics import record_signal, update_signal_result
 
@@ -81,29 +81,6 @@ def save_active(data: Dict):
 def make_signal_id(symbol: str) -> str:
     clean_symbol = str(symbol or "SIGNAL").replace("/", "").upper()
     return clean_symbol + "-" + datetime.utcnow().strftime("%Y%m%d%H%M%S")
-
-
-def _parse_utc(value: str):
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", ""))
-    except Exception:
-        return None
-
-
-def _update_stats_result(signal, result: str, reason: str = ""):
-    """Update stats and backfill old active signals if stats.json missed them."""
-    signal_id = signal.get("signal_id") if isinstance(signal, dict) else signal
-    updated = update_signal_result(signal_id, result, reason)
-    if not updated and isinstance(signal, dict):
-        snapshot = dict(signal)
-        snapshot.setdefault("result", "SETUP_CREATED")
-        snapshot.setdefault("stage", "ACTIVATED" if result in ("ACTIVATED", "TP1", "TP2", "SL") else "SETUP")
-        try:
-            record_signal(snapshot)
-            update_signal_result(signal_id, result, reason)
-        except Exception:
-            pass
-    return True
 
 
 def add_active_signal(signal: Dict):
@@ -258,11 +235,16 @@ def activate_signal(signal_id: str, result: Optional[Dict] = None, message_id: O
             if result.get(source_key) is not None:
                 updates[key] = result.get(source_key)
     update_active_signal(signal_id, **updates)
-    _update_stats_result({"signal_id": signal_id}, "ACTIVATED", "entry activated")
+    update_signal_result(signal_id, "ACTIVATED", "entry activated")
 
 
 def check_active_signals():
-    """Check ACTIVATED signals for TP1/TP2/SL safely."""
+    """Check ACTIVATED signals for TP1/TP2/SL.
+
+    SETUP signals are not checked for TP/SL until bot.py activates them.
+    TP1 is recorded once and signal remains active for possible TP2.
+    Win rate is still based on first TP1 versus SL.
+    """
     data = load_active()
     active = data.get("active", [])
     remaining = []
@@ -270,75 +252,54 @@ def check_active_signals():
 
     for s in active:
         try:
-            if s.get("stage") != "ACTIVATED" and s.get("result") == "ACTIVATED":
-                s["stage"] = "ACTIVATED"
-
             if s.get("stage") != "ACTIVATED":
                 remaining.append(s)
                 continue
 
             symbol = s.get("symbol")
             price_data = get_latest_price(symbol)
-            if not isinstance(price_data, dict) or not price_data.get("success"):
+            if not price_data.get("success"):
                 remaining.append(s)
                 continue
 
-            price = _to_float(price_data.get("price"))
+            price = float(price_data["price"])
             direction = s.get("direction")
-            tp1 = _to_float(s.get("tp1"))
-            sl = _to_float(s.get("stop_loss"))
+            tp1 = float(s.get("tp1"))
+            sl = float(s.get("stop_loss"))
             tp2 = _to_float(s.get("tp2"))
             tp1_hit = bool(s.get("tp1_hit"))
 
-            if price is None or direction not in ("BUY", "SELL") or tp1 is None or sl is None:
-                remaining.append(s)
-                continue
-
+            hit = None
             if direction == "BUY":
-                hit_tp1 = price >= tp1
-                hit_tp2 = tp2 is not None and price >= tp2
-                hit_sl = price <= sl
-            else:
-                hit_tp1 = price <= tp1
-                hit_tp2 = tp2 is not None and price <= tp2
-                hit_sl = price >= sl
+                if tp2 is not None and price >= tp2:
+                    hit = "TP2"
+                elif not tp1_hit and price >= tp1:
+                    hit = "TP1"
+                elif not tp1_hit and price <= sl:
+                    hit = "SL"
+            elif direction == "SELL":
+                if tp2 is not None and price <= tp2:
+                    hit = "TP2"
+                elif not tp1_hit and price <= tp1:
+                    hit = "TP1"
+                elif not tp1_hit and price >= sl:
+                    hit = "SL"
 
-            if hit_tp2 and not tp1_hit:
-                s["tp1_hit"] = True
-                s["tp1_hit_at"] = _utc_now()
-                _update_stats_result(s, "TP1", f"price={price}; auto-recorded before TP2")
-                events.append({"signal": dict(s), "result": "TP1", "price": price})
-                tp1_hit = True
-
-            if hit_tp2:
-                s["result"] = "TP2"
-                s["tp2_hit"] = True
-                s["closed_at"] = _utc_now()
-                _update_stats_result(s, "TP2", f"price={price}")
-                events.append({"signal": dict(s), "result": "TP2", "price": price})
-                continue
-
-            if hit_tp1 and not tp1_hit:
+            if hit == "TP1":
                 s["tp1_hit"] = True
                 s["tp1_hit_at"] = _utc_now()
                 s["result"] = "TP1"
-                _update_stats_result(s, "TP1", f"price={price}")
-                events.append({"signal": dict(s), "result": "TP1", "price": price})
+                update_signal_result(s.get("signal_id"), "TP1", f"price={price}")
+                events.append({"signal": s, "result": "TP1", "price": price})
                 remaining.append(s)
-                continue
-
-            if hit_sl and not tp1_hit:
-                s["result"] = "SL"
-                s["sl_hit"] = True
+            elif hit in ("TP2", "SL"):
+                s["result"] = hit
                 s["closed_at"] = _utc_now()
-                _update_stats_result(s, "SL", f"price={price}")
-                events.append({"signal": dict(s), "result": "SL", "price": price})
-                continue
-
-            remaining.append(s)
-        except Exception as exc:
-            s["last_tracker_error"] = str(exc)
-            s["last_tracker_error_at"] = _utc_now()
+                update_signal_result(s.get("signal_id"), hit, f"price={price}")
+                events.append({"signal": s, "result": hit, "price": price})
+            else:
+                remaining.append(s)
+        except Exception:
             remaining.append(s)
 
     data["active"] = remaining
@@ -346,8 +307,9 @@ def check_active_signals():
     return events
 
 
+
 def cancel_setup_signal(signal_id: str, reason: str = "cancelled"):
-    """Cancel a pending setup and remove it from the active watchlist."""
+    """Cancel a pending SETUP and remove it from the active watchlist."""
     data = load_active()
     remaining = []
     events = []
@@ -356,6 +318,7 @@ def cancel_setup_signal(signal_id: str, reason: str = "cancelled"):
             if str(s.get("signal_id")) == str(signal_id) and s.get("stage") == "SETUP":
                 s["result"] = "CANCELLED"
                 s["closed_at"] = _utc_now()
+                s["cancel_reason"] = reason
                 _update_stats_result(s, "CANCELLED", reason)
                 events.append({"signal": dict(s), "result": "CANCELLED", "price": None, "reason": reason})
                 continue
@@ -368,7 +331,7 @@ def cancel_setup_signal(signal_id: str, reason: str = "cancelled"):
 
 
 def prune_stale_setups(max_age_minutes: Optional[int] = None):
-    """Cancel stale SETUP rows quickly so the 20-slot watchlist does not get stuck."""
+    """Cancel stale SETUP rows quickly so the watchlist does not get stuck."""
     max_age_minutes = STALE_SETUP_CANCEL_MINUTES if max_age_minutes is None else max_age_minutes
     if not max_age_minutes or max_age_minutes <= 0:
         return []
@@ -386,6 +349,7 @@ def prune_stale_setups(max_age_minutes: Optional[int] = None):
                     s["result"] = "CANCELLED"
                     s["closed_at"] = _utc_now()
                     reason = f"stale_setup>{max_age_minutes}min"
+                    s["cancel_reason"] = reason
                     _update_stats_result(s, "CANCELLED", reason)
                     events.append({"signal": dict(s), "result": "CANCELLED", "price": None, "reason": reason})
                     continue
