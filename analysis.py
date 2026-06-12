@@ -1897,18 +1897,17 @@ def analyze_symbol(symbol):
 
     rr = risk_reward(raw_direction, price, stop_loss_raw, tp1_raw)
 
-    # معماری دو مرحله‌ای: Setup کامل صادر می‌شود، اما ورود فقط بعد از Activation فعال است.
-    # نکته مهم: TP Space / Trap Risk نباید Setup را حذف کند؛ اما نباید اجازه Entry فعال بدهد.
-    # این کار باعث می‌شود ارز همچنان زیر نظر بماند، ولی ورود فقط وقتی تمیز و دور از حمایت/مقاومت خطرناک باشد صادر شود.
-    entry_ok = entry_confirmed_now
+    # Classic Direct Mode:
+    # در این نسخه ستاپ/انتظار فعال‌سازی حذف شده است.
+    # هر خروجی LONG/SHORT که موتور تکنیکال قبول کند، همان لحظه به عنوان سیگنال فعال صادر می‌شود.
+    # TP Space / Trap / RR فقط برای آمار و تحلیل علت SL ذخیره می‌شوند و جلوی سیگنال را نمی‌گیرند.
+    entry_ok = raw_direction in ["LONG", "SHORT"]
     block_reasons = list(predictive_context.get("block_reasons", []))
 
-    # Classic mode: TP Space / Trap / RR فقط برای آمار و تحلیل علت SL ذخیره می‌شوند.
-    # این موارد دیگر جلوی سیگنال فعال را نمی‌گیرند؛ تصمیم فعال‌سازی فقط با موتور تکنیکال 5M است.
     preliminary_stop, preliminary_tp1, _ = calculate_trade_levels(raw_direction, price, atr, support, resistance)
     preliminary_rr = risk_reward(raw_direction, price, preliminary_stop, preliminary_tp1)
 
-    setup_waiting = (not entry_ok) and raw_direction in ["LONG", "SHORT"] and setup_context.get("setup_ok")
+    setup_waiting = False
     liquidity_risk = "پایین" if entry_ok else "متوسط"
     fake_breakout = "none"
     trend_exhaustion = "none"
@@ -1930,12 +1929,6 @@ def analyze_symbol(symbol):
         tp1 = None
         tp2 = None
         grade = "NO_ENTRY"
-    elif setup_waiting:
-        final_direction = raw_direction
-        stop_loss = stop_loss_raw
-        tp1 = tp1_raw
-        tp2 = tp2_raw
-        grade = "WAITING_ACTIVATION"
     else:
         final_direction = raw_direction
         stop_loss = stop_loss_raw
@@ -2014,10 +2007,10 @@ def analyze_symbol(symbol):
         "power_acceleration": predictive_context.get("power_accel"),
         "predictive_confirmations": predictive_context.get("confirmations"),
         "freshness": predictive_context.get("freshness"),
-        "entry_mode": "PREDICTIVE_SETUP" if setup_waiting else predictive_context.get("entry_mode"),
-        "entry_status": "WAITING_ACTIVATION" if setup_waiting else ("ACTIVE" if entry_ok else "NO_ENTRY"),
+        "entry_mode": "CLASSIC_DIRECT" if entry_ok else predictive_context.get("entry_mode"),
+        "entry_status": "ACTIVE" if entry_ok else "NO_ENTRY",
         "entry_confirmed": bool(entry_ok),
-        "setup_waiting_activation": bool(setup_waiting),
+        "setup_waiting_activation": False,
         "setup_score": setup_context.get("setup_score"),
         "setup_long_score": setup_context.get("setup_long_score"),
         "setup_short_score": setup_context.get("setup_short_score"),
