@@ -1874,12 +1874,18 @@ def analyze_symbol(symbol):
         raw_direction = setup_context.get("direction", "NO TRADE")
 
     score = max(long_score, short_score)  # فقط برای سازگاری داخلی/آمار قدیمی؛ تصمیم‌گیر نیست.
+
+    # CLASSIC DIRECT MODE:
+    # در این نسخه دیگر ستاپ/Watchlist/منتظر فعال‌سازی نداریم.
+    # اگر موتور ورود 5M تریگر کامل بدهد، سیگنال مستقیم ACTIVE صادر می‌شود.
+    # اگر تریگر کامل نباشد ولی موتور تکنیکال کلاسیک جهت معتبر بدهد، همان جهت مستقیم صادر می‌شود.
+    # هیچ خروجی PREDICTIVE_SETUP یا WAITING_ACTIVATION ساخته نمی‌شود.
     if entry_confirmed_now and raw_direction in ["LONG", "SHORT"]:
         reasons = predictive_context.get("reasons", []) + risk_notes
     elif raw_direction in ["LONG", "SHORT"]:
-        reasons = setup_context.get("setup_reasons", []) + ["وضعیت: منتظر فعال‌سازی ورود با تایید 5M"] + risk_notes
+        reasons = setup_context.get("setup_reasons", []) + ["سیگنال مستقیم کلاسیک بر اساس همسویی تکنیکال صادر شد"] + risk_notes
     else:
-        reasons = predictive_context.get("reasons", ["تریگر پیش‌بینی ورود کامل نیست"])
+        reasons = predictive_context.get("reasons", ["تریگر تکنیکال ورود کامل نیست"])
 
     setup_status, entry_zone_low, entry_zone_high, entry_trigger = calculate_setup_zone(
         raw_direction,
@@ -1897,13 +1903,13 @@ def analyze_symbol(symbol):
 
     rr = risk_reward(raw_direction, price, stop_loss_raw, tp1_raw)
 
-    # Classic Direct Mode:
-    # در این نسخه ستاپ/انتظار فعال‌سازی حذف شده است.
-    # هر خروجی LONG/SHORT که موتور تکنیکال قبول کند، همان لحظه به عنوان سیگنال فعال صادر می‌شود.
-    # TP Space / Trap / RR فقط برای آمار و تحلیل علت SL ذخیره می‌شوند و جلوی سیگنال را نمی‌گیرند.
+    # CLASSIC DIRECT MODE:
+    # سیگنال‌ها مستقیم ACTIVE هستند؛ ستاپ معلق و Activation جداگانه نداریم.
     entry_ok = raw_direction in ["LONG", "SHORT"]
     block_reasons = list(predictive_context.get("block_reasons", []))
 
+    # Classic mode: TP Space / Trap / RR فقط برای آمار و تحلیل علت SL ذخیره می‌شوند.
+    # این موارد دیگر جلوی سیگنال فعال را نمی‌گیرند؛ تصمیم فعال‌سازی فقط با موتور تکنیکال 5M است.
     preliminary_stop, preliminary_tp1, _ = calculate_trade_levels(raw_direction, price, atr, support, resistance)
     preliminary_rr = risk_reward(raw_direction, price, preliminary_stop, preliminary_tp1)
 
@@ -2007,10 +2013,13 @@ def analyze_symbol(symbol):
         "power_acceleration": predictive_context.get("power_accel"),
         "predictive_confirmations": predictive_context.get("confirmations"),
         "freshness": predictive_context.get("freshness"),
-        "entry_mode": "CLASSIC_DIRECT" if entry_ok else predictive_context.get("entry_mode"),
+        "entry_mode": "CLASSIC_DIRECT" if entry_ok else "NO_ENTRY",
         "entry_status": "ACTIVE" if entry_ok else "NO_ENTRY",
         "entry_confirmed": bool(entry_ok),
         "setup_waiting_activation": False,
+        "activation_ready": bool(entry_ok),
+        "activation_entry_mode": "CLASSIC_DIRECT" if entry_ok else None,
+        "activation_direction": final_direction if entry_ok else None,
         "setup_score": setup_context.get("setup_score"),
         "setup_long_score": setup_context.get("setup_long_score"),
         "setup_short_score": setup_context.get("setup_short_score"),
