@@ -70,6 +70,19 @@ def is_high_quality_signal(result):
         confirmations = int(result.get("confirmations") or 0)
     except Exception:
         return False
+
+    try:
+        adx = float(result.get("adx") or 0)
+    except Exception:
+        adx = 0.0
+
+    # ADX balance for auto signals:
+    # below 18 is too weak; 18-20 is allowed only with a score penalty.
+    if adx < 18:
+        return False
+    if adx < 20:
+        score -= 8
+
     if score < int(AUTO_SIGNAL_SCORE):
         return False
     if confirmations < int(MIN_AUTO_CONFIRMATIONS):
