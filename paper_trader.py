@@ -214,6 +214,14 @@ def can_open_new_trade(signal):
     if signal.get("direction") not in ["LONG", "SHORT"]:
         return False, "جهت سیگنال معتبر نیست."
 
+    risk_raw = signal.get("risk_level")
+    risk = str(risk_raw or "").strip().upper()
+    low_risk_values = ["LOW", "LOW_RISK", "پایین", "ریسک پایین", "کم", "LOW ✅"]
+
+    if risk not in [str(x).strip().upper() for x in low_risk_values]:
+        shown_risk = risk_raw if risk_raw not in [None, ""] else "نامشخص"
+        return False, f"فقط سیگنال‌های ریسک پایین معامله می‌شوند. ریسک این سیگنال: {shown_risk}"
+
     if signal.get("tp1") is None or signal.get("stop_loss") is None:
         return False, "TP1 یا SL در سیگنال وجود ندارد."
 
@@ -295,7 +303,7 @@ def close_paper_trade_by_signal(signal, result_type, exit_price):
         position = find_open_position_by_symbol(state, symbol)
 
     if not position:
-        return False, "ℹ️ پوزیشن Paper مربوط به این سیگنال پیدا نشد؛ احتمالاً این سیگنال قبل از فعال شدن Paper باز شده، قبلاً بسته شده، یا رکورد Paper آن وجود ندارد."
+        return False, "پوزیشن Paper مربوط به این سیگنال پیدا نشد."
 
     exit_price = safe_float(exit_price)
     pnl_usdt, move_pct = calculate_unrealized_or_realized_pnl(
