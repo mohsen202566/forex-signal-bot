@@ -12,6 +12,14 @@ exchange = ccxt.okx({
 })
 
 
+PULLBACK_ADX_MIN = max(float(MIN_ADX_FOR_TREND), 22.0)
+PULLBACK_MAX_DISTANCE_ATR = 0.65
+PULLBACK_TOUCH_LOOKBACK = 4
+SL_ATR_MULTIPLIER = 1.30
+TP1_ATR_MULTIPLIER = 0.80
+TP2_ATR_MULTIPLIER = 1.50
+
+
 def to_okx_symbol(symbol):
     coin = str(symbol).upper().replace("USDT", "")
     return f"{coin}/USDT:USDT"
@@ -41,16 +49,20 @@ def get_klines(symbol, interval="15m", limit=260, include_current=False):
     df = pd.DataFrame(data, columns=["time", "open", "high", "low", "close", "volume"])
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+
     df = df.dropna()
     if not include_current:
         df = df.iloc[:-1]
+
     if len(df) < 210:
         raise Exception(f"داده کندل کافی برای {symbol} در تایم {interval} کامل نیست")
+
     return df
 
 
 def add_indicators(df):
     df = df.copy()
+
     df["ema20"] = ta.trend.ema_indicator(df["close"], window=20)
     df["ema50"] = ta.trend.ema_indicator(df["close"], window=50)
     df["ema200"] = ta.trend.ema_indicator(df["close"], window=200)
@@ -62,6 +74,7 @@ def add_indicators(df):
     df["macd_hist"] = macd.macd_diff()
 
     df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14)
+
     adx = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14)
     df["adx"] = adx.adx()
 
@@ -69,15 +82,18 @@ def add_indicators(df):
     volume_sum = df["volume"].cumsum().replace(0, pd.NA)
     df["vwap"] = (typical * df["volume"]).cumsum() / volume_sum
     df["volume_ma20"] = df["volume"].rolling(20).mean()
+
     df = df.dropna()
     if len(df) < 60:
         raise Exception("اندیکاتورها کامل محاسبه نشدند")
+
     return df
 
 
 def trend_direction(df):
     last = df.iloc[-1]
     close = float(last["close"])
+
     if close > last["ema20"] > last["ema50"] > last["ema200"]:
         return "bullish"
     if close < last["ema20"] < last["ema50"] < last["ema200"]:
@@ -86,6 +102,7 @@ def trend_direction(df):
         return "weak_bullish"
     if close < last["ema50"] and close < last["ema200"]:
         return "weak_bearish"
+
     return "range"
 
 
@@ -94,8 +111,10 @@ def buy_sell_power(df, candles=20):
     green = recent[recent["close"] > recent["open"]]["volume"].sum()
     red = recent[recent["close"] < recent["open"]]["volume"].sum()
     total = green + red
+
     if total <= 0:
         return 50.0, 50.0
+
     return round((green / total) * 100, 1), round((red / total) * 100, 1)
 
 
@@ -105,24 +124,31 @@ def support_resistance(df, lookback=100):
     lows = []
     highs = []
     window = 3
+
     for i in range(window, len(recent) - window):
         row = recent.iloc[i]
-        left = recent.iloc[i-window:i]
-        right = recent.iloc[i+1:i+1+window]
+        left = recent.iloc[i - window:i]
+        right = recent.iloc[i + 1:i + 1 + window]
+
         if row["low"] <= left["low"].min() and row["low"] <= right["low"].min():
             lows.append(float(row["low"]))
+
         if row["high"] >= left["high"].max() and row["high"] >= right["high"].max():
             highs.append(float(row["high"]))
+
     below = [x for x in lows if x < price]
     above = [x for x in highs if x > price]
+
     support = max(below) if below else float(recent["low"].min())
     resistance = min(above) if above else float(recent["high"].max())
+
     return support, resistance
 
 
 def candle_pattern(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
+
     body = abs(float(last["close"]) - float(last["open"]))
     rng = max(float(last["high"]) - float(last["low"]), 1e-12)
     upper = float(last["high"]) - max(float(last["close"]), float(last["open"]))
@@ -130,14 +156,19 @@ def candle_pattern(df):
 
     if last["close"] > last["open"] and prev["close"] < prev["open"] and last["close"] > prev["open"]:
         return "bullish_engulfing"
+
     if last["close"] < last["open"] and prev["close"] > prev["open"] and last["close"] < prev["open"]:
         return "bearish_engulfing"
+
     if lower > body * 2 and upper < body * 1.2:
         return "bullish_pinbar"
+
     if upper > body * 2 and lower < body * 1.2:
         return "bearish_pinbar"
+
     if body / rng >= 0.6:
         return "bullish_strong" if last["close"] > last["open"] else "bearish_strong"
+
     return "neutral"
 
 
@@ -158,7 +189,46 @@ def volume_spike(df):
         return False
 
 
-def score_direction(symbol, df_4h, df_1h, df_15m, df_5m):
+def is_ema_pullback_long(df_15m):
+    last = df_15m.iloc[-1]
+    atr = max(float(last["atr"]), float(last["close"]) * 0.0015)
+    ema20 = float(last["ema20"])
+    price = float(last["close"])
+
+    distance_atr = abs(price - ema20) / atr
+    recent = df_15m.tail(PULLBACK_TOUCH_LOOKBACK)
+    touched = bool((recent["low"] <= recent["ema20"] + atr * 0.18).any())
+
+    above_ema20 = price > ema20
+    not_extended = distance_atr <= PULLBACK_MAX_DISTANCE_ATR
+
+    return above_ema20 and touched and not_extended, round(distance_atr, 2)
+
+
+def is_ema_pullback_short(df_15m):
+    last = df_15m.iloc[-1]
+    atr = max(float(last["atr"]), float(last["close"]) * 0.0015)
+    ema20 = float(last["ema20"])
+    price = float(last["close"])
+
+    distance_atr = abs(price - ema20) / atr
+    recent = df_15m.tail(PULLBACK_TOUCH_LOOKBACK)
+    touched = bool((recent["high"] >= recent["ema20"] - atr * 0.18).any())
+
+    below_ema20 = price < ema20
+    not_extended = distance_atr <= PULLBACK_MAX_DISTANCE_ATR
+
+    return below_ema20 and touched and not_extended, round(distance_atr, 2)
+
+
+def clean_direction_analysis(df_1d, df_4h, df_1h, df_15m, df_5m):
+    """
+    Momentum Pullback System:
+    - 1H determines the main direction.
+    - 15M determines the clean movement quality.
+    - Entry is based on a 15M EMA20 pullback, not 5M jump.
+    - 5M is informational only and does not decide entry.
+    """
     long_score = 0
     short_score = 0
     long_reasons = []
@@ -167,102 +237,163 @@ def score_direction(symbol, df_4h, df_1h, df_15m, df_5m):
     confirmations_short = 0
 
     trends = {
+        "1D": trend_direction(df_1d),
         "4H": trend_direction(df_4h),
         "1H": trend_direction(df_1h),
         "15M": trend_direction(df_15m),
         "5M": trend_direction(df_5m),
     }
 
-    # Clean movement balance: 15M/1H define quality, 5M only triggers entry.
-    trend_weights = {"4H": 10, "1H": 18, "15M": 24, "5M": 16}
+    trend_weights = {
+        "1D": 8,
+        "4H": 14,
+        "1H": 26,
+        "15M": 26,
+        "5M": 0,
+    }
+
     for tf, trend in trends.items():
-        w = trend_weights[tf]
+        weight = trend_weights[tf]
+        if weight <= 0:
+            continue
+
         if trend == "bullish":
-            long_score += w
+            long_score += weight
             confirmations_long += 1
             long_reasons.append(f"{tf}: روند صعودی")
         elif trend == "weak_bullish":
-            long_score += int(w * 0.55)
+            long_score += int(weight * 0.45)
             long_reasons.append(f"{tf}: تمایل صعودی")
         elif trend == "bearish":
-            short_score += w
+            short_score += weight
             confirmations_short += 1
             short_reasons.append(f"{tf}: روند نزولی")
         elif trend == "weak_bearish":
-            short_score += int(w * 0.55)
+            short_score += int(weight * 0.45)
             short_reasons.append(f"{tf}: تمایل نزولی")
 
-    last5 = df_5m.iloc[-1]
-    prev5 = df_5m.iloc[-2]
-    last15 = df_15m.iloc[-1]
-
-    # 15M setup quality: main clean-move filter.
-    if last15["close"] > last15["ema20"] and last15["macd"] > last15["macd_signal"]:
-        long_score += 16; confirmations_long += 1; long_reasons.append("15M: EMA20 و MACD حرکت لانگ را تمیز تایید می‌کنند")
-    if last15["close"] < last15["ema20"] and last15["macd"] < last15["macd_signal"]:
-        short_score += 16; confirmations_short += 1; short_reasons.append("15M: EMA20 و MACD حرکت شورت را تمیز تایید می‌کنند")
-
-    # 5M entry trigger: important, but no longer allowed to dominate alone.
-    if last5["close"] > last5["ema20"] and last5["macd"] > last5["macd_signal"]:
-        long_score += 14; confirmations_long += 1; long_reasons.append("5M: EMA20 و MACD ورود لانگ را تایید می‌کنند")
-    if last5["close"] < last5["ema20"] and last5["macd"] < last5["macd_signal"]:
-        short_score += 14; confirmations_short += 1; short_reasons.append("5M: EMA20 و MACD ورود شورت را تایید می‌کنند")
-
-    # MACD histogram slope + RSI slope
-    if last5["macd_hist"] > prev5["macd_hist"]:
-        long_score += 5; confirmations_long += 1; long_reasons.append("شیب MACD Histogram صعودی است")
-    if last5["macd_hist"] < prev5["macd_hist"]:
-        short_score += 5; confirmations_short += 1; short_reasons.append("شیب MACD Histogram نزولی است")
-    if last5["rsi"] > prev5["rsi"] and 40 <= last5["rsi"] <= 70:
-        long_score += 5; confirmations_long += 1; long_reasons.append("RSI در محدوده مناسب رو به بالا است")
-    if last5["rsi"] < prev5["rsi"] and 30 <= last5["rsi"] <= 60:
-        short_score += 5; confirmations_short += 1; short_reasons.append("RSI در محدوده مناسب رو به پایین است")
+    last_1h = df_1h.iloc[-1]
+    last_15 = df_15m.iloc[-1]
+    last_5 = df_5m.iloc[-1]
 
     buy2, sell2 = buy_sell_power(df_5m, 2)
     buy3, sell3 = buy_sell_power(df_5m, 3)
     buy6, sell6 = buy_sell_power(df_5m, 6)
     buy20, sell20 = buy_sell_power(df_5m, 20)
 
-    if buy2 >= 60:
-        long_score += 7; confirmations_long += 1; long_reasons.append("قدرت خرید 2 کندلی مناسب است")
-    if buy3 >= 58:
-        long_score += 5; long_reasons.append("قدرت خرید 3 کندلی تایید دارد")
-    if buy6 >= 56:
-        long_score += 3; long_reasons.append("قدرت خرید کوتاه‌مدت مثبت است")
-    if sell2 >= 60:
-        short_score += 7; confirmations_short += 1; short_reasons.append("قدرت فروش 2 کندلی مناسب است")
-    if sell3 >= 58:
-        short_score += 5; short_reasons.append("قدرت فروش 3 کندلی تایید دارد")
-    if sell6 >= 56:
-        short_score += 3; short_reasons.append("قدرت فروش کوتاه‌مدت مثبت است")
+    # 1H direction quality.
+    if last_1h["close"] > last_1h["ema20"] and last_1h["macd"] > last_1h["macd_signal"]:
+        long_score += 18
+        confirmations_long += 1
+        long_reasons.append("1H: EMA20 و MACD جهت لانگ را تایید می‌کنند")
 
-    if last5["close"] > last5["vwap"]:
-        long_score += 6; confirmations_long += 1; long_reasons.append("قیمت بالای VWAP است")
-        short_score -= 4
-    elif last5["close"] < last5["vwap"]:
-        short_score += 6; confirmations_short += 1; short_reasons.append("قیمت پایین VWAP است")
-        long_score -= 4
+    if last_1h["close"] < last_1h["ema20"] and last_1h["macd"] < last_1h["macd_signal"]:
+        short_score += 18
+        confirmations_short += 1
+        short_reasons.append("1H: EMA20 و MACD جهت شورت را تایید می‌کنند")
 
-    # Clean alignment bonus: only when 15M setup and 5M trigger agree.
-    if last15["close"] > last15["ema20"] and last5["close"] > last5["ema20"] and last5["close"] > last5["vwap"]:
-        long_score += 6; confirmations_long += 1; long_reasons.append("هماهنگی تمیز 15M و 5M برای لانگ")
-    if last15["close"] < last15["ema20"] and last5["close"] < last5["ema20"] and last5["close"] < last5["vwap"]:
-        short_score += 6; confirmations_short += 1; short_reasons.append("هماهنگی تمیز 15M و 5M برای شورت")
+    # 15M clean movement quality.
+    if last_15["close"] > last_15["ema20"] > last_15["ema50"] and last_15["macd"] > last_15["macd_signal"]:
+        long_score += 28
+        confirmations_long += 2
+        long_reasons.append("15M: قیمت بالای EMA20/EMA50 و MACD مثبت است")
 
-    pattern = candle_pattern(df_5m)
+    if last_15["close"] < last_15["ema20"] < last_15["ema50"] and last_15["macd"] < last_15["macd_signal"]:
+        short_score += 28
+        confirmations_short += 2
+        short_reasons.append("15M: قیمت پایین EMA20/EMA50 و MACD منفی است")
+
+    adx_15 = float(last_15["adx"])
+    if adx_15 >= PULLBACK_ADX_MIN:
+        long_score += 10
+        short_score += 10
+        long_reasons.append("ADX 15M بالای 22 است؛ روند قدرت کافی دارد")
+        short_reasons.append("ADX 15M بالای 22 است؛ روند قدرت کافی دارد")
+
+    long_pullback, long_distance_atr = is_ema_pullback_long(df_15m)
+    short_pullback, short_distance_atr = is_ema_pullback_short(df_15m)
+
+    if long_pullback:
+        long_score += 22
+        confirmations_long += 2
+        long_reasons.append("ورود لانگ روی پولبک تمیز EMA20 در 15M است")
+    else:
+        long_reasons.append(f"لانگ: قیمت برای ورود پولبکی مناسب نیست؛ فاصله از EMA20 حدود {long_distance_atr} ATR")
+
+    if short_pullback:
+        short_score += 22
+        confirmations_short += 2
+        short_reasons.append("ورود شورت روی پولبک تمیز EMA20 در 15M است")
+    else:
+        short_reasons.append(f"شورت: قیمت برای ورود پولبکی مناسب نیست؛ فاصله از EMA20 حدود {short_distance_atr} ATR")
+
+    # 15M RSI slope is a soft quality enhancer.
+    prev_15 = df_15m.iloc[-2]
+    if last_15["rsi"] > prev_15["rsi"] and 45 <= last_15["rsi"] <= 68:
+        long_score += 7
+        confirmations_long += 1
+        long_reasons.append("RSI 15M در محدوده مناسب رو به بالا است")
+
+    if last_15["rsi"] < prev_15["rsi"] and 32 <= last_15["rsi"] <= 55:
+        short_score += 7
+        confirmations_short += 1
+        short_reasons.append("RSI 15M در محدوده مناسب رو به پایین است")
+
+    # 5M is not a trigger anymore; only a small safety check / information.
+    if last_5["close"] > last_5["vwap"]:
+        long_score += 3
+        long_reasons.append("5M: قیمت بالای VWAP است")
+    elif last_5["close"] < last_5["vwap"]:
+        short_score += 3
+        short_reasons.append("5M: قیمت پایین VWAP است")
+
+    # Power no longer creates entries. It only prevents obviously bad instant pressure.
+    if buy2 > sell2:
+        long_score += 2
+        long_reasons.append("قدرت لحظه‌ای 5M کاملاً خلاف لانگ نیست")
+    if sell2 > buy2:
+        short_score += 2
+        short_reasons.append("قدرت لحظه‌ای 5M کاملاً خلاف شورت نیست")
+
+    pattern = candle_pattern(df_15m)
     if pattern.startswith("bullish"):
-        long_score += 4; confirmations_long += 1; long_reasons.append(f"کندل تاییدی لانگ: {pattern}")
+        long_score += 5
+        confirmations_long += 1
+        long_reasons.append(f"کندل 15M تاییدی لانگ: {pattern}")
     elif pattern.startswith("bearish"):
-        short_score += 4; confirmations_short += 1; short_reasons.append(f"کندل تاییدی شورت: {pattern}")
+        short_score += 5
+        confirmations_short += 1
+        short_reasons.append(f"کندل 15M تاییدی شورت: {pattern}")
 
-    if float(last15["adx"]) >= MIN_ADX_FOR_TREND:
-        long_score += 6; short_score += 6
-        long_reasons.append("ADX 15M قدرت روند قابل قبول نشان می‌دهد")
-        short_reasons.append("ADX 15M قدرت روند قابل قبول نشان می‌دهد")
-    if volume_spike(df_5m):
-        long_score += 4; short_score += 4
-        long_reasons.append("افزایش حجم دیده شد")
-        short_reasons.append("افزایش حجم دیده شد")
+    if volume_spike(df_15m):
+        long_score += 4
+        short_score += 4
+        long_reasons.append("افزایش حجم در 15M دیده شد")
+        short_reasons.append("افزایش حجم در 15M دیده شد")
+
+    # Hard quality requirements for this architecture.
+    long_valid = (
+        trends["1H"] in ["bullish", "weak_bullish"]
+        and trends["15M"] in ["bullish", "weak_bullish"]
+        and adx_15 >= PULLBACK_ADX_MIN
+        and long_pullback
+        and last_15["close"] > last_15["ema20"] > last_15["ema50"]
+        and last_15["macd"] > last_15["macd_signal"]
+    )
+
+    short_valid = (
+        trends["1H"] in ["bearish", "weak_bearish"]
+        and trends["15M"] in ["bearish", "weak_bearish"]
+        and adx_15 >= PULLBACK_ADX_MIN
+        and short_pullback
+        and last_15["close"] < last_15["ema20"] < last_15["ema50"]
+        and last_15["macd"] < last_15["macd_signal"]
+    )
+
+    if not long_valid:
+        long_score = min(long_score, 69)
+    if not short_valid:
+        short_score = min(short_score, 69)
 
     return {
         "long_score": cap_score(long_score),
@@ -272,42 +403,56 @@ def score_direction(symbol, df_4h, df_1h, df_15m, df_5m):
         "confirmations_long": confirmations_long,
         "confirmations_short": confirmations_short,
         "trends": trends,
-        "power2_buy": buy2, "power2_sell": sell2,
-        "power3_buy": buy3, "power3_sell": sell3,
-        "power6_buy": buy6, "power6_sell": sell6,
-        "buy_power": buy20, "sell_power": sell20,
+        "power2_buy": buy2,
+        "power2_sell": sell2,
+        "power3_buy": buy3,
+        "power3_sell": sell3,
+        "power6_buy": buy6,
+        "power6_sell": sell6,
+        "buy_power": buy20,
+        "sell_power": sell20,
         "candle_pattern": pattern,
+        "long_valid": long_valid,
+        "short_valid": short_valid,
+        "pullback_distance_atr_long": long_distance_atr,
+        "pullback_distance_atr_short": short_distance_atr,
     }
 
 
 def build_trade_levels(direction, price, atr):
     price = float(price)
     atr = max(float(atr or 0), price * 0.0015)
+
     if direction == "LONG":
-        sl = price - atr * 1.30
-        tp1 = price + atr * 0.80
-        tp2 = price + atr * 1.50
+        sl = price - atr * SL_ATR_MULTIPLIER
+        tp1 = price + atr * TP1_ATR_MULTIPLIER
+        tp2 = price + atr * TP2_ATR_MULTIPLIER
     else:
-        sl = price + atr * 1.30
-        tp1 = price - atr * 0.80
-        tp2 = price - atr * 1.50
+        sl = price + atr * SL_ATR_MULTIPLIER
+        tp1 = price - atr * TP1_ATR_MULTIPLIER
+        tp2 = price - atr * TP2_ATR_MULTIPLIER
+
     risk = abs(price - sl)
     reward = abs(tp1 - price)
     rr = round(reward / risk, 2) if risk > 0 else 0
+
     return safe_round(sl), safe_round(tp1), safe_round(tp2), rr
 
 
 def analyze_symbol(symbol):
     symbol = str(symbol).upper().strip()
+
     try:
+        df_1d = add_indicators(get_klines(symbol, "1d"))
         df_4h = add_indicators(get_klines(symbol, "4h"))
         df_1h = add_indicators(get_klines(symbol, "1h"))
         df_15m = add_indicators(get_klines(symbol, "15m"))
         df_5m = add_indicators(get_klines(symbol, "5m"))
 
-        score = score_direction(symbol, df_4h, df_1h, df_15m, df_5m)
-        price = float(df_5m.iloc[-1]["close"])
-        atr = float(df_5m.iloc[-1]["atr"])
+        score = clean_direction_analysis(df_1d, df_4h, df_1h, df_15m, df_5m)
+
+        price = float(df_15m.iloc[-1]["close"])
+        atr = float(df_15m.iloc[-1]["atr"])
         support, resistance = support_resistance(df_15m)
         vwap = vwap_status(df_5m)
 
@@ -320,13 +465,20 @@ def analyze_symbol(symbol):
             final_score = long_score
             confirmations = score["confirmations_long"]
             reasons = score["long_reasons"]
+            valid_direction = score.get("long_valid", False)
         else:
             direction = "SHORT"
             final_score = short_score
             confirmations = score["confirmations_short"]
             reasons = score["short_reasons"]
+            valid_direction = score.get("short_valid", False)
 
-        if final_score < MIN_DIRECT_SCORE or confirmations < MIN_MANUAL_CONFIRMATIONS or edge < 6:
+        if (
+            not valid_direction
+            or final_score < MIN_DIRECT_SCORE
+            or confirmations < MIN_MANUAL_CONFIRMATIONS
+            or edge < 8
+        ):
             direction = "NO TRADE"
             entry_confirmed = False
             entry_mode = "NO_ENTRY"
@@ -338,12 +490,14 @@ def analyze_symbol(symbol):
             entry_confirmed = True
             entry_mode = "CLASSIC_TECHNICAL"
             stop_loss, tp1, tp2, rr = build_trade_levels(direction, price, atr)
+
             if final_score >= 88 and confirmations >= 6:
                 risk_level = "LOW"
             elif final_score >= 78 and confirmations >= 4:
                 risk_level = "MEDIUM"
             else:
                 risk_level = "HIGH"
+
             freshness = "HIGH" if confirmations >= 6 else "MEDIUM" if confirmations >= 4 else "LOW"
 
         return {
@@ -365,10 +519,10 @@ def analyze_symbol(symbol):
             "risk_level": risk_level,
             "freshness": freshness,
             "confirmations": confirmations,
-            "rsi": safe_round(df_5m.iloc[-1]["rsi"], 2),
-            "macd": safe_round(df_5m.iloc[-1]["macd"], 6),
-            "macd_signal": safe_round(df_5m.iloc[-1]["macd_signal"], 6),
-            "macd_hist": safe_round(df_5m.iloc[-1]["macd_hist"], 6),
+            "rsi": safe_round(df_15m.iloc[-1]["rsi"], 2),
+            "macd": safe_round(df_15m.iloc[-1]["macd"], 6),
+            "macd_signal": safe_round(df_15m.iloc[-1]["macd_signal"], 6),
+            "macd_hist": safe_round(df_15m.iloc[-1]["macd_hist"], 6),
             "adx": safe_round(df_15m.iloc[-1]["adx"], 2),
             "vwap_status": vwap,
             "support": safe_round(support),
@@ -381,10 +535,13 @@ def analyze_symbol(symbol):
             "buy_power": score["buy_power"],
             "sell_power": score["sell_power"],
             "candle_pattern": score["candle_pattern"],
+            "pullback_distance_atr_long": score.get("pullback_distance_atr_long"),
+            "pullback_distance_atr_short": score.get("pullback_distance_atr_short"),
             "reasons": reasons[:12],
-            "signal_timeframe": "5M تا 15M",
-            "validity": "5 تا 15 دقیقه" if entry_confirmed else "سیگنال معتبر نیست",
+            "signal_timeframe": "15M با جهت 1H",
+            "validity": "15 تا 45 دقیقه" if entry_confirmed else "سیگنال معتبر نیست",
         }
+
     except Exception as e:
         return {
             "symbol": symbol,
