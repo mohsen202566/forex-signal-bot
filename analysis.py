@@ -129,6 +129,23 @@ def ema_direction(df: pd.DataFrame) -> str:
     return "range"
 
 
+
+
+def trend_direction(df: pd.DataFrame) -> str:
+    """Compatibility helper for market_scanner.py.
+    Keeps the old public function name while the classic engine uses EMA50/EMA200 direction.
+    Returns bullish / bearish / range, and weak_* states when price agrees with EMA50/EMA200 but EMA50/EMA200 are not fully aligned.
+    """
+    last = df.iloc[-1]
+    close = float(last["close"])
+
+    if last["ema50"] > last["ema200"]:
+        return "bullish" if close > last["ema50"] else "weak_bullish"
+    if last["ema50"] < last["ema200"]:
+        return "bearish" if close < last["ema50"] else "weak_bearish"
+    return "range"
+
+
 def price_position_ema20(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
     if last["close"] > last["ema20"]:
