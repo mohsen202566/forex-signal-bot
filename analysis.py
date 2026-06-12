@@ -271,11 +271,11 @@ def build_trade_levels(direction, price, atr):
     price = float(price)
     atr = max(float(atr or 0), price * 0.0015)
     if direction == "LONG":
-        sl = price - atr * 1.10
+        sl = price - atr * 1.30
         tp1 = price + atr * 0.90
         tp2 = price + atr * 1.60
     else:
-        sl = price + atr * 1.10
+        sl = price + atr * 1.30
         tp1 = price - atr * 0.90
         tp2 = price - atr * 1.60
     risk = abs(price - sl)
