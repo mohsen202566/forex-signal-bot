@@ -10,7 +10,7 @@ Balanced Classic Technical Engine
 - Auto Signal عملاً زیر 85 رد می‌شود
 - Order Block فقط جریمه نرم 2 تا 3 امتیازی دارد؛ هم‌جهت امتیاز اضافه نمی‌گیرد
 - Fear & Greed، Altseason و وضعیت کلی بازار فقط اثر نرم دارند
-- SL = 1.25 ATR ، TP1 = 0.75 ATR ، TP2 = 1.40 ATR
+- SL/TP با حمایت و مقاومت 5M تنظیم می‌شود؛ TP قبل از سطح و SL پشت سطح با buffer هوشمند
 """
 
 import time
@@ -164,6 +164,78 @@ def support_resistance(df, lookback=100):
     resistance = min(above) if above else float(recent["high"].max())
     return support, resistance
 
+
+
+
+def support_resistance_levels(df, lookback=140, swing_window=3, atr=None):
+    """
+    استخراج چند سطح حمایت/مقاومت از کندل‌های 5M.
+    سطوح نزدیک به هم با ATR ادغام می‌شوند تا TP/SL روی نویز کندلی تنظیم نشود.
+    """
+    recent = df.tail(lookback).copy()
+    price = float(recent.iloc[-1]["close"])
+    lows = []
+    highs = []
+
+    for i in range(swing_window, len(recent) - swing_window):
+        row = recent.iloc[i]
+        left = recent.iloc[i - swing_window:i]
+        right = recent.iloc[i + 1:i + 1 + swing_window]
+
+        if row["low"] <= left["low"].min() and row["low"] <= right["low"].min():
+            lows.append(float(row["low"]))
+        if row["high"] >= left["high"].max() and row["high"] >= right["high"].max():
+            highs.append(float(row["high"]))
+
+    # fallback if swing levels are not enough
+    if not lows:
+        lows = [float(recent["low"].min())]
+    if not highs:
+        highs = [float(recent["high"].max())]
+
+    merge_distance = max(float(atr or 0) * 0.20, price * 0.0008)
+
+    def merge_levels(levels):
+        merged = []
+        for level in sorted(levels):
+            if not merged or abs(level - merged[-1]) > merge_distance:
+                merged.append(level)
+            else:
+                merged[-1] = (merged[-1] + level) / 2
+        return merged
+
+    support_levels = [x for x in merge_levels(lows) if x < price]
+    resistance_levels = [x for x in merge_levels(highs) if x > price]
+
+    return {
+        "supports": sorted(support_levels, reverse=True),  # closest first
+        "resistances": sorted(resistance_levels),           # closest first
+        "nearest_support": support_levels[-1] if support_levels else float(recent["low"].min()),
+        "nearest_resistance": resistance_levels[0] if resistance_levels else float(recent["high"].max()),
+    }
+
+
+def pick_safe_target(direction, price, atr, levels, fallback_multiplier, level_buffer):
+    """
+    TP را دقیقاً روی حمایت/مقاومت نمی‌گذارد.
+    LONG: کمی قبل از مقاومت. SHORT: کمی قبل از حمایت.
+    اگر سطح خیلی نزدیک یا غیرمنطقی باشد، fallback ATR استفاده می‌شود.
+    """
+    min_tp_distance = max(atr * 0.35, price * 0.0010)
+    fallback = price + atr * fallback_multiplier if direction == "LONG" else price - atr * fallback_multiplier
+
+    if direction == "LONG":
+        for resistance in levels:
+            target = resistance - level_buffer
+            if target > price and abs(target - price) >= min_tp_distance:
+                return target
+    else:
+        for support in levels:
+            target = support + level_buffer
+            if target < price and abs(target - price) >= min_tp_distance:
+                return target
+
+    return fallback
 
 def vwap_status(df):
     last = df.iloc[-1]
@@ -628,17 +700,52 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
     }
 
 
-def build_trade_levels(direction, price, atr):
+def build_trade_levels(direction, price, atr, df_5m=None):
+    """
+    ساخت SL/TP هوشمند بر اساس حمایت/مقاومت 5M.
+    TP روی خود سطح قرار نمی‌گیرد؛ قبل از سطح گذاشته می‌شود.
+    SL پشت سطح قرار می‌گیرد. اگر سطح مناسب پیدا نشود، ATR fallback استفاده می‌شود.
+    """
     price = float(price)
     atr = max(float(atr or 0), price * 0.0015)
 
-    if direction == "LONG":
-        sl = price - atr * SL_ATR_MULTIPLIER
-        tp1 = price + atr * TP1_ATR_MULTIPLIER
-        tp2 = price + atr * TP2_ATR_MULTIPLIER
+    level_buffer = max(atr * 0.12, price * 0.0008)
+    sl_buffer = max(atr * 0.22, price * 0.0010)
+
+    if df_5m is not None and len(df_5m) >= 80:
+        levels = support_resistance_levels(df_5m, lookback=140, swing_window=3, atr=atr)
+        supports = levels.get("supports", [])
+        resistances = levels.get("resistances", [])
+
+        if direction == "LONG":
+            nearest_support = supports[0] if supports else price - atr * SL_ATR_MULTIPLIER
+            sl = nearest_support - sl_buffer
+            # SL نباید بیش از حد دور شود؛ اگر سطح دور بود، ATR کلاسیک استفاده شود
+            if abs(price - sl) > atr * 1.90:
+                sl = price - atr * SL_ATR_MULTIPLIER
+            tp1 = pick_safe_target("LONG", price, atr, resistances, TP1_ATR_MULTIPLIER, level_buffer)
+            tp2 = pick_safe_target("LONG", price, atr, resistances[1:] if len(resistances) > 1 else [], TP2_ATR_MULTIPLIER, level_buffer)
+        else:
+            nearest_resistance = resistances[0] if resistances else price + atr * SL_ATR_MULTIPLIER
+            sl = nearest_resistance + sl_buffer
+            if abs(price - sl) > atr * 1.90:
+                sl = price + atr * SL_ATR_MULTIPLIER
+            tp1 = pick_safe_target("SHORT", price, atr, supports, TP1_ATR_MULTIPLIER, level_buffer)
+            tp2 = pick_safe_target("SHORT", price, atr, supports[1:] if len(supports) > 1 else [], TP2_ATR_MULTIPLIER, level_buffer)
     else:
-        sl = price + atr * SL_ATR_MULTIPLIER
-        tp1 = price - atr * TP1_ATR_MULTIPLIER
+        if direction == "LONG":
+            sl = price - atr * SL_ATR_MULTIPLIER
+            tp1 = price + atr * TP1_ATR_MULTIPLIER
+            tp2 = price + atr * TP2_ATR_MULTIPLIER
+        else:
+            sl = price + atr * SL_ATR_MULTIPLIER
+            tp1 = price - atr * TP1_ATR_MULTIPLIER
+            tp2 = price - atr * TP2_ATR_MULTIPLIER
+
+    # ترتیب TPها را منطقی نگه می‌دارد
+    if direction == "LONG" and tp2 <= tp1:
+        tp2 = price + atr * TP2_ATR_MULTIPLIER
+    if direction == "SHORT" and tp2 >= tp1:
         tp2 = price - atr * TP2_ATR_MULTIPLIER
 
     risk = abs(price - sl)
@@ -660,8 +767,10 @@ def analyze_symbol(symbol):
         score = technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
 
         price = float(df_15m.iloc[-1]["close"])
-        atr = float(df_15m.iloc[-1]["atr"])
-        support, resistance = support_resistance(df_15m)
+        atr = float(df_5m.iloc[-1]["atr"])
+        sr_5m = support_resistance_levels(df_5m, lookback=140, swing_window=3, atr=atr)
+        support = sr_5m["nearest_support"]
+        resistance = sr_5m["nearest_resistance"]
         vwap = vwap_status(df_15m)
 
         long_score = score["long_score"]
@@ -700,7 +809,7 @@ def analyze_symbol(symbol):
         else:
             entry_confirmed = True
             entry_mode = "CLASSIC_TECHNICAL"
-            stop_loss, tp1, tp2, rr = build_trade_levels(direction, price, atr)
+            stop_loss, tp1, tp2, rr = build_trade_levels(direction, price, atr, df_5m=df_5m)
 
             if final_score >= 92 and confirmations >= 7:
                 risk_level = "LOW"
@@ -738,6 +847,7 @@ def analyze_symbol(symbol):
             "vwap_status": vwap,
             "support": safe_round(support),
             "resistance": safe_round(resistance),
+            "sr_timeframe": "5M",
             "trends": score["trends"],
             "order_block": score["order_block"],
             "market_regime": score["market_regime"],
