@@ -158,7 +158,7 @@ def volume_spike(df):
         return False
 
 
-def score_direction(symbol, df_4h, df_1h, df_15m, df_5m):
+def score_direction(symbol, df_1d, df_4h, df_1h, df_15m, df_5m):
     long_score = 0
     short_score = 0
     long_reasons = []
@@ -167,13 +167,16 @@ def score_direction(symbol, df_4h, df_1h, df_15m, df_5m):
     confirmations_short = 0
 
     trends = {
+        "1D": trend_direction(df_1d),
         "4H": trend_direction(df_4h),
         "1H": trend_direction(df_1h),
         "15M": trend_direction(df_15m),
         "5M": trend_direction(df_5m),
     }
 
-    trend_weights = {"4H": 8, "1H": 14, "15M": 18, "5M": 20}
+    # Clean movement balance for fewer SLs and higher TP1 hit rate:
+    # 1D/4H/1H define the clean direction, 15M validates the move, 5M only triggers entry.
+    trend_weights = {"1D": 15, "4H": 25, "1H": 25, "15M": 20, "5M": 10}
     for tf, trend in trends.items():
         w = trend_weights[tf]
         if trend == "bullish":
@@ -195,55 +198,74 @@ def score_direction(symbol, df_4h, df_1h, df_15m, df_5m):
     prev5 = df_5m.iloc[-2]
     last15 = df_15m.iloc[-1]
 
-    # EMA + MACD direct entry core
+    # 15M setup quality: main clean-move filter.
+    if last15["close"] > last15["ema20"] and last15["macd"] > last15["macd_signal"]:
+        long_score += 16; confirmations_long += 1; long_reasons.append("15M: EMA20 و MACD حرکت لانگ را تمیز تایید می‌کنند")
+    if last15["close"] < last15["ema20"] and last15["macd"] < last15["macd_signal"]:
+        short_score += 16; confirmations_short += 1; short_reasons.append("15M: EMA20 و MACD حرکت شورت را تمیز تایید می‌کنند")
+
+    # 5M entry trigger: important, but no longer allowed to dominate alone.
     if last5["close"] > last5["ema20"] and last5["macd"] > last5["macd_signal"]:
-        long_score += 18; confirmations_long += 1; long_reasons.append("5M: EMA20 و MACD لانگ را تایید می‌کنند")
+        long_score += 14; confirmations_long += 1; long_reasons.append("5M: EMA20 و MACD ورود لانگ را تایید می‌کنند")
     if last5["close"] < last5["ema20"] and last5["macd"] < last5["macd_signal"]:
-        short_score += 18; confirmations_short += 1; short_reasons.append("5M: EMA20 و MACD شورت را تایید می‌کنند")
+        short_score += 14; confirmations_short += 1; short_reasons.append("5M: EMA20 و MACD ورود شورت را تایید می‌کنند")
 
     # MACD histogram slope + RSI slope
     if last5["macd_hist"] > prev5["macd_hist"]:
-        long_score += 8; confirmations_long += 1; long_reasons.append("شیب MACD Histogram صعودی است")
+        long_score += 5; confirmations_long += 1; long_reasons.append("شیب MACD Histogram صعودی است")
     if last5["macd_hist"] < prev5["macd_hist"]:
-        short_score += 8; confirmations_short += 1; short_reasons.append("شیب MACD Histogram نزولی است")
+        short_score += 5; confirmations_short += 1; short_reasons.append("شیب MACD Histogram نزولی است")
     if last5["rsi"] > prev5["rsi"] and 40 <= last5["rsi"] <= 70:
-        long_score += 7; confirmations_long += 1; long_reasons.append("RSI در محدوده مناسب رو به بالا است")
+        long_score += 5; confirmations_long += 1; long_reasons.append("RSI در محدوده مناسب رو به بالا است")
     if last5["rsi"] < prev5["rsi"] and 30 <= last5["rsi"] <= 60:
-        short_score += 7; confirmations_short += 1; short_reasons.append("RSI در محدوده مناسب رو به پایین است")
+        short_score += 5; confirmations_short += 1; short_reasons.append("RSI در محدوده مناسب رو به پایین است")
 
     buy2, sell2 = buy_sell_power(df_5m, 2)
     buy3, sell3 = buy_sell_power(df_5m, 3)
     buy6, sell6 = buy_sell_power(df_5m, 6)
     buy20, sell20 = buy_sell_power(df_5m, 20)
 
-    if buy2 >= 60:
-        long_score += 11; confirmations_long += 1; long_reasons.append("قدرت خرید 2 کندلی مناسب است")
-    if buy3 >= 58:
-        long_score += 8; long_reasons.append("قدرت خرید 3 کندلی تایید دارد")
+    # Rebalanced power logic:
+    # Power20/Power6 confirm real pressure; Power3/Power2 are only fast triggers.
+    if buy20 >= 55:
+        long_score += 10; confirmations_long += 1; long_reasons.append("قدرت خرید 20 کندلی جهت کلی لانگ را تایید می‌کند")
     if buy6 >= 56:
-        long_score += 5; long_reasons.append("قدرت خرید کوتاه‌مدت مثبت است")
-    if sell2 >= 60:
-        short_score += 11; confirmations_short += 1; short_reasons.append("قدرت فروش 2 کندلی مناسب است")
-    if sell3 >= 58:
-        short_score += 8; short_reasons.append("قدرت فروش 3 کندلی تایید دارد")
+        long_score += 8; confirmations_long += 1; long_reasons.append("قدرت خرید 6 کندلی پایدار است")
+    if buy3 >= 58:
+        long_score += 6; long_reasons.append("قدرت خرید 3 کندلی تایید سریع دارد")
+    if buy2 >= 60:
+        long_score += 4; long_reasons.append("قدرت خرید 2 کندلی فقط تریگر نهایی است")
+
+    if sell20 >= 55:
+        short_score += 10; confirmations_short += 1; short_reasons.append("قدرت فروش 20 کندلی جهت کلی شورت را تایید می‌کند")
     if sell6 >= 56:
-        short_score += 5; short_reasons.append("قدرت فروش کوتاه‌مدت مثبت است")
+        short_score += 8; confirmations_short += 1; short_reasons.append("قدرت فروش 6 کندلی پایدار است")
+    if sell3 >= 58:
+        short_score += 6; short_reasons.append("قدرت فروش 3 کندلی تایید سریع دارد")
+    if sell2 >= 60:
+        short_score += 4; short_reasons.append("قدرت فروش 2 کندلی فقط تریگر نهایی است")
 
     if last5["close"] > last5["vwap"]:
-        long_score += 7; confirmations_long += 1; long_reasons.append("قیمت بالای VWAP است")
+        long_score += 6; confirmations_long += 1; long_reasons.append("قیمت بالای VWAP است")
         short_score -= 4
     elif last5["close"] < last5["vwap"]:
-        short_score += 7; confirmations_short += 1; short_reasons.append("قیمت پایین VWAP است")
+        short_score += 6; confirmations_short += 1; short_reasons.append("قیمت پایین VWAP است")
         long_score -= 4
+
+    # Clean alignment bonus: only when 15M setup and 5M trigger agree.
+    if last15["close"] > last15["ema20"] and last5["close"] > last5["ema20"] and last5["close"] > last5["vwap"]:
+        long_score += 6; confirmations_long += 1; long_reasons.append("هماهنگی تمیز 15M و 5M برای لانگ")
+    if last15["close"] < last15["ema20"] and last5["close"] < last5["ema20"] and last5["close"] < last5["vwap"]:
+        short_score += 6; confirmations_short += 1; short_reasons.append("هماهنگی تمیز 15M و 5M برای شورت")
 
     pattern = candle_pattern(df_5m)
     if pattern.startswith("bullish"):
-        long_score += 6; confirmations_long += 1; long_reasons.append(f"کندل تاییدی لانگ: {pattern}")
+        long_score += 4; confirmations_long += 1; long_reasons.append(f"کندل تاییدی لانگ: {pattern}")
     elif pattern.startswith("bearish"):
-        short_score += 6; confirmations_short += 1; short_reasons.append(f"کندل تاییدی شورت: {pattern}")
+        short_score += 4; confirmations_short += 1; short_reasons.append(f"کندل تاییدی شورت: {pattern}")
 
     if float(last15["adx"]) >= MIN_ADX_FOR_TREND:
-        long_score += 4; short_score += 4
+        long_score += 6; short_score += 6
         long_reasons.append("ADX 15M قدرت روند قابل قبول نشان می‌دهد")
         short_reasons.append("ADX 15M قدرت روند قابل قبول نشان می‌دهد")
     if volume_spike(df_5m):
@@ -272,12 +294,12 @@ def build_trade_levels(direction, price, atr):
     atr = max(float(atr or 0), price * 0.0015)
     if direction == "LONG":
         sl = price - atr * 1.30
-        tp1 = price + atr * 0.90
-        tp2 = price + atr * 1.60
+        tp1 = price + atr * 0.80
+        tp2 = price + atr * 1.50
     else:
         sl = price + atr * 1.30
-        tp1 = price - atr * 0.90
-        tp2 = price - atr * 1.60
+        tp1 = price - atr * 0.80
+        tp2 = price - atr * 1.50
     risk = abs(price - sl)
     reward = abs(tp1 - price)
     rr = round(reward / risk, 2) if risk > 0 else 0
@@ -287,12 +309,13 @@ def build_trade_levels(direction, price, atr):
 def analyze_symbol(symbol):
     symbol = str(symbol).upper().strip()
     try:
+        df_1d = add_indicators(get_klines(symbol, "1d"))
         df_4h = add_indicators(get_klines(symbol, "4h"))
         df_1h = add_indicators(get_klines(symbol, "1h"))
         df_15m = add_indicators(get_klines(symbol, "15m"))
         df_5m = add_indicators(get_klines(symbol, "5m"))
 
-        score = score_direction(symbol, df_4h, df_1h, df_15m, df_5m)
+        score = score_direction(symbol, df_1d, df_4h, df_1h, df_15m, df_5m)
         price = float(df_5m.iloc[-1]["close"])
         atr = float(df_5m.iloc[-1]["atr"])
         support, resistance = support_resistance(df_15m)
