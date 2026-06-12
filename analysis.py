@@ -37,6 +37,9 @@ ADX_HARD_MIN = max(float(MIN_ADX_FOR_TREND), 20.0)
 SL_ATR_MULTIPLIER = 1.25
 TP1_ATR_MULTIPLIER = 0.75
 TP2_ATR_MULTIPLIER = 1.40
+POWER2_SIGNAL_MIN = 80.0
+MIN_SL_ATR_MULTIPLIER = 1.25
+MAX_SL_ATR_MULTIPLIER = 1.90
 
 # Soft context cache
 _CONTEXT_CACHE = {"ts": 0, "data": None}
@@ -614,18 +617,21 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         short_score += 3
         short_reasons.append("قدرت 6 کندلی فروش هم‌جهت است")
 
-    # 2-candle power only prevents bad instant pressure
-    if sell2 > buy2 + 10:
-        long_score -= 6
-        long_reasons.append("فشار لحظه‌ای فروش خلاف لانگ است؛ جریمه نرم")
-    elif buy2 > sell2 + 10:
-        long_score += 1
+    # 2-candle power is a hard quality gate for automatic/direct signals.
+    # LONG requires buy power >= 80%. SHORT requires sell power >= 80%.
+    if buy2 >= POWER2_SIGNAL_MIN:
+        long_score += 3
+        long_reasons.append("قدرت خرید 2 کندلی بالای 80٪ و هم‌جهت لانگ است")
+    else:
+        long_score = min(long_score, 69)
+        long_reasons.append("رد لانگ: قدرت خرید 2 کندلی زیر 80٪ است")
 
-    if buy2 > sell2 + 10:
-        short_score -= 6
-        short_reasons.append("فشار لحظه‌ای خرید خلاف شورت است؛ جریمه نرم")
-    elif sell2 > buy2 + 10:
-        short_score += 1
+    if sell2 >= POWER2_SIGNAL_MIN:
+        short_score += 3
+        short_reasons.append("قدرت فروش 2 کندلی بالای 80٪ و هم‌جهت شورت است")
+    else:
+        short_score = min(short_score, 69)
+        short_reasons.append("رد شورت: قدرت فروش 2 کندلی زیر 80٪ است")
 
     # Order block soft penalty only. Same-direction gives no bonus.
     if ob == "bearish_order_block":
@@ -655,6 +661,7 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         and trends["30M"] in ["bullish", "weak_bullish"]
         and last_15["close"] > last_15["ema20"]
         and last_15["macd"] > last_15["macd_signal"]
+        and buy2 >= POWER2_SIGNAL_MIN
     )
 
     short_valid = (
@@ -663,6 +670,7 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         and trends["30M"] in ["bearish", "weak_bearish"]
         and last_15["close"] < last_15["ema20"]
         and last_15["macd"] < last_15["macd_signal"]
+        and sell2 >= POWER2_SIGNAL_MIN
     )
 
     if not long_valid:
@@ -697,6 +705,7 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         "long_valid": long_valid,
         "short_valid": short_valid,
         "adx_15": adx_15,
+        "power2_signal_min": POWER2_SIGNAL_MIN,
     }
 
 
@@ -720,15 +729,18 @@ def build_trade_levels(direction, price, atr, df_5m=None):
         if direction == "LONG":
             nearest_support = supports[0] if supports else price - atr * SL_ATR_MULTIPLIER
             sl = nearest_support - sl_buffer
-            # SL نباید بیش از حد دور شود؛ اگر سطح دور بود، ATR کلاسیک استفاده شود
-            if abs(price - sl) > atr * 1.90:
+            # SL باید پشت حمایت باشد اما نه خیلی نزدیک و نه خیلی دور.
+            # اگر حمایت خیلی نزدیک/دور بود، از ATR کلاسیک استفاده می‌شود.
+            sl_distance = abs(price - sl)
+            if sl_distance < atr * MIN_SL_ATR_MULTIPLIER or sl_distance > atr * MAX_SL_ATR_MULTIPLIER:
                 sl = price - atr * SL_ATR_MULTIPLIER
             tp1 = pick_safe_target("LONG", price, atr, resistances, TP1_ATR_MULTIPLIER, level_buffer)
             tp2 = pick_safe_target("LONG", price, atr, resistances[1:] if len(resistances) > 1 else [], TP2_ATR_MULTIPLIER, level_buffer)
         else:
             nearest_resistance = resistances[0] if resistances else price + atr * SL_ATR_MULTIPLIER
             sl = nearest_resistance + sl_buffer
-            if abs(price - sl) > atr * 1.90:
+            sl_distance = abs(price - sl)
+            if sl_distance < atr * MIN_SL_ATR_MULTIPLIER or sl_distance > atr * MAX_SL_ATR_MULTIPLIER:
                 sl = price + atr * SL_ATR_MULTIPLIER
             tp1 = pick_safe_target("SHORT", price, atr, supports, TP1_ATR_MULTIPLIER, level_buffer)
             tp2 = pick_safe_target("SHORT", price, atr, supports[1:] if len(supports) > 1 else [], TP2_ATR_MULTIPLIER, level_buffer)
@@ -742,11 +754,26 @@ def build_trade_levels(direction, price, atr, df_5m=None):
             tp1 = price - atr * TP1_ATR_MULTIPLIER
             tp2 = price - atr * TP2_ATR_MULTIPLIER
 
+    # حداقل فاصله SL همیشه باید ATR * 1.25 باشد.
+    # اگر SL هوشمند با حمایت/مقاومت نزدیک‌تر از این شد، به حداقل استاندارد برمی‌گردد.
+    min_sl_distance = atr * SL_ATR_MULTIPLIER
+    if direction == "LONG" and (price - sl) < min_sl_distance:
+        sl = price - min_sl_distance
+    if direction == "SHORT" and (sl - price) < min_sl_distance:
+        sl = price + min_sl_distance
+
     # ترتیب TPها را منطقی نگه می‌دارد
     if direction == "LONG" and tp2 <= tp1:
         tp2 = price + atr * TP2_ATR_MULTIPLIER
     if direction == "SHORT" and tp2 >= tp1:
         tp2 = price - atr * TP2_ATR_MULTIPLIER
+
+    # حداقل فاصله TP1 را حفظ می‌کند تا TP خیلی نزدیک سطح/نویز نباشد.
+    min_tp1_distance = max(atr * 0.35, price * 0.0010)
+    if direction == "LONG" and tp1 - price < min_tp1_distance:
+        tp1 = price + atr * TP1_ATR_MULTIPLIER
+    if direction == "SHORT" and price - tp1 < min_tp1_distance:
+        tp1 = price - atr * TP1_ATR_MULTIPLIER
 
     risk = abs(price - sl)
     reward = abs(tp1 - price)
@@ -858,6 +885,7 @@ def analyze_symbol(symbol):
             "volume_ratio": score["volume_ratio"],
             "power2_buy": score["power2_buy"],
             "power2_sell": score["power2_sell"],
+            "power2_signal_min": score.get("power2_signal_min"),
             "power3_buy": score["power3_buy"],
             "power3_sell": score["power3_sell"],
             "buy_power": score["buy_power"],
