@@ -158,7 +158,7 @@ def volume_spike(df):
         return False
 
 
-def score_direction(symbol, df_1d, df_4h, df_1h, df_15m, df_5m):
+def score_direction(symbol, df_4h, df_1h, df_15m, df_5m):
     long_score = 0
     short_score = 0
     long_reasons = []
@@ -167,16 +167,14 @@ def score_direction(symbol, df_1d, df_4h, df_1h, df_15m, df_5m):
     confirmations_short = 0
 
     trends = {
-        "1D": trend_direction(df_1d),
         "4H": trend_direction(df_4h),
         "1H": trend_direction(df_1h),
         "15M": trend_direction(df_15m),
         "5M": trend_direction(df_5m),
     }
 
-    # Clean movement balance for fewer SLs and higher TP1 hit rate:
-    # 1D/4H/1H define the clean direction, 15M validates the move, 5M only triggers entry.
-    trend_weights = {"1D": 15, "4H": 25, "1H": 25, "15M": 20, "5M": 10}
+    # Clean movement balance: 15M/1H define quality, 5M only triggers entry.
+    trend_weights = {"4H": 10, "1H": 18, "15M": 24, "5M": 16}
     for tf, trend in trends.items():
         w = trend_weights[tf]
         if trend == "bullish":
@@ -225,25 +223,18 @@ def score_direction(symbol, df_1d, df_4h, df_1h, df_15m, df_5m):
     buy6, sell6 = buy_sell_power(df_5m, 6)
     buy20, sell20 = buy_sell_power(df_5m, 20)
 
-    # Rebalanced power logic:
-    # Power20/Power6 confirm real pressure; Power3/Power2 are only fast triggers.
-    if buy20 >= 55:
-        long_score += 10; confirmations_long += 1; long_reasons.append("قدرت خرید 20 کندلی جهت کلی لانگ را تایید می‌کند")
-    if buy6 >= 56:
-        long_score += 8; confirmations_long += 1; long_reasons.append("قدرت خرید 6 کندلی پایدار است")
-    if buy3 >= 58:
-        long_score += 6; long_reasons.append("قدرت خرید 3 کندلی تایید سریع دارد")
     if buy2 >= 60:
-        long_score += 4; long_reasons.append("قدرت خرید 2 کندلی فقط تریگر نهایی است")
-
-    if sell20 >= 55:
-        short_score += 10; confirmations_short += 1; short_reasons.append("قدرت فروش 20 کندلی جهت کلی شورت را تایید می‌کند")
-    if sell6 >= 56:
-        short_score += 8; confirmations_short += 1; short_reasons.append("قدرت فروش 6 کندلی پایدار است")
-    if sell3 >= 58:
-        short_score += 6; short_reasons.append("قدرت فروش 3 کندلی تایید سریع دارد")
+        long_score += 7; confirmations_long += 1; long_reasons.append("قدرت خرید 2 کندلی مناسب است")
+    if buy3 >= 58:
+        long_score += 5; long_reasons.append("قدرت خرید 3 کندلی تایید دارد")
+    if buy6 >= 56:
+        long_score += 3; long_reasons.append("قدرت خرید کوتاه‌مدت مثبت است")
     if sell2 >= 60:
-        short_score += 4; short_reasons.append("قدرت فروش 2 کندلی فقط تریگر نهایی است")
+        short_score += 7; confirmations_short += 1; short_reasons.append("قدرت فروش 2 کندلی مناسب است")
+    if sell3 >= 58:
+        short_score += 5; short_reasons.append("قدرت فروش 3 کندلی تایید دارد")
+    if sell6 >= 56:
+        short_score += 3; short_reasons.append("قدرت فروش کوتاه‌مدت مثبت است")
 
     if last5["close"] > last5["vwap"]:
         long_score += 6; confirmations_long += 1; long_reasons.append("قیمت بالای VWAP است")
@@ -309,13 +300,12 @@ def build_trade_levels(direction, price, atr):
 def analyze_symbol(symbol):
     symbol = str(symbol).upper().strip()
     try:
-        df_1d = add_indicators(get_klines(symbol, "1d"))
         df_4h = add_indicators(get_klines(symbol, "4h"))
         df_1h = add_indicators(get_klines(symbol, "1h"))
         df_15m = add_indicators(get_klines(symbol, "15m"))
         df_5m = add_indicators(get_klines(symbol, "5m"))
 
-        score = score_direction(symbol, df_1d, df_4h, df_1h, df_15m, df_5m)
+        score = score_direction(symbol, df_4h, df_1h, df_15m, df_5m)
         price = float(df_5m.iloc[-1]["close"])
         atr = float(df_5m.iloc[-1]["atr"])
         support, resistance = support_resistance(df_15m)
