@@ -137,6 +137,7 @@ def is_trade_section_command(text):
             "وضعیت ترید",
             "تنظیمات ترید",
             "آمار ترید",
+            "تریدفعال",
             "پوزیشن فعال",
             "پوزیشن‌های فعال",
             "پوزیشنهای فعال",
@@ -157,16 +158,16 @@ def build_active_trades_text(user_id):
     user_signals = [
         s for s in active
         if int(s.get("user_id", 0)) == int(user_id)
-        and s.get("status") in ["ACTIVE", "PENDING_ACTIVATION"]
+        and s.get("status") == "ACTIVE"
     ]
 
     if not user_signals:
-        return "📭 هیچ سیگنال یا ترید فعالی زیر نظر نیست."
+        return "📭 هیچ ترید فعالی وجود ندارد."
 
     lines = ["📊 سیگنال‌ها / تریدهای فعال زیر نظر:\n"]
     for i, s in enumerate(user_signals[:30], start=1):
         status = s.get("status")
-        status_fa = "✅ ورود فعال" if status == "ACTIVE" else "👀 منتظر فعال‌سازی"
+        status_fa = "✅ فعال"
         direction_fa = "لانگ" if s.get("direction") == "LONG" else "شورت" if s.get("direction") == "SHORT" else safe(s.get("direction"))
         lines.append(
             f"{i}) {s.get('symbol')}\n"
@@ -416,7 +417,7 @@ def build_analysis_text(result):
     return f"""
 📊 تحلیل فیوچرز {result['symbol']}
 
-وضعیت ورود: {"✅ سیگنال مستقیم / فعال" if result.get("entry_confirmed") else "غیرفعال"}
+وضعیت ورود: {"✅ فعال" if result.get("entry_confirmed") else "غیرفعال"}
 قیمت فعلی: {result['price']}
 
 جهت نهایی: {fa_direction(result['direction'])}
@@ -517,9 +518,6 @@ ADX: {safe(r.get('adx'))}
 def send_auto_signal_to_all_users(result):
     direction_fa = "لانگ" if result["direction"] == "LONG" else "شورت"
 
-    entry_mode = result.get("entry_mode")
-
-    # Classic Direct Mode: سیگنال خودکار مستقیم و فعال ارسال می‌شود؛ ستاپ انتظار فعال‌سازی نداریم.
     title = "🚨 سیگنال خودکار"
     entry_status_text = "✅ ورود فعال"
 
