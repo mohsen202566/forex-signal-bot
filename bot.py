@@ -24,6 +24,7 @@ from signal_tracker import (
     can_add_automatic_signal,
 )
 
+# Paper Trade / Trade commands
 try:
     from paper_trader import (
         set_trade_enabled,
@@ -37,18 +38,48 @@ try:
         format_trade_settings,
         format_empty_slots,
     )
+    PAPER_TRADER_AVAILABLE = True
+    PAPER_TRADER_IMPORT_ERROR = None
 except Exception as e:
-    print("PAPER TRADER IMPORT ERROR:", str(e))
-    set_trade_enabled = None
-    emergency_stop = None
-    set_trade_margin = None
-    set_leverage = None
-    set_max_open_positions = None
-    format_trade_status = None
-    format_open_positions = None
-    format_trade_stats = None
-    format_trade_settings = None
-    format_empty_slots = None
+    PAPER_TRADER_AVAILABLE = False
+    PAPER_TRADER_IMPORT_ERROR = str(e)
+
+    def _paper_unavailable(*args, **kwargs):
+        return (
+            "❌ بخش Paper Trade لود نشد.\n"
+            "فایل‌های paper_trader.py و auto_trade_config.py را چک کن.\n"
+            f"جزئیات: {PAPER_TRADER_IMPORT_ERROR}"
+        )
+
+    def set_trade_enabled(enabled):
+        return _paper_unavailable()
+
+    def emergency_stop():
+        return _paper_unavailable()
+
+    def format_trade_status():
+        return _paper_unavailable()
+
+    def format_open_positions():
+        return _paper_unavailable()
+
+    def format_trade_stats():
+        return _paper_unavailable()
+
+    def format_trade_settings():
+        return _paper_unavailable()
+
+    def format_empty_slots():
+        return _paper_unavailable()
+
+    def set_trade_margin(value):
+        return False, _paper_unavailable()
+
+    def set_leverage(value):
+        return False, _paper_unavailable()
+
+    def set_max_open_positions(value):
+        return False, _paper_unavailable()
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN تنظیم نشده است. اول روی VPS دستور export BOT_TOKEN را بزن.")
@@ -60,7 +91,7 @@ MESSAGE_RESULTS = {}
 
 TRACK_COMMANDS = ["\u0632\u06cc\u0631 \u0646\u0638\u0631", "\u0632\u06cc\u0631\u0646\u0638\u0631", "\u0632\u06cc\u0631 \u0646\u0638\u0631 \u0628\u06af\u06cc\u0631", "\u0646\u0638\u0631"]
 
-# حافظه موقت برای دستورهای چندمرحله‌ای ترید مثل «ترید دلار» و «ترید لوریج»
+# حافظه موقت برای دستورات دو مرحله‌ای ترید مثل «ترید دلار» و «ترید لوریج»
 TRADE_WAITING_ACTION = {}
 
 
@@ -117,35 +148,16 @@ def is_market_status_command(text):
 
 
 
-def _paper_trade_unavailable_text():
-    return "⚠️ بخش Paper Trade روی این نسخه کامل لود نشده است. فایل‌های paper_trader.py و auto_trade_config.py را چک کن."
+def _normalize_trade_text(text):
+    return " ".join((text or "").strip().lower().replace("ي", "ی").replace("ك", "ک").split())
 
 
-def _owner_only(message):
-    if not is_owner(message.from_user.id):
-        bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند این دستور ترید را اجرا کند.")
-        return True
-    return False
-
-
-def _reply_paper_result(message, func, *args):
-    if not func:
-        bot.reply_to(message, _paper_trade_unavailable_text())
-        return True
-    try:
-        result = func(*args)
-        # بعضی توابع tuple برمی‌گردانند: (ok, msg)
-        if isinstance(result, tuple) and len(result) >= 2:
-            bot.reply_to(message, str(result[1]))
-        else:
-            bot.reply_to(message, str(result))
-    except Exception as e:
-        bot.reply_to(message, f"❌ خطا در اجرای دستور ترید:\n{e}")
-    return True
+def _reply_trade_unavailable(message):
+    bot.reply_to(message, format_trade_status())
 
 
 def handle_trade_waiting_input(message, text):
-    """مرحله دوم دستورهای ترید مثل «ترید دلار»، «ترید لوریج»، «حداکثر پوزیشن»."""
+    """مرحله دوم دستورهای ترید مثل ترید دلار / ترید لوریج."""
     user_id = int(message.from_user.id)
 
     if user_id not in TRADE_WAITING_ACTION:
@@ -153,104 +165,145 @@ def handle_trade_waiting_input(message, text):
 
     action = TRADE_WAITING_ACTION.pop(user_id)
 
-    if _owner_only(message):
+    if not is_owner(user_id):
+        bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند تنظیمات ترید را تغییر دهد.")
         return True
 
-    clean_value = str(text).strip()
+    try:
+        value = _normalize_trade_text(text)
 
-    if action == "trade_margin":
-        return _reply_paper_result(message, set_trade_margin, clean_value)
+        if action == "trade_margin":
+            ok, reply = set_trade_margin(value)
+            bot.reply_to(message, reply)
+            return True
 
-    if action == "leverage":
-        return _reply_paper_result(message, set_leverage, clean_value)
+        if action == "leverage":
+            ok, reply = set_leverage(value)
+            bot.reply_to(message, reply)
+            return True
 
-    if action == "max_positions":
-        return _reply_paper_result(message, set_max_open_positions, clean_value)
+        if action == "max_positions":
+            ok, reply = set_max_open_positions(value)
+            bot.reply_to(message, reply)
+            return True
 
-    bot.reply_to(message, "❌ دستور تنظیم ترید نامشخص بود.")
-    return True
+        bot.reply_to(message, "❌ دستور تنظیم نامشخص بود.")
+        return True
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطا در ثبت تنظیم:\n{e}")
+        return True
 
 
 def handle_trade_command(message, text):
-    """دستورات Paper Trade مثل نسخه فیوچرز اصلی، قبل از تشخیص ارز اجرا می‌شوند."""
-    clean = text.strip().lower()
+    """دستورات Paper Trade مثل ربات فیوچرز اصلی، قبل از تشخیص ارز اجرا می‌شود."""
+    clean = _normalize_trade_text(text)
     user_id = int(message.from_user.id)
 
-    # داشبورد و گزارش‌ها
-    if clean in ["ترید", "وضعیت ترید", "داشبورد"]:
-        return _reply_paper_result(message, format_trade_status)
+    # وضعیت/داشبورد عمومی
+    if clean in ["ترید", "وضعیت ترید", "داشبورد", "داشبورد ترید"]:
+        bot.reply_to(message, format_trade_status())
+        return True
 
-    if clean in ["آمار ترید", "امار ترید"]:
-        return _reply_paper_result(message, format_trade_stats)
+    if clean in ["آمار ترید", "امار ترید", "آمار معاملات", "امار معاملات"]:
+        bot.reply_to(message, format_trade_stats())
+        return True
 
     if clean in [
         "پوزیشن ها", "پوزیشن‌ها", "پوزیشنهای باز", "پوزیشن های باز",
         "پوزیشن فعال", "پوزیشن‌های فعال", "پوزیشنهای فعال",
-        "تریدهای فعال", "معاملات فعال", "سیگنال فعال", "سیگنال‌های فعال", "سیگنالهای فعال"
+        "معاملات فعال", "معامله فعال", "تریدهای فعال", "ترید های فعال"
     ]:
-        return _reply_paper_result(message, format_open_positions)
+        bot.reply_to(message, format_open_positions())
+        return True
 
-    if clean in ["تنظیمات ترید", "تنظیم ترید"]:
-        return _reply_paper_result(message, format_trade_settings)
+    if clean in ["تنظیمات ترید", "تنظیم ترید", "ستینگ ترید"]:
+        bot.reply_to(message, format_trade_settings())
+        return True
 
-    if clean in ["اسلات خالی", "اسلات ترید"]:
-        return _reply_paper_result(message, format_empty_slots)
+    if clean in ["اسلات خالی", "اسلات ترید", "ظرفیت ترید"]:
+        bot.reply_to(message, format_empty_slots())
+        return True
 
     # دستورهای مالک
     owner_commands = [
-        "ترید فعال", "تریدفعال", "ترید روشن",
-        "ترید غیرفعال", "ترید خاموش", "تریدغیرفعال",
-        "توقف اضطراری", "توقف ترید", "استاپ ترید",
-        "ترید دلار", "ترید لوریج", "حداکثر پوزیشن",
+        "ترید فعال", "فعال کردن ترید", "ترید روشن", "روشن کردن ترید",
+        "ترید غیرفعال", "ترید غیر فعال", "غیرفعال کردن ترید", "ترید خاموش", "خاموش کردن ترید",
+        "توقف اضطراری", "استاپ ترید", "توقف ترید",
+        "ترید دلار", "دلار ترید", "حجم ترید", "مارجین ترید",
+        "ترید لوریج", "لوریج ترید", "اهرم ترید",
+        "حداکثر پوزیشن", "حد اکثر پوزیشن", "حداکثر معاملات",
     ]
-    if clean in owner_commands and _owner_only(message):
+
+    if clean in owner_commands and not is_owner(user_id):
+        bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند دستورهای ترید را اجرا کند.")
         return True
 
-    if clean in ["ترید فعال", "تریدفعال", "ترید روشن"]:
-        return _reply_paper_result(message, set_trade_enabled, True)
+    if clean in ["ترید فعال", "فعال کردن ترید", "ترید روشن", "روشن کردن ترید"]:
+        bot.reply_to(message, set_trade_enabled(True))
+        return True
 
-    if clean in ["ترید غیرفعال", "ترید خاموش", "تریدغیرفعال"]:
-        return _reply_paper_result(message, set_trade_enabled, False)
+    if clean in ["ترید غیرفعال", "ترید غیر فعال", "غیرفعال کردن ترید", "ترید خاموش", "خاموش کردن ترید"]:
+        bot.reply_to(message, set_trade_enabled(False))
+        return True
 
-    if clean in ["توقف اضطراری", "توقف ترید", "استاپ ترید"]:
-        return _reply_paper_result(message, emergency_stop)
+    if clean in ["توقف اضطراری", "استاپ ترید", "توقف ترید"]:
+        bot.reply_to(message, emergency_stop())
+        return True
 
-    if clean == "ترید دلار":
+    if clean in ["ترید دلار", "دلار ترید", "حجم ترید", "مارجین ترید"]:
         TRADE_WAITING_ACTION[user_id] = "trade_margin"
         bot.reply_to(message, "مقدار دلاری هر پوزیشن را وارد کن:\nمثلاً: 5")
         return True
 
-    if clean == "ترید لوریج":
+    if clean in ["ترید لوریج", "لوریج ترید", "اهرم ترید"]:
         TRADE_WAITING_ACTION[user_id] = "leverage"
         bot.reply_to(message, "لوریج معاملات بعدی را وارد کن:\nمثلاً: 10")
         return True
 
-    if clean == "حداکثر پوزیشن":
+    if clean in ["حداکثر پوزیشن", "حد اکثر پوزیشن", "حداکثر معاملات"]:
         TRADE_WAITING_ACTION[user_id] = "max_positions"
         bot.reply_to(message, "حداکثر تعداد پوزیشن همزمان را وارد کن:\nمثلاً: 5")
         return True
 
-    # نسخه تک‌مرحله‌ای هم پشتیبانی شود: «مارجین 10»، «لوریج 5»، «حداکثر پوزیشن 5»
-    if clean.startswith("مارجین "):
-        if _owner_only(message):
+    # فرمت‌های یک‌خطی هم پشتیبانی شوند: مارجین 5 / لوریج 10 / حداکثر پوزیشن 5
+    if clean.startswith("مارجین ") or clean.startswith("دلار "):
+        if not is_owner(user_id):
+            bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند مارجین را تغییر دهد.")
             return True
-        value = clean.split(maxsplit=1)[1]
-        return _reply_paper_result(message, set_trade_margin, value)
+        try:
+            value = clean.split()[-1]
+            ok, reply = set_trade_margin(value)
+            bot.reply_to(message, reply)
+        except Exception:
+            bot.reply_to(message, "فرمت درست: مارجین 5")
+        return True
 
-    if clean.startswith("لوریج "):
-        if _owner_only(message):
+    if clean.startswith("لوریج ") or clean.startswith("اهرم "):
+        if not is_owner(user_id):
+            bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند لوریج را تغییر دهد.")
             return True
-        value = clean.split(maxsplit=1)[1]
-        return _reply_paper_result(message, set_leverage, value)
+        try:
+            value = clean.split()[-1]
+            ok, reply = set_leverage(value)
+            bot.reply_to(message, reply)
+        except Exception:
+            bot.reply_to(message, "فرمت درست: لوریج 10")
+        return True
 
-    if clean.startswith("حداکثر پوزیشن "):
-        if _owner_only(message):
+    if clean.startswith("حداکثر پوزیشن ") or clean.startswith("حد اکثر پوزیشن "):
+        if not is_owner(user_id):
+            bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند حداکثر پوزیشن را تغییر دهد.")
             return True
-        value = clean.split()[-1]
-        return _reply_paper_result(message, set_max_open_positions, value)
+        try:
+            value = clean.split()[-1]
+            ok, reply = set_max_open_positions(value)
+            bot.reply_to(message, reply)
+        except Exception:
+            bot.reply_to(message, "فرمت درست: حداکثر پوزیشن 5")
+        return True
 
     return False
-
 
 def find_symbol(text):
     text = text.lower().strip()
@@ -374,7 +427,7 @@ def build_analysis_text(result):
     trade_levels = build_trade_levels(result)
 
     return f"""
-📊 تحلیل فیوچرز {result['symbol']}
+📊 تحلیل تکنیکال {result['symbol']}
 
 وضعیت ورود: {"✅ فعال" if result.get("entry_confirmed") else "👀 منتظر فعال‌سازی" if result.get("setup_waiting_activation") else "غیرفعال"}
 قیمت فعلی: {result['price']}
@@ -677,6 +730,13 @@ def handle_message(message):
         return
 
     text = message.text.strip()
+
+    # دستورات ترید باید قبل از تشخیص ارز اجرا شوند تا به تحلیل ارز نروند.
+    if handle_trade_waiting_input(message, text):
+        return
+
+    if handle_trade_command(message, text):
+        return
 
     if is_market_status_command(text):
         bot.reply_to(message, "⏳ در حال محاسبه وضعیت بازار...")
