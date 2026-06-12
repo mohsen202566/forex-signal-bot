@@ -61,6 +61,9 @@ MESSAGE_RESULTS = {}
 
 TRACK_COMMANDS = ["\u0632\u06cc\u0631 \u0646\u0638\u0631", "\u0632\u06cc\u0631\u0646\u0638\u0631", "\u0632\u06cc\u0631 \u0646\u0638\u0631 \u0628\u06af\u06cc\u0631", "\u0646\u0638\u0631"]
 
+# حافظه موقت برای تنظیمات چندمرحله‌ای ترید مثل «ترید دلار» و «ترید لوریج»
+TRADE_WAITING_ACTION = {}
+
 
 def safe(value, default="\u0646\u0627\u0645\u0634\u062e\u0635"):
     if value is None:
@@ -114,184 +117,110 @@ def is_market_status_command(text):
     ]
 
 
-def is_active_trades_command(text):
+
+def handle_trade_waiting_input(message, text):
+    """مرحله دوم دستورهای ترید مثل ترید دلار / ترید لوریج."""
+    user_id = int(message.from_user.id)
+
+    if user_id not in TRADE_WAITING_ACTION:
+        return False
+
+    action = TRADE_WAITING_ACTION.pop(user_id)
+
+    if not is_owner(user_id):
+        bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند تنظیمات ترید را تغییر دهد.")
+        return True
+
+    try:
+        if action == "trade_margin":
+            ok, reply = set_trade_margin(text)
+            bot.reply_to(message, reply)
+            return True
+
+        if action == "leverage":
+            ok, reply = set_leverage(text)
+            bot.reply_to(message, reply)
+            return True
+
+        if action == "max_positions":
+            ok, reply = set_max_open_positions(text)
+            bot.reply_to(message, reply)
+            return True
+
+        bot.reply_to(message, "❌ دستور تنظیم نامشخص بود.")
+        return True
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطا در ثبت تنظیم:\n{e}")
+        return True
+
+
+def handle_trade_command(message, text):
+    """دستورات Paper Trade مثل نسخه فیوچرز اصلی."""
     clean = text.strip().lower()
-    return clean in [
+    user_id = int(message.from_user.id)
+
+    trade_owner_commands = [
         "ترید فعال",
-        "تریدفعال",
-        "تریدهای فعال",
-        "معاملات فعال",
-        "سیگنال فعال",
-        "سیگنال‌های فعال",
-        "سیگنالهای فعال",
-        "زیرنظرها",
-        "زیر نظرها",
+        "ترید غیرفعال",
+        "توقف اضطراری",
+        "ترید دلار",
+        "ترید لوریج",
+        "حداکثر پوزیشن",
     ]
 
-
-def is_trade_section_command(text):
-    clean = text.strip().lower()
-    return (
-        clean in [
-            "ترید",
-            "وضعیت ترید",
-            "تنظیمات ترید",
-            "آمار ترید",
-            "تریدفعال",
-            "پوزیشن فعال",
-            "پوزیشن‌های فعال",
-            "پوزیشنهای فعال",
-            "اسلات ترید",
-            "ترید روشن",
-            "ترید خاموش",
-            "توقف ترید",
-            "استاپ ترید",
-        ]
-        or clean.startswith("مارجین ")
-        or clean.startswith("لوریج ")
-        or clean.startswith("حداکثر پوزیشن ")
-    )
-
-
-def build_active_trades_text(user_id):
-    active = get_active_signals()
-    user_signals = [
-        s for s in active
-        if int(s.get("user_id", 0)) == int(user_id)
-        and s.get("status") == "ACTIVE"
-    ]
-
-    if not user_signals:
-        return "📭 هیچ ترید فعالی وجود ندارد."
-
-    lines = ["📊 سیگنال‌ها / تریدهای فعال زیر نظر:\n"]
-    for i, s in enumerate(user_signals[:30], start=1):
-        status = s.get("status")
-        status_fa = "✅ فعال"
-        direction_fa = "لانگ" if s.get("direction") == "LONG" else "شورت" if s.get("direction") == "SHORT" else safe(s.get("direction"))
-        lines.append(
-            f"{i}) {s.get('symbol')}\n"
-            f"جهت: {direction_fa}\n"
-            f"وضعیت: {status_fa}\n"
-            f"ورود: {safe(s.get('entry'))}\n"
-            f"TP1: {safe(s.get('tp1'))}\n"
-            f"TP2: {safe(s.get('tp2'))}\n"
-            f"SL: {safe(s.get('stop_loss'))}\n"
-        )
-
-    if len(user_signals) > 30:
-        lines.append(f"... و {len(user_signals) - 30} مورد دیگر")
-
-    return "\n".join(lines)
-
-
-def handle_trade_section_command(message, text):
-    clean = text.strip().lower()
-
-    if clean in ["ترید", "وضعیت ترید"]:
-        if format_trade_status:
-            bot.reply_to(message, format_trade_status())
-        else:
-            bot.reply_to(message, build_active_trades_text(message.from_user.id))
+    if clean in trade_owner_commands and not is_owner(user_id):
+        bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند دستورهای ترید را اجرا کند.")
         return True
 
-    if clean in ["ترید فعال", "تریدفعال", "تریدهای فعال", "معاملات فعال", "سیگنال فعال", "سیگنال‌های فعال", "سیگنالهای فعال", "زیرنظرها", "زیر نظرها"]:
-        bot.reply_to(message, build_active_trades_text(message.from_user.id))
+    if clean == "ترید فعال":
+        bot.reply_to(message, set_trade_enabled(True))
         return True
 
-    if clean in ["پوزیشن فعال", "پوزیشن‌های فعال", "پوزیشنهای فعال"]:
-        if format_open_positions:
-            bot.reply_to(message, format_open_positions())
-        else:
-            bot.reply_to(message, build_active_trades_text(message.from_user.id))
+    if clean == "ترید غیرفعال":
+        bot.reply_to(message, set_trade_enabled(False))
         return True
 
-    if clean == "آمار ترید":
-        if format_trade_stats:
-            bot.reply_to(message, format_trade_stats())
-        else:
-            bot.reply_to(message, "⚠️ بخش Paper Trade روی این نسخه کامل لود نشده است.")
+    if clean == "توقف اضطراری":
+        bot.reply_to(message, emergency_stop())
         return True
 
-    if clean == "تنظیمات ترید":
-        if format_trade_settings:
-            bot.reply_to(message, format_trade_settings())
-        else:
-            bot.reply_to(message, "⚠️ بخش تنظیمات ترید روی این نسخه کامل لود نشده است.")
+    if clean in ["وضعیت ترید", "داشبورد"]:
+        bot.reply_to(message, format_trade_status())
         return True
 
-    if clean == "اسلات ترید":
-        if format_empty_slots:
-            bot.reply_to(message, format_empty_slots())
-        else:
-            bot.reply_to(message, "⚠️ بخش اسلات ترید روی این نسخه کامل لود نشده است.")
+    if clean in ["آمار ترید", "امار ترید"]:
+        bot.reply_to(message, format_trade_stats())
         return True
 
-    if clean == "ترید روشن":
-        if not is_owner(message.from_user.id):
-            bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند ترید را روشن کند.")
-        elif set_trade_enabled:
-            bot.reply_to(message, set_trade_enabled(True))
-        else:
-            bot.reply_to(message, "⚠️ بخش Paper Trade روی این نسخه کامل لود نشده است.")
+    if clean in ["پوزیشن ها", "پوزیشن‌ها", "پوزیشنهای باز", "پوزیشن های باز"]:
+        bot.reply_to(message, format_open_positions())
         return True
 
-    if clean == "ترید خاموش":
-        if not is_owner(message.from_user.id):
-            bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند ترید را خاموش کند.")
-        elif set_trade_enabled:
-            bot.reply_to(message, set_trade_enabled(False))
-        else:
-            bot.reply_to(message, "⚠️ بخش Paper Trade روی این نسخه کامل لود نشده است.")
+    if clean in ["تنظیمات ترید", "تنظیم ترید"]:
+        bot.reply_to(message, format_trade_settings())
         return True
 
-    if clean in ["توقف ترید", "استاپ ترید"]:
-        if not is_owner(message.from_user.id):
-            bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند توقف اضطراری ترید را فعال کند.")
-        elif emergency_stop:
-            bot.reply_to(message, emergency_stop())
-        else:
-            bot.reply_to(message, "⚠️ بخش Paper Trade روی این نسخه کامل لود نشده است.")
+    if clean == "اسلات خالی":
+        bot.reply_to(message, format_empty_slots())
         return True
 
-    if clean.startswith("مارجین "):
-        if not is_owner(message.from_user.id):
-            bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند مارجین را تغییر دهد.")
-            return True
-        try:
-            value = float(clean.split()[1])
-            ok, msg = set_trade_margin(value) if set_trade_margin else (False, "⚠️ بخش Paper Trade روی این نسخه کامل لود نشده است.")
-            bot.reply_to(message, msg)
-        except Exception:
-            bot.reply_to(message, "فرمت درست: مارجین 10")
+    if clean == "ترید دلار":
+        TRADE_WAITING_ACTION[user_id] = "trade_margin"
+        bot.reply_to(message, "مقدار دلاری هر پوزیشن را وارد کن:\nمثلاً: 5")
         return True
 
-    if clean.startswith("لوریج "):
-        if not is_owner(message.from_user.id):
-            bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند لوریج را تغییر دهد.")
-            return True
-        try:
-            value = int(clean.split()[1])
-            ok, msg = set_leverage(value) if set_leverage else (False, "⚠️ بخش Paper Trade روی این نسخه کامل لود نشده است.")
-            bot.reply_to(message, msg)
-        except Exception:
-            bot.reply_to(message, "فرمت درست: لوریج 5")
+    if clean == "ترید لوریج":
+        TRADE_WAITING_ACTION[user_id] = "leverage"
+        bot.reply_to(message, "لوریج معاملات بعدی را وارد کن:\nمثلاً: 10")
         return True
 
-    if clean.startswith("حداکثر پوزیشن "):
-        if not is_owner(message.from_user.id):
-            bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند حداکثر پوزیشن را تغییر دهد.")
-            return True
-        try:
-            value = int(clean.split()[-1])
-            ok, msg = set_max_open_positions(value) if set_max_open_positions else (False, "⚠️ بخش Paper Trade روی این نسخه کامل لود نشده است.")
-            bot.reply_to(message, msg)
-        except Exception:
-            bot.reply_to(message, "فرمت درست: حداکثر پوزیشن 5")
+    if clean == "حداکثر پوزیشن":
+        TRADE_WAITING_ACTION[user_id] = "max_positions"
+        bot.reply_to(message, "حداکثر تعداد پوزیشن همزمان را وارد کن:\nمثلاً: 5")
         return True
 
     return False
-
 
 def find_symbol(text):
     text = text.lower().strip()
@@ -712,9 +641,11 @@ def handle_message(message):
 
     text = message.text.strip()
 
-    if is_trade_section_command(text):
-        if handle_trade_section_command(message, text):
-            return
+    if handle_trade_waiting_input(message, text):
+        return
+
+    if handle_trade_command(message, text):
+        return
 
     if is_market_status_command(text):
         bot.reply_to(message, "⏳ در حال محاسبه وضعیت بازار...")
