@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-Clean Technical Pullback Engine
+Balanced Classic Technical Engine
 
-هدف این نسخه:
-- سیگنال کمتر، اما تمیزتر
-- حذف ورودهای هیجانی 5M
-- ورود فقط وقتی جهت، ساختار، قدرت روند، پولبک و فاصله از EMA20 منطقی باشند
+معماری این نسخه:
 - بدون Setup / Watchlist / Pending
+- ورود مستقیم فقط با تحلیل تکنیکال بالانس
+- تمرکز ورود روی 15M و 30M؛ وزن 15M بیشتر است
+- ADX زیر 20 رد کامل
+- Auto Signal عملاً زیر 85 رد می‌شود
+- Order Block فقط جریمه نرم 2 تا 3 امتیازی دارد؛ هم‌جهت امتیاز اضافه نمی‌گیرد
+- Fear & Greed، Altseason و وضعیت کلی بازار فقط اثر نرم دارند
+- SL = 1.25 ATR ، TP1 = 0.75 ATR ، TP2 = 1.40 ATR
 """
+
+import time
+from urllib.request import urlopen, Request
 
 import ccxt
 import pandas as pd
@@ -22,26 +29,21 @@ exchange = ccxt.okx({
     "options": {"defaultType": "swap"},
 })
 
+# Main thresholds
+AUTO_DIRECT_SCORE_MIN = 85
+ADX_HARD_MIN = max(float(MIN_ADX_FOR_TREND), 20.0)
 
-# Core architecture constants
-CLEAN_ADX_MIN = max(float(MIN_ADX_FOR_TREND), 25.0)
+# Trade levels
+SL_ATR_MULTIPLIER = 1.25
+TP1_ATR_MULTIPLIER = 0.75
+TP2_ATR_MULTIPLIER = 1.40
 
-SL_ATR_MULTIPLIER = 1.30
-TP1_ATR_MULTIPLIER = 0.80
-TP2_ATR_MULTIPLIER = 1.50
-
-# Entry quality
-PULLBACK_LOOKBACK = 6
-PULLBACK_TOUCH_TOLERANCE_ATR = 0.25
-MAX_DISTANCE_FROM_EMA20_ATR = 0.85
-MAX_EXTENSION_FROM_EMA20_ATR = 1.15
-MAX_CONSECUTIVE_TREND_CANDLES = 5
-
-# Market structure
-SWING_LOOKBACK = 80
-SWING_WINDOW = 3
+# Soft context cache
+_CONTEXT_CACHE = {"ts": 0, "data": None}
+_CONTEXT_CACHE_SECONDS = 900
 
 
+# ---------- Basic helpers ----------
 def to_okx_symbol(symbol):
     coin = str(symbol).upper().replace("USDT", "")
     return f"{coin}/USDT:USDT"
@@ -95,9 +97,7 @@ def add_indicators(df):
     df["macd_signal"] = macd.macd_signal()
     df["macd_hist"] = macd.macd_diff()
 
-    df["atr"] = ta.volatility.average_true_range(
-        df["high"], df["low"], df["close"], window=14
-    )
+    df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14)
 
     adx = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14)
     df["adx"] = adx.adx()
@@ -106,14 +106,15 @@ def add_indicators(df):
     volume_sum = df["volume"].cumsum().replace(0, pd.NA)
     df["vwap"] = (typical * df["volume"]).cumsum() / volume_sum
     df["volume_ma20"] = df["volume"].rolling(20).mean()
+    df["volume_ratio"] = df["volume"] / df["volume_ma20"].replace(0, pd.NA)
 
     df = df.dropna()
     if len(df) < 60:
         raise Exception("اندیکاتورها کامل محاسبه نشدند")
-
     return df
 
 
+# ---------- Technical components ----------
 def trend_direction(df):
     last = df.iloc[-1]
     close = float(last["close"])
@@ -134,10 +135,8 @@ def buy_sell_power(df, candles=20):
     green = recent[recent["close"] > recent["open"]]["volume"].sum()
     red = recent[recent["close"] < recent["open"]]["volume"].sum()
     total = green + red
-
     if total <= 0:
         return 50.0, 50.0
-
     return round((green / total) * 100, 1), round((red / total) * 100, 1)
 
 
@@ -163,53 +162,21 @@ def support_resistance(df, lookback=100):
 
     support = max(below) if below else float(recent["low"].min())
     resistance = min(above) if above else float(recent["high"].max())
-
     return support, resistance
 
 
-def find_swings(df, lookback=SWING_LOOKBACK, window=SWING_WINDOW):
-    recent = df.tail(lookback).copy()
-    lows = []
-    highs = []
-
-    for i in range(window, len(recent) - window):
-        row = recent.iloc[i]
-        left = recent.iloc[i - window:i]
-        right = recent.iloc[i + 1:i + 1 + window]
-
-        if row["low"] <= left["low"].min() and row["low"] <= right["low"].min():
-            lows.append((recent.index[i], float(row["low"])))
-
-        if row["high"] >= left["high"].max() and row["high"] >= right["high"].max():
-            highs.append((recent.index[i], float(row["high"])))
-
-    return lows, highs
-
-
-def market_structure(df):
-    lows, highs = find_swings(df)
-
-    if len(lows) < 2 or len(highs) < 2:
-        return "range_structure"
-
-    last_low = lows[-1][1]
-    prev_low = lows[-2][1]
-    last_high = highs[-1][1]
-    prev_high = highs[-2][1]
-
-    if last_high > prev_high and last_low > prev_low:
-        return "bullish_structure"
-
-    if last_high < prev_high and last_low < prev_low:
-        return "bearish_structure"
-
-    return "range_structure"
+def vwap_status(df):
+    last = df.iloc[-1]
+    if last["close"] > last["vwap"]:
+        return "above_vwap"
+    if last["close"] < last["vwap"]:
+        return "below_vwap"
+    return "near_vwap"
 
 
 def candle_pattern(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
-
     body = abs(float(last["close"]) - float(last["open"]))
     rng = max(float(last["high"]) - float(last["low"]), 1e-12)
     upper = float(last["high"]) - max(float(last["close"]), float(last["open"]))
@@ -225,89 +192,181 @@ def candle_pattern(df):
         return "bearish_pinbar"
     if body / rng >= 0.6:
         return "bullish_strong" if last["close"] > last["open"] else "bearish_strong"
-
     return "neutral"
 
 
-def vwap_status(df):
-    last = df.iloc[-1]
-    if last["close"] > last["vwap"]:
-        return "above_vwap"
-    if last["close"] < last["vwap"]:
-        return "below_vwap"
-    return "near_vwap"
-
-
-def volume_spike(df):
+def volume_quality(df):
     last = df.iloc[-1]
     try:
-        return float(last["volume"]) > float(last["volume_ma20"]) * 1.35
+        ratio = float(last["volume_ratio"])
     except Exception:
-        return False
+        ratio = 1.0
+
+    if ratio >= 1.40:
+        return "high_volume", ratio
+    if ratio >= 1.05:
+        return "normal_volume", ratio
+    if ratio <= 0.70:
+        return "weak_volume", ratio
+    return "neutral_volume", ratio
 
 
-def distance_from_ema20_atr(df):
-    last = df.iloc[-1]
-    price = float(last["close"])
-    ema20 = float(last["ema20"])
-    atr = max(float(last["atr"]), price * 0.0015)
-    return abs(price - ema20) / atr
+def simple_order_block(df):
+    """تشخیص سبک و نرم OB. فقط برای جریمه خلاف جهت استفاده می‌شود؛ امتیاز مثبت نمی‌دهد."""
+    recent = df.tail(30)
+    avg_body = (recent["close"] - recent["open"]).abs().rolling(10).mean().iloc[-1]
+    avg_body = float(avg_body) if pd.notna(avg_body) and avg_body > 0 else 0
+    if avg_body <= 0:
+        return "neutral_order_block"
+
+    for i in range(len(recent) - 4, 1, -1):
+        prev = recent.iloc[i - 1]
+        cur = recent.iloc[i]
+        cur_body = abs(float(cur["close"] - cur["open"]))
+        if cur_body < avg_body * 1.25:
+            continue
+        # bullish displacement after a red candle
+        if prev["close"] < prev["open"] and cur["close"] > cur["open"] and cur["close"] > prev["high"]:
+            return "bullish_order_block"
+        # bearish displacement after a green candle
+        if prev["close"] > prev["open"] and cur["close"] < cur["open"] and cur["close"] < prev["low"]:
+            return "bearish_order_block"
+    return "neutral_order_block"
 
 
-def consecutive_direction_candles(df, direction, candles=8):
-    recent = df.tail(candles)
-    count = 0
+# ---------- Soft market context ----------
+def fetch_fear_greed_value():
+    try:
+        req = Request("https://api.alternative.me/fng/?limit=1", headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=4) as r:
+            import json
+            data = json.loads(r.read().decode("utf-8"))
+        value = int(data["data"][0]["value"])
+        return value
+    except Exception:
+        return None
 
-    for _, row in reversed(list(recent.iterrows())):
-        if direction == "LONG" and row["close"] > row["open"]:
-            count += 1
-        elif direction == "SHORT" and row["close"] < row["open"]:
-            count += 1
+
+def return_pct(df, candles=20):
+    try:
+        recent = df.tail(candles)
+        first = float(recent.iloc[0]["close"])
+        last = float(recent.iloc[-1]["close"])
+        if first <= 0:
+            return 0.0
+        return ((last - first) / first) * 100
+    except Exception:
+        return 0.0
+
+
+def get_soft_context():
+    now = int(time.time())
+    if _CONTEXT_CACHE["data"] is not None and now - _CONTEXT_CACHE["ts"] < _CONTEXT_CACHE_SECONDS:
+        return _CONTEXT_CACHE["data"]
+
+    context = {
+        "market_regime": "neutral_market",
+        "altseason_status": "neutral_altseason",
+        "fear_greed_value": None,
+        "fear_greed_status": "neutral_fear_greed",
+    }
+
+    try:
+        btc_1h = add_indicators(get_klines("BTCUSDT", "1h"))
+        btc_4h = add_indicators(get_klines("BTCUSDT", "4h"))
+        btc_trend_1h = trend_direction(btc_1h)
+        btc_trend_4h = trend_direction(btc_4h)
+        if btc_trend_1h in ["bullish", "weak_bullish"] and btc_trend_4h in ["bullish", "weak_bullish"]:
+            context["market_regime"] = "bullish_market"
+        elif btc_trend_1h in ["bearish", "weak_bearish"] and btc_trend_4h in ["bearish", "weak_bearish"]:
+            context["market_regime"] = "bearish_market"
         else:
-            break
+            context["market_regime"] = "range_market"
 
-    return count
+        eth_1d = add_indicators(get_klines("ETHUSDT", "1d"))
+        btc_1d = add_indicators(get_klines("BTCUSDT", "1d"))
+        eth_ret = return_pct(eth_1d, 20)
+        btc_ret = return_pct(btc_1d, 20)
+        if eth_ret > btc_ret + 3:
+            context["altseason_status"] = "altseason_positive"
+        elif btc_ret > eth_ret + 3:
+            context["altseason_status"] = "altseason_negative"
+        else:
+            context["altseason_status"] = "neutral_altseason"
+    except Exception:
+        pass
 
+    fg = fetch_fear_greed_value()
+    context["fear_greed_value"] = fg
+    if fg is not None:
+        if fg >= 70:
+            context["fear_greed_status"] = "greed_high"
+        elif fg >= 55:
+            context["fear_greed_status"] = "greed_moderate"
+        elif fg <= 25:
+            context["fear_greed_status"] = "fear_extreme"
+        elif fg <= 40:
+            context["fear_greed_status"] = "fear_moderate"
+        else:
+            context["fear_greed_status"] = "neutral_fear_greed"
 
-def is_overextended(df_15m, direction):
-    distance = distance_from_ema20_atr(df_15m)
-    consecutive = consecutive_direction_candles(df_15m, direction)
-
-    if distance > MAX_EXTENSION_FROM_EMA20_ATR:
-        return True, f"فاصله قیمت از EMA20 زیاد است: {round(distance, 2)} ATR"
-
-    if consecutive >= MAX_CONSECUTIVE_TREND_CANDLES:
-        return True, f"حرکت {consecutive} کندل پشت‌سرهم رفته و احتمال ورود دیر وجود دارد"
-
-    return False, None
-
-
-def ema20_pullback(df_15m, direction):
-    last = df_15m.iloc[-1]
-    atr = max(float(last["atr"]), float(last["close"]) * 0.0015)
-    price = float(last["close"])
-    ema20 = float(last["ema20"])
-    distance = abs(price - ema20) / atr
-
-    recent = df_15m.tail(PULLBACK_LOOKBACK)
-    tolerance = atr * PULLBACK_TOUCH_TOLERANCE_ATR
-
-    if direction == "LONG":
-        touched = bool((recent["low"] <= recent["ema20"] + tolerance).any())
-        reclaimed = price > ema20 and last["close"] > last["open"]
-        not_far = distance <= MAX_DISTANCE_FROM_EMA20_ATR
-        return touched and reclaimed and not_far, round(distance, 2)
-
-    if direction == "SHORT":
-        touched = bool((recent["high"] >= recent["ema20"] - tolerance).any())
-        reclaimed = price < ema20 and last["close"] < last["open"]
-        not_far = distance <= MAX_DISTANCE_FROM_EMA20_ATR
-        return touched and reclaimed and not_far, round(distance, 2)
-
-    return False, round(distance, 2)
+    _CONTEXT_CACHE["ts"] = now
+    _CONTEXT_CACHE["data"] = context
+    return context
 
 
-def technical_direction_score(df_4h, df_1h, df_15m, df_5m):
+def apply_soft_context(symbol, long_score, short_score, long_reasons, short_reasons, context):
+    symbol = str(symbol).upper()
+    is_btc = symbol.startswith("BTC")
+
+    # Overall market regime: very soft influence
+    if context.get("market_regime") == "bullish_market":
+        long_score += 3
+        short_score -= 2
+        long_reasons.append("وضعیت کلی بازار صعودی است؛ اثر نرم مثبت برای لانگ")
+    elif context.get("market_regime") == "bearish_market":
+        short_score += 3
+        long_score -= 2
+        short_reasons.append("وضعیت کلی بازار نزولی است؛ اثر نرم مثبت برای شورت")
+    elif context.get("market_regime") == "range_market":
+        long_score -= 1
+        short_score -= 1
+        long_reasons.append("بازار کلی رنج است؛ امتیاز کمی محافظه‌کار شد")
+        short_reasons.append("بازار کلی رنج است؛ امتیاز کمی محافظه‌کار شد")
+
+    # Altseason: soft effect mostly for non-BTC alts
+    if not is_btc:
+        if context.get("altseason_status") == "altseason_positive":
+            long_score += 2
+            short_score -= 1
+            long_reasons.append("وضعیت Altseason مثبت است؛ اثر نرم برای لانگ آلت‌ها")
+        elif context.get("altseason_status") == "altseason_negative":
+            short_score += 2
+            long_score -= 1
+            short_reasons.append("وضعیت Altseason ضعیف است؛ اثر نرم برای شورت آلت‌ها")
+
+    # Fear & Greed: soft, not a blocker
+    fg_status = context.get("fear_greed_status")
+    if fg_status == "greed_high":
+        long_score -= 2
+        short_score += 1
+        short_reasons.append("ترس و طمع در ناحیه طمع بالا است؛ لانگ کمی محافظه‌کار شد")
+    elif fg_status == "greed_moderate":
+        long_score += 1
+        long_reasons.append("ترس و طمع تمایل مثبت دارد؛ اثر نرم برای لانگ")
+    elif fg_status == "fear_extreme":
+        short_score -= 2
+        long_score += 1
+        long_reasons.append("ترس شدید بازار؛ شورت کمی محافظه‌کار شد")
+    elif fg_status == "fear_moderate":
+        short_score += 1
+        short_reasons.append("ترس بازار متوسط است؛ اثر نرم برای شورت")
+
+    return long_score, short_score
+
+
+# ---------- Main scoring ----------
+def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
     long_score = 0
     short_score = 0
     long_reasons = []
@@ -318,14 +377,14 @@ def technical_direction_score(df_4h, df_1h, df_15m, df_5m):
     trends = {
         "4H": trend_direction(df_4h),
         "1H": trend_direction(df_1h),
+        "30M": trend_direction(df_30m),
         "15M": trend_direction(df_15m),
-        "5M": trend_direction(df_5m),  # فقط خروجی نمایشی/اطلاعاتی
+        "5M": trend_direction(df_5m),
     }
-
-    structure = market_structure(df_15m)
 
     last_4h = df_4h.iloc[-1]
     last_1h = df_1h.iloc[-1]
+    last_30 = df_30m.iloc[-1]
     last_15 = df_15m.iloc[-1]
     prev_15 = df_15m.iloc[-2]
     last_5 = df_5m.iloc[-1]
@@ -335,181 +394,207 @@ def technical_direction_score(df_4h, df_1h, df_15m, df_5m):
     buy6, sell6 = buy_sell_power(df_5m, 6)
     buy20, sell20 = buy_sell_power(df_5m, 20)
 
-    # 4H + 1H main direction
+    adx_15 = float(last_15["adx"])
+    ob = simple_order_block(df_15m)
+    vol_status, vol_ratio = volume_quality(df_15m)
+    pattern = candle_pattern(df_15m)
+    context = get_soft_context()
+
+    # 1) Higher timeframe direction: soft background
     if trends["4H"] in ["bullish", "weak_bullish"]:
-        long_score += 18
-        confirmations_long += 1
-        long_reasons.append("4H: جهت کلی لانگ را تایید می‌کند")
-    if trends["4H"] in ["bearish", "weak_bearish"]:
-        short_score += 18
-        confirmations_short += 1
-        short_reasons.append("4H: جهت کلی شورت را تایید می‌کند")
+        long_score += 8
+        long_reasons.append("4H: زمینه کلی صعودی است")
+    elif trends["4H"] in ["bearish", "weak_bearish"]:
+        short_score += 8
+        short_reasons.append("4H: زمینه کلی نزولی است")
 
     if trends["1H"] in ["bullish", "weak_bullish"]:
-        long_score += 26
+        long_score += 12
         confirmations_long += 1
         long_reasons.append("1H: جهت اصلی لانگ است")
-    if trends["1H"] in ["bearish", "weak_bearish"]:
-        short_score += 26
+    elif trends["1H"] in ["bearish", "weak_bearish"]:
+        short_score += 12
         confirmations_short += 1
         short_reasons.append("1H: جهت اصلی شورت است")
 
-    # Strong EMA/MACD alignment on higher TFs
-    if last_1h["close"] > last_1h["ema20"] > last_1h["ema50"] and last_1h["macd"] > last_1h["macd_signal"]:
+    # 2) 30M entry context: important, but below 15M
+    if trends["30M"] in ["bullish", "weak_bullish"]:
+        long_score += 14
+        confirmations_long += 1
+        long_reasons.append("30M: جهت ورود لانگ را تایید می‌کند")
+    elif trends["30M"] in ["bearish", "weak_bearish"]:
+        short_score += 14
+        confirmations_short += 1
+        short_reasons.append("30M: جهت ورود شورت را تایید می‌کند")
+
+    if last_30["close"] > last_30["ema20"] and last_30["macd"] > last_30["macd_signal"]:
+        long_score += 10
+        confirmations_long += 1
+        long_reasons.append("30M: EMA20 و MACD لانگ را تایید می‌کنند")
+    if last_30["close"] < last_30["ema20"] and last_30["macd"] < last_30["macd_signal"]:
+        short_score += 10
+        confirmations_short += 1
+        short_reasons.append("30M: EMA20 و MACD شورت را تایید می‌کنند")
+
+    # 3) 15M main entry engine: highest weight
+    if trends["15M"] in ["bullish", "weak_bullish"]:
         long_score += 20
         confirmations_long += 1
-        long_reasons.append("1H: EMA20/EMA50 و MACD لانگ را تایید می‌کنند")
-
-    if last_1h["close"] < last_1h["ema20"] < last_1h["ema50"] and last_1h["macd"] < last_1h["macd_signal"]:
+        long_reasons.append("15M: تایم اصلی ورود لانگ را تایید می‌کند")
+    elif trends["15M"] in ["bearish", "weak_bearish"]:
         short_score += 20
         confirmations_short += 1
-        short_reasons.append("1H: EMA20/EMA50 و MACD شورت را تایید می‌کنند")
+        short_reasons.append("15M: تایم اصلی ورود شورت را تایید می‌کند")
 
-    # 15M clean movement quality
-    if last_15["close"] > last_15["ema20"] > last_15["ema50"] and last_15["macd"] > last_15["macd_signal"]:
-        long_score += 24
-        confirmations_long += 2
-        long_reasons.append("15M: حرکت لانگ تمیز است؛ قیمت بالای EMA20/EMA50 و MACD مثبت")
-
-    if last_15["close"] < last_15["ema20"] < last_15["ema50"] and last_15["macd"] < last_15["macd_signal"]:
-        short_score += 24
-        confirmations_short += 2
-        short_reasons.append("15M: حرکت شورت تمیز است؛ قیمت پایین EMA20/EMA50 و MACD منفی")
-
-    # ADX trend strength on 15M
-    adx_15 = float(last_15["adx"])
-    if adx_15 >= CLEAN_ADX_MIN:
-        long_score += 12
-        short_score += 12
-        long_reasons.append("ADX 15M بالای 25 است؛ قدرت روند کافی است")
-        short_reasons.append("ADX 15M بالای 25 است؛ قدرت روند کافی است")
-
-    # Structure filter
-    if structure == "bullish_structure":
-        long_score += 16
+    if last_15["close"] > last_15["ema20"] > last_15["ema50"]:
+        long_score += 14
         confirmations_long += 1
-        long_reasons.append("ساختار 15M صعودی است: HH/HL")
-    elif structure == "bearish_structure":
-        short_score += 16
+        long_reasons.append("15M: قیمت بالای EMA20 و EMA50 است")
+    if last_15["close"] < last_15["ema20"] < last_15["ema50"]:
+        short_score += 14
         confirmations_short += 1
-        short_reasons.append("ساختار 15M نزولی است: LH/LL")
-    else:
-        long_reasons.append("ساختار 15M رنج/نامشخص است")
-        short_reasons.append("ساختار 15M رنج/نامشخص است")
+        short_reasons.append("15M: قیمت پایین EMA20 و EMA50 است")
 
-    # Pullback entry on EMA20 15M
-    long_pullback, long_distance = ema20_pullback(df_15m, "LONG")
-    short_pullback, short_distance = ema20_pullback(df_15m, "SHORT")
-
-    if long_pullback:
-        long_score += 24
-        confirmations_long += 2
-        long_reasons.append("ورود لانگ روی پولبک EMA20 در 15M است")
-    else:
-        long_reasons.append(f"لانگ: پولبک EMA20 مناسب نیست؛ فاصله {long_distance} ATR")
-
-    if short_pullback:
-        short_score += 24
-        confirmations_short += 2
-        short_reasons.append("ورود شورت روی پولبک EMA20 در 15M است")
-    else:
-        short_reasons.append(f"شورت: پولبک EMA20 مناسب نیست؛ فاصله {short_distance} ATR")
-
-    # End-of-move / late-entry protection
-    long_overextended, long_ext_reason = is_overextended(df_15m, "LONG")
-    short_overextended, short_ext_reason = is_overextended(df_15m, "SHORT")
-
-    if long_overextended:
-        long_score = min(long_score, 69)
-        long_reasons.append(f"رد لانگ: {long_ext_reason}")
-
-    if short_overextended:
-        short_score = min(short_score, 69)
-        short_reasons.append(f"رد شورت: {short_ext_reason}")
-
-    # 15M RSI slope as soft confirmation
-    if last_15["rsi"] > prev_15["rsi"] and 45 <= last_15["rsi"] <= 66:
-        long_score += 7
+    if last_15["macd"] > last_15["macd_signal"]:
+        long_score += 10
         confirmations_long += 1
-        long_reasons.append("RSI 15M در محدوده مناسب رو به بالا است")
-
-    if last_15["rsi"] < prev_15["rsi"] and 34 <= last_15["rsi"] <= 55:
-        short_score += 7
+        long_reasons.append("15M: MACD مثبت است")
+    if last_15["macd"] < last_15["macd_signal"]:
+        short_score += 10
         confirmations_short += 1
-        short_reasons.append("RSI 15M در محدوده مناسب رو به پایین است")
+        short_reasons.append("15M: MACD منفی است")
 
-    # VWAP / 5M only safety, not entry creator
-    if last_5["close"] > last_5["vwap"]:
-        long_score += 3
-        long_reasons.append("5M: قیمت بالای VWAP است")
-    elif last_5["close"] < last_5["vwap"]:
-        short_score += 3
-        short_reasons.append("5M: قیمت پایین VWAP است")
+    if last_15["macd_hist"] > prev_15["macd_hist"]:
+        long_score += 6
+        confirmations_long += 1
+        long_reasons.append("15M: هیستوگرام MACD رو به تقویت صعودی است")
+    if last_15["macd_hist"] < prev_15["macd_hist"]:
+        short_score += 6
+        confirmations_short += 1
+        short_reasons.append("15M: هیستوگرام MACD رو به تقویت نزولی است")
 
-    # Reject clear instant opposite pressure, but do not let Power create entries
-    if sell2 > buy2 + 8:
+    # RSI balanced, not hard
+    if last_15["rsi"] > prev_15["rsi"] and 45 <= last_15["rsi"] <= 68:
+        long_score += 6
+        confirmations_long += 1
+        long_reasons.append("15M: RSI در محدوده مناسب رو به بالا است")
+    if last_15["rsi"] < prev_15["rsi"] and 32 <= last_15["rsi"] <= 55:
+        short_score += 6
+        confirmations_short += 1
+        short_reasons.append("15M: RSI در محدوده مناسب رو به پایین است")
+
+    # ADX hard reject under 20, bonus above 20
+    if adx_15 >= ADX_HARD_MIN:
+        long_score += 8
+        short_score += 8
+        long_reasons.append("ADX 15M بالای 20 است؛ قدرت روند قابل قبول است")
+        short_reasons.append("ADX 15M بالای 20 است؛ قدرت روند قابل قبول است")
+    else:
         long_score = min(long_score, 69)
-        long_reasons.append("رد لانگ: فشار لحظه‌ای فروش در 5M خلاف ورود است")
-    elif buy2 > sell2:
-        long_score += 2
-        long_reasons.append("فشار لحظه‌ای خرید خلاف لانگ نیست")
-
-    if buy2 > sell2 + 8:
         short_score = min(short_score, 69)
-        short_reasons.append("رد شورت: فشار لحظه‌ای خرید در 5M خلاف ورود است")
-    elif sell2 > buy2:
-        short_score += 2
-        short_reasons.append("فشار لحظه‌ای فروش خلاف شورت نیست")
+        long_reasons.append("رد: ADX 15M زیر 20 است")
+        short_reasons.append("رد: ADX 15M زیر 20 است")
 
-    pattern = candle_pattern(df_15m)
-    if pattern.startswith("bullish"):
+    # Volume: soft technical component
+    if vol_status == "high_volume":
         long_score += 5
-        confirmations_long += 1
+        short_score += 5
+        long_reasons.append(f"Vol 15M قوی است؛ نسبت حجم {round(vol_ratio, 2)}")
+        short_reasons.append(f"Vol 15M قوی است؛ نسبت حجم {round(vol_ratio, 2)}")
+    elif vol_status == "normal_volume":
+        long_score += 2
+        short_score += 2
+        long_reasons.append("Vol 15M قابل قبول است")
+        short_reasons.append("Vol 15M قابل قبول است")
+    elif vol_status == "weak_volume":
+        long_score -= 4
+        short_score -= 4
+        long_reasons.append("Vol 15M ضعیف است؛ امتیاز محافظه‌کار شد")
+        short_reasons.append("Vol 15M ضعیف است؛ امتیاز محافظه‌کار شد")
+
+    # VWAP from 15M/5M: soft confirmation
+    if last_15["close"] > last_15["vwap"]:
+        long_score += 4
+        long_reasons.append("15M: قیمت بالای VWAP است")
+    elif last_15["close"] < last_15["vwap"]:
+        short_score += 4
+        short_reasons.append("15M: قیمت پایین VWAP است")
+
+    if last_5["close"] > last_5["vwap"]:
+        long_score += 2
+        long_reasons.append("5M: VWAP با لانگ تضاد ندارد")
+    elif last_5["close"] < last_5["vwap"]:
+        short_score += 2
+        short_reasons.append("5M: VWAP با شورت تضاد ندارد")
+
+    # Power is secondary, not a signal maker
+    if buy20 > sell20 + 8:
+        long_score += 5
+        long_reasons.append("قدرت 20 کندلی خرید برتری دارد")
+    elif sell20 > buy20 + 8:
+        short_score += 5
+        short_reasons.append("قدرت 20 کندلی فروش برتری دارد")
+
+    if buy6 > sell6 + 6:
+        long_score += 3
+        long_reasons.append("قدرت 6 کندلی خرید هم‌جهت است")
+    elif sell6 > buy6 + 6:
+        short_score += 3
+        short_reasons.append("قدرت 6 کندلی فروش هم‌جهت است")
+
+    # 2-candle power only prevents bad instant pressure
+    if sell2 > buy2 + 10:
+        long_score -= 6
+        long_reasons.append("فشار لحظه‌ای فروش خلاف لانگ است؛ جریمه نرم")
+    elif buy2 > sell2 + 10:
+        long_score += 1
+
+    if buy2 > sell2 + 10:
+        short_score -= 6
+        short_reasons.append("فشار لحظه‌ای خرید خلاف شورت است؛ جریمه نرم")
+    elif sell2 > buy2 + 10:
+        short_score += 1
+
+    # Order block soft penalty only. Same-direction gives no bonus.
+    if ob == "bearish_order_block":
+        long_score -= 3
+        long_reasons.append("Order Block مخالف لانگ است؛ جریمه نرم 3 امتیازی")
+    elif ob == "bullish_order_block":
+        short_score -= 3
+        short_reasons.append("Order Block مخالف شورت است؛ جریمه نرم 3 امتیازی")
+
+    # Candle pattern small technical effect
+    if pattern.startswith("bullish"):
+        long_score += 3
         long_reasons.append(f"کندل 15M تاییدی لانگ: {pattern}")
     elif pattern.startswith("bearish"):
-        short_score += 5
-        confirmations_short += 1
+        short_score += 3
         short_reasons.append(f"کندل 15M تاییدی شورت: {pattern}")
 
-    if volume_spike(df_15m):
-        long_score += 4
-        short_score += 4
-        long_reasons.append("افزایش حجم در 15M دیده شد")
-        short_reasons.append("افزایش حجم در 15M دیده شد")
+    # Soft market context: market regime, altseason, fear & greed
+    long_score, short_score = apply_soft_context(
+        symbol, long_score, short_score, long_reasons, short_reasons, context
+    )
 
+    # Hard validity: 15M + 30M entry must agree enough, ADX >= 20, and final score high.
     long_valid = (
-        trends["4H"] in ["bullish", "weak_bullish"]
-        and trends["1H"] in ["bullish", "weak_bullish"]
+        adx_15 >= ADX_HARD_MIN
         and trends["15M"] in ["bullish", "weak_bullish"]
-        and last_1h["close"] > last_1h["ema20"] > last_1h["ema50"]
-        and last_1h["macd"] > last_1h["macd_signal"]
-        and last_15["close"] > last_15["ema20"] > last_15["ema50"]
+        and trends["30M"] in ["bullish", "weak_bullish"]
+        and last_15["close"] > last_15["ema20"]
         and last_15["macd"] > last_15["macd_signal"]
-        and adx_15 >= CLEAN_ADX_MIN
-        and structure == "bullish_structure"
-        and long_pullback
-        and not long_overextended
-        and not (sell2 > buy2 + 8)
     )
 
     short_valid = (
-        trends["4H"] in ["bearish", "weak_bearish"]
-        and trends["1H"] in ["bearish", "weak_bearish"]
+        adx_15 >= ADX_HARD_MIN
         and trends["15M"] in ["bearish", "weak_bearish"]
-        and last_1h["close"] < last_1h["ema20"] < last_1h["ema50"]
-        and last_1h["macd"] < last_1h["macd_signal"]
-        and last_15["close"] < last_15["ema20"] < last_15["ema50"]
+        and trends["30M"] in ["bearish", "weak_bearish"]
+        and last_15["close"] < last_15["ema20"]
         and last_15["macd"] < last_15["macd_signal"]
-        and adx_15 >= CLEAN_ADX_MIN
-        and structure == "bearish_structure"
-        and short_pullback
-        and not short_overextended
-        and not (buy2 > sell2 + 8)
     )
 
     if not long_valid:
         long_score = min(long_score, 69)
-
     if not short_valid:
         short_score = min(short_score, 69)
 
@@ -521,7 +606,13 @@ def technical_direction_score(df_4h, df_1h, df_15m, df_5m):
         "confirmations_long": confirmations_long,
         "confirmations_short": confirmations_short,
         "trends": trends,
-        "market_structure": structure,
+        "order_block": ob,
+        "market_regime": context.get("market_regime"),
+        "altseason_status": context.get("altseason_status"),
+        "fear_greed_value": context.get("fear_greed_value"),
+        "fear_greed_status": context.get("fear_greed_status"),
+        "volume_status": vol_status,
+        "volume_ratio": round(vol_ratio, 2),
         "power2_buy": buy2,
         "power2_sell": sell2,
         "power3_buy": buy3,
@@ -533,8 +624,6 @@ def technical_direction_score(df_4h, df_1h, df_15m, df_5m):
         "candle_pattern": pattern,
         "long_valid": long_valid,
         "short_valid": short_valid,
-        "pullback_distance_atr_long": long_distance,
-        "pullback_distance_atr_short": short_distance,
         "adx_15": adx_15,
     }
 
@@ -555,7 +644,6 @@ def build_trade_levels(direction, price, atr):
     risk = abs(price - sl)
     reward = abs(tp1 - price)
     rr = round(reward / risk, 2) if risk > 0 else 0
-
     return safe_round(sl), safe_round(tp1), safe_round(tp2), rr
 
 
@@ -565,15 +653,16 @@ def analyze_symbol(symbol):
     try:
         df_4h = add_indicators(get_klines(symbol, "4h"))
         df_1h = add_indicators(get_klines(symbol, "1h"))
+        df_30m = add_indicators(get_klines(symbol, "30m"))
         df_15m = add_indicators(get_klines(symbol, "15m"))
         df_5m = add_indicators(get_klines(symbol, "5m"))
 
-        score = technical_direction_score(df_4h, df_1h, df_15m, df_5m)
+        score = technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
 
         price = float(df_15m.iloc[-1]["close"])
         atr = float(df_15m.iloc[-1]["atr"])
         support, resistance = support_resistance(df_15m)
-        vwap = vwap_status(df_5m)
+        vwap = vwap_status(df_15m)
 
         long_score = score["long_score"]
         short_score = score["short_score"]
@@ -585,19 +674,20 @@ def analyze_symbol(symbol):
             confirmations = score["confirmations_long"]
             reasons = score["long_reasons"]
             valid_direction = score.get("long_valid", False)
-            pullback_distance_atr = score.get("pullback_distance_atr_long")
         else:
             direction = "SHORT"
             final_score = short_score
             confirmations = score["confirmations_short"]
             reasons = score["short_reasons"]
             valid_direction = score.get("short_valid", False)
-            pullback_distance_atr = score.get("pullback_distance_atr_short")
+
+        # Auto signal score below 85 is rejected here too, so scanner stays safe.
+        min_required_score = max(int(MIN_DIRECT_SCORE), AUTO_DIRECT_SCORE_MIN)
 
         if (
             not valid_direction
-            or final_score < MIN_DIRECT_SCORE
-            or confirmations < MIN_MANUAL_CONFIRMATIONS
+            or final_score < min_required_score
+            or confirmations < int(MIN_MANUAL_CONFIRMATIONS)
             or edge < 8
         ):
             direction = "NO TRADE"
@@ -612,9 +702,9 @@ def analyze_symbol(symbol):
             entry_mode = "CLASSIC_TECHNICAL"
             stop_loss, tp1, tp2, rr = build_trade_levels(direction, price, atr)
 
-            if final_score >= 90 and confirmations >= 7:
+            if final_score >= 92 and confirmations >= 7:
                 risk_level = "LOW"
-            elif final_score >= 82 and confirmations >= 5:
+            elif final_score >= 85 and confirmations >= 5:
                 risk_level = "MEDIUM"
             else:
                 risk_level = "HIGH"
@@ -649,7 +739,13 @@ def analyze_symbol(symbol):
             "support": safe_round(support),
             "resistance": safe_round(resistance),
             "trends": score["trends"],
-            "market_structure": score["market_structure"],
+            "order_block": score["order_block"],
+            "market_regime": score["market_regime"],
+            "altseason_status": score["altseason_status"],
+            "fear_greed_value": score["fear_greed_value"],
+            "fear_greed_status": score["fear_greed_status"],
+            "volume_status": score["volume_status"],
+            "volume_ratio": score["volume_ratio"],
             "power2_buy": score["power2_buy"],
             "power2_sell": score["power2_sell"],
             "power3_buy": score["power3_buy"],
@@ -657,9 +753,8 @@ def analyze_symbol(symbol):
             "buy_power": score["buy_power"],
             "sell_power": score["sell_power"],
             "candle_pattern": score["candle_pattern"],
-            "pullback_distance_atr": pullback_distance_atr,
             "reasons": reasons[:12],
-            "signal_timeframe": "15M Pullback با جهت 1H/4H",
+            "signal_timeframe": "15M/30M Technical Entry",
             "validity": "15 تا 45 دقیقه" if entry_confirmed else "سیگنال معتبر نیست",
         }
 
@@ -680,6 +775,7 @@ def analyze_symbol(symbol):
             "confirmations": 0,
             "rsi": None,
             "macd": None,
+            "macd_hist": None,
             "adx": None,
             "support": None,
             "resistance": None,
