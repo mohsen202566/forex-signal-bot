@@ -201,9 +201,9 @@ def soft_confirmation_bonus(result):
 
 def is_high_quality_signal(result):
     """
-    Classic technical gate:
-    اتوسیگنال یا ستاپ فقط با خروجی موتور تکنیکال/پیش‌بینی پذیرفته می‌شود.
-    late_entry، RR، ADX و فیلترهای اضافه دیگر اینجا سیگنال را حذف نمی‌کنند.
+    Standard balanced technical gate:
+    فقط سیگنال مستقیم تکنیکال را قبول می‌کند.
+    نه خیلی خشک، نه خیلی شل.
     """
     if not result:
         return False
@@ -212,18 +212,21 @@ def is_high_quality_signal(result):
     if direction not in ["LONG", "SHORT"]:
         return False
 
-    if result.get("entry_mode") not in ["PREDICTIVE_TRIGGER", "PREDICTIVE_SETUP"]:
+    if result.get("entry_mode") not in ["CLASSIC_TECHNICAL", "CLASSIC_DIRECT", "PREDICTIVE_TRIGGER"]:
         return False
 
-    if result.get("entry_confirmed"):
-        try:
-            confirmations = int(result.get("predictive_confirmations") or 0)
-        except Exception:
-            confirmations = 0
-        if confirmations < 4:
-            return False
-    elif not result.get("setup_waiting_activation"):
+    if not result.get("entry_confirmed"):
         return False
+
+    try:
+        score = int(result.get("score") or 0)
+    except Exception:
+        score = 0
+
+    try:
+        confirmations = int(result.get("predictive_confirmations") or 0)
+    except Exception:
+        confirmations = 0
 
     try:
         buy2 = float(result.get("power2_buy", 50) or 50)
@@ -231,22 +234,38 @@ def is_high_quality_signal(result):
     except Exception:
         buy2 = sell2 = 50
 
-    # برای ستاپ سخت‌گیری Power نداریم؛ برای ورود فعال Power دو کندلی باید همسو باشد.
-    if result.get("entry_confirmed"):
-        if direction == "LONG" and buy2 < 58:
+    # برای اینکه AUTO_SIGNAL_SCORE=85 باعث خشک شدن نشود، سقف موثر 78 است.
+    try:
+        effective_min_score = min(int(AUTO_SCAN_MIN_SCORE), 78)
+    except Exception:
+        effective_min_score = 75
+
+    if score < effective_min_score:
+        return False
+
+    if confirmations < 4:
+        return False
+
+    if direction == "LONG":
+        if buy2 < 55 or sell2 > 58:
             return False
-        if direction == "SHORT" and sell2 < 58:
+    elif direction == "SHORT":
+        if sell2 < 55 or buy2 > 58:
             return False
+
+    if result.get("risk_level") == "بالا" and score < 82:
+        return False
 
     return True
 
 def is_very_safe_signal(result):
     return (
         is_high_quality_signal(result)
-        and result.get("freshness") == "HIGH"
+        and result.get("freshness") in ["HIGH", "MEDIUM"]
         and int(result.get("predictive_confirmations") or 0) >= 5
-        and result.get("risk_reward", 0) >= 0.60
-        and result.get("adx", 0) >= 13
+        and result.get("risk_reward", 0) >= 0.55
+        and result.get("adx", 0) >= 14
+        and result.get("risk_level") != "بالا"
     )
 
 def analyze_symbol_safe(symbol):
