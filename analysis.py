@@ -1874,18 +1874,12 @@ def analyze_symbol(symbol):
         raw_direction = setup_context.get("direction", "NO TRADE")
 
     score = max(long_score, short_score)  # فقط برای سازگاری داخلی/آمار قدیمی؛ تصمیم‌گیر نیست.
-
-    # CLASSIC DIRECT MODE:
-    # در این نسخه دیگر ستاپ/Watchlist/منتظر فعال‌سازی نداریم.
-    # اگر موتور ورود 5M تریگر کامل بدهد، سیگنال مستقیم ACTIVE صادر می‌شود.
-    # اگر تریگر کامل نباشد ولی موتور تکنیکال کلاسیک جهت معتبر بدهد، همان جهت مستقیم صادر می‌شود.
-    # هیچ خروجی PREDICTIVE_SETUP یا WAITING_ACTIVATION ساخته نمی‌شود.
     if entry_confirmed_now and raw_direction in ["LONG", "SHORT"]:
         reasons = predictive_context.get("reasons", []) + risk_notes
     elif raw_direction in ["LONG", "SHORT"]:
-        reasons = setup_context.get("setup_reasons", []) + ["سیگنال مستقیم کلاسیک بر اساس همسویی تکنیکال صادر شد"] + risk_notes
+        reasons = setup_context.get("setup_reasons", []) + ["وضعیت: منتظر فعال‌سازی ورود با تایید 5M"] + risk_notes
     else:
-        reasons = predictive_context.get("reasons", ["تریگر تکنیکال ورود کامل نیست"])
+        reasons = predictive_context.get("reasons", ["تریگر پیش‌بینی ورود کامل نیست"])
 
     setup_status, entry_zone_low, entry_zone_high, entry_trigger = calculate_setup_zone(
         raw_direction,
@@ -1903,9 +1897,10 @@ def analyze_symbol(symbol):
 
     rr = risk_reward(raw_direction, price, stop_loss_raw, tp1_raw)
 
-    # CLASSIC DIRECT MODE:
-    # سیگنال‌ها مستقیم ACTIVE هستند؛ ستاپ معلق و Activation جداگانه نداریم.
-    entry_ok = raw_direction in ["LONG", "SHORT"]
+    # معماری دو مرحله‌ای: Setup کامل صادر می‌شود، اما ورود فقط بعد از Activation فعال است.
+    # نکته مهم: TP Space / Trap Risk نباید Setup را حذف کند؛ اما نباید اجازه Entry فعال بدهد.
+    # این کار باعث می‌شود ارز همچنان زیر نظر بماند، ولی ورود فقط وقتی تمیز و دور از حمایت/مقاومت خطرناک باشد صادر شود.
+    entry_ok = entry_confirmed_now
     block_reasons = list(predictive_context.get("block_reasons", []))
 
     # Classic mode: TP Space / Trap / RR فقط برای آمار و تحلیل علت SL ذخیره می‌شوند.
@@ -1913,7 +1908,7 @@ def analyze_symbol(symbol):
     preliminary_stop, preliminary_tp1, _ = calculate_trade_levels(raw_direction, price, atr, support, resistance)
     preliminary_rr = risk_reward(raw_direction, price, preliminary_stop, preliminary_tp1)
 
-    setup_waiting = False
+    setup_waiting = (not entry_ok) and raw_direction in ["LONG", "SHORT"] and setup_context.get("setup_ok")
     liquidity_risk = "پایین" if entry_ok else "متوسط"
     fake_breakout = "none"
     trend_exhaustion = "none"
@@ -1935,6 +1930,12 @@ def analyze_symbol(symbol):
         tp1 = None
         tp2 = None
         grade = "NO_ENTRY"
+    elif setup_waiting:
+        final_direction = raw_direction
+        stop_loss = stop_loss_raw
+        tp1 = tp1_raw
+        tp2 = tp2_raw
+        grade = "WAITING_ACTIVATION"
     else:
         final_direction = raw_direction
         stop_loss = stop_loss_raw
@@ -2013,13 +2014,10 @@ def analyze_symbol(symbol):
         "power_acceleration": predictive_context.get("power_accel"),
         "predictive_confirmations": predictive_context.get("confirmations"),
         "freshness": predictive_context.get("freshness"),
-        "entry_mode": "CLASSIC_DIRECT" if entry_ok else "NO_ENTRY",
-        "entry_status": "ACTIVE" if entry_ok else "NO_ENTRY",
+        "entry_mode": "PREDICTIVE_SETUP" if setup_waiting else predictive_context.get("entry_mode"),
+        "entry_status": "WAITING_ACTIVATION" if setup_waiting else ("ACTIVE" if entry_ok else "NO_ENTRY"),
         "entry_confirmed": bool(entry_ok),
-        "setup_waiting_activation": False,
-        "activation_ready": bool(entry_ok),
-        "activation_entry_mode": "CLASSIC_DIRECT" if entry_ok else None,
-        "activation_direction": final_direction if entry_ok else None,
+        "setup_waiting_activation": bool(setup_waiting),
         "setup_score": setup_context.get("setup_score"),
         "setup_long_score": setup_context.get("setup_long_score"),
         "setup_short_score": setup_context.get("setup_short_score"),
@@ -2095,3 +2093,466 @@ def analyze_symbol(symbol):
 
         "reasons": reasons[:18],
     }
+
+
+# ============================================================
+# STANDARD BALANCED TECHNICAL DIRECT MODE
+# این بخش عمداً در انتهای فایل آمده تا موتور قدیمی ستاپ/فعال‌سازی را override کند.
+# معماری نهایی:
+# فقط تحلیل تکنیکال استاندارد + سیگنال مستقیم ACTIVE
+# بدون PREDICTIVE_SETUP / بدون Watchlist / بدون انتظار فعال‌سازی
+# ============================================================
+
+def _std_freshness(confirmations, power2, power3, macd_slope_ok, rsi_slope_ok):
+    try:
+        p2 = float(power2)
+        p3 = float(power3)
+    except Exception:
+        p2 = p3 = 50
+    if confirmations >= 6 and p2 >= 64 and p3 >= 62 and macd_slope_ok and rsi_slope_ok:
+        return "HIGH"
+    if confirmations >= 4 and p2 >= 56:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _std_risk_from_context(score, adx, rr, spread_percent, distance_atr):
+    risk_points = 0
+    try:
+        adx = float(adx)
+    except Exception:
+        adx = 0
+    try:
+        rr = float(rr)
+    except Exception:
+        rr = 0
+    try:
+        distance_atr = float(distance_atr)
+    except Exception:
+        distance_atr = 0
+
+    if score < 72:
+        risk_points += 1
+    if adx < 14:
+        risk_points += 1
+    if rr < 0.60:
+        risk_points += 1
+    if spread_percent is not None:
+        try:
+            if float(spread_percent) > 0.10:
+                risk_points += 1
+        except Exception:
+            pass
+    if distance_atr > 1.30:
+        risk_points += 1
+
+    if risk_points >= 3:
+        return "بالا"
+    if risk_points >= 1:
+        return "متوسط"
+    return "پایین"
+
+
+def _standard_direct_technical_analyze_symbol(symbol):
+    """
+    موتور استاندارد و بالانس:
+    - فقط تکنیکال
+    - چند تایم‌فریم
+    - سیگنال مستقیم ACTIVE
+    - نه بیش از حد سخت، نه بیش از حد شل
+    """
+    df_4h = add_indicators(get_klines(symbol, "4h"))
+    df_1h = add_indicators(get_klines(symbol, "1h"))
+    df_30m = add_indicators(get_klines(symbol, "30m"))
+    df_15m = add_indicators(get_klines(symbol, "15m"))
+    df_5m = add_indicators(get_klines(symbol, "5m", include_current=True))
+
+    last_15m = df_15m.iloc[-1]
+    last_5m = df_5m.iloc[-1]
+    prev_5m = df_5m.iloc[-2]
+
+    price = float(last_5m["close"])
+    atr = float(last_15m["atr"])
+    adx_value = float(last_15m["adx"])
+    support, resistance = support_resistance(df_15m)
+
+    trends = {
+        "4H": trend_direction(df_4h),
+        "1H": trend_direction(df_1h),
+        "30M": trend_direction(df_30m),
+        "15M": trend_direction(df_15m),
+        "5M": trend_direction(df_5m),
+    }
+
+    long_score = 0
+    short_score = 0
+    reasons_long = []
+    reasons_short = []
+    confirmations_long = 0
+    confirmations_short = 0
+
+    trend_weights = {"4H": 6, "1H": 10, "30M": 14, "15M": 18, "5M": 20}
+    for tf, trend in trends.items():
+        weight = trend_weights.get(tf, 0)
+        if trend == "bullish":
+            long_score += weight
+            confirmations_long += 1
+            reasons_long.append(f"{tf}: روند صعودی")
+        elif trend == "weak_bullish":
+            long_score += int(weight * 0.55)
+            reasons_long.append(f"{tf}: تمایل صعودی")
+        elif trend == "bearish":
+            short_score += weight
+            confirmations_short += 1
+            reasons_short.append(f"{tf}: روند نزولی")
+        elif trend == "weak_bearish":
+            short_score += int(weight * 0.55)
+            reasons_short.append(f"{tf}: تمایل نزولی")
+
+    if price > last_5m["ema20"]:
+        long_score += 10
+        confirmations_long += 1
+        reasons_long.append("قیمت بالای EMA20 در 5M")
+    if price < last_5m["ema20"]:
+        short_score += 10
+        confirmations_short += 1
+        reasons_short.append("قیمت پایین EMA20 در 5M")
+
+    if last_15m["close"] > last_15m["ema20"]:
+        long_score += 8
+        confirmations_long += 1
+        reasons_long.append("15M بالای EMA20")
+    if last_15m["close"] < last_15m["ema20"]:
+        short_score += 8
+        confirmations_short += 1
+        reasons_short.append("15M پایین EMA20")
+
+    macd_rising = last_5m["macd_hist"] > prev_5m["macd_hist"]
+    macd_falling = last_5m["macd_hist"] < prev_5m["macd_hist"]
+
+    if last_5m["macd"] > last_5m["macd_signal"]:
+        long_score += 10
+        confirmations_long += 1
+        reasons_long.append("MACD در 5M به نفع لانگ")
+    if last_5m["macd"] < last_5m["macd_signal"]:
+        short_score += 10
+        confirmations_short += 1
+        reasons_short.append("MACD در 5M به نفع شورت")
+
+    if macd_rising:
+        long_score += 6
+        reasons_long.append("هیستوگرام MACD در حال تقویت صعودی")
+    if macd_falling:
+        short_score += 6
+        reasons_short.append("هیستوگرام MACD در حال تقویت نزولی")
+
+    rsi_rising = last_5m["rsi"] > prev_5m["rsi"]
+    rsi_falling = last_5m["rsi"] < prev_5m["rsi"]
+
+    if 45 <= last_5m["rsi"] <= 68:
+        long_score += 7
+        reasons_long.append("RSI در محدوده مناسب لانگ")
+    if 32 <= last_5m["rsi"] <= 55:
+        short_score += 7
+        reasons_short.append("RSI در محدوده مناسب شورت")
+
+    if rsi_rising:
+        long_score += 5
+        confirmations_long += 1
+        reasons_long.append("شیب RSI صعودی")
+    if rsi_falling:
+        short_score += 5
+        confirmations_short += 1
+        reasons_short.append("شیب RSI نزولی")
+
+    vwap_status = calculate_vwap_status(df_5m)
+    if vwap_status == "above_vwap":
+        long_score += 8
+        confirmations_long += 1
+        reasons_long.append("قیمت بالای VWAP")
+    elif vwap_status == "below_vwap":
+        short_score += 8
+        confirmations_short += 1
+        reasons_short.append("قیمت پایین VWAP")
+
+    buy20, sell20 = buy_sell_power(df_5m, 20)
+    buy6, sell6 = buy_sell_power(df_5m, 6)
+    buy3, sell3 = buy_sell_power(df_5m, 3)
+    buy2, sell2 = buy_sell_power(df_5m, 2)
+
+    if buy20 >= 55:
+        long_score += 4
+    if sell20 >= 55:
+        short_score += 4
+    if buy6 >= 58:
+        long_score += 7
+        reasons_long.append("قدرت خرید 6 کندلی مناسب")
+    if sell6 >= 58:
+        short_score += 7
+        reasons_short.append("قدرت فروش 6 کندلی مناسب")
+    if buy3 >= 60:
+        long_score += 9
+        confirmations_long += 1
+        reasons_long.append("قدرت خرید 3 کندلی قوی")
+    if sell3 >= 60:
+        short_score += 9
+        confirmations_short += 1
+        reasons_short.append("قدرت فروش 3 کندلی قوی")
+    if buy2 >= 60:
+        long_score += 11
+        confirmations_long += 1
+        reasons_long.append("قدرت خرید 2 کندلی قوی")
+    if sell2 >= 60:
+        short_score += 11
+        confirmations_short += 1
+        reasons_short.append("قدرت فروش 2 کندلی قوی")
+
+    if adx_value >= 18:
+        long_score += 5
+        short_score += 5
+    elif adx_value < 12:
+        long_score -= 6
+        short_score -= 6
+
+    pattern = candle_pattern(df_5m)
+    if pattern in ["bullish_engulfing", "bullish_pinbar", "bullish_strong"]:
+        long_score += 8
+        confirmations_long += 1
+        reasons_long.append(f"کندل تاییدی لانگ: {pattern}")
+    elif pattern in ["bearish_engulfing", "bearish_pinbar", "bearish_strong"]:
+        short_score += 8
+        confirmations_short += 1
+        reasons_short.append(f"کندل تاییدی شورت: {pattern}")
+
+    if volume_spike(df_5m):
+        long_score += 4
+        short_score += 4
+
+    if atr > 0:
+        if resistance is not None and resistance > price:
+            space_long = (float(resistance) - price) / atr
+            if space_long < 0.55:
+                long_score -= 8
+                reasons_long.append("مقاومت نزدیک است؛ امتیاز لانگ کم شد")
+        if support is not None and support < price:
+            space_short = (price - float(support)) / atr
+            if space_short < 0.55:
+                short_score -= 8
+                reasons_short.append("حمایت نزدیک است؛ امتیاز شورت کم شد")
+
+    fvg = detect_fvg(df_5m)
+    order_block = detect_order_block(df_15m)
+    if fvg == "bullish_fvg":
+        long_score += 3
+    elif fvg == "bearish_fvg":
+        short_score += 3
+    if order_block == "bullish_order_block":
+        long_score += 4
+    elif order_block == "bearish_order_block":
+        short_score += 4
+
+    rsi_divergence = detect_rsi_divergence(df_5m)
+    macd_divergence = detect_macd_divergence(df_5m)
+    if rsi_divergence == "bullish_rsi_divergence" or macd_divergence == "bullish_macd_divergence":
+        long_score += 5
+    if rsi_divergence == "bearish_rsi_divergence" or macd_divergence == "bearish_macd_divergence":
+        short_score += 5
+
+    ema_distance_atr = abs(price - float(last_5m["ema20"])) / atr if atr > 0 else 0
+    vwap_distance_atr = abs(price - float(last_5m["vwap"])) / atr if atr > 0 else 0
+    late_entry = ema_distance_atr > 1.45 or vwap_distance_atr > 1.60
+    if late_entry:
+        if long_score > short_score:
+            long_score -= 7
+        elif short_score > long_score:
+            short_score -= 7
+
+    long_score = cap_score(long_score)
+    short_score = cap_score(short_score)
+    edge = abs(long_score - short_score)
+
+    if long_score > short_score:
+        raw_direction = "LONG"
+        score = long_score
+        confirmations = confirmations_long
+        reasons = reasons_long[:12]
+        direction_power = buy2
+        opposite_power = sell2
+        macd_slope_ok = macd_rising
+        rsi_slope_ok = rsi_rising
+        power3 = buy3
+    elif short_score > long_score:
+        raw_direction = "SHORT"
+        score = short_score
+        confirmations = confirmations_short
+        reasons = reasons_short[:12]
+        direction_power = sell2
+        opposite_power = buy2
+        macd_slope_ok = macd_falling
+        rsi_slope_ok = rsi_falling
+        power3 = sell3
+    else:
+        raw_direction = "NO TRADE"
+        score = max(long_score, short_score)
+        confirmations = 0
+        reasons = ["تعادل بین لانگ و شورت؛ برتری واضح وجود ندارد"]
+        direction_power = 50
+        opposite_power = 50
+        macd_slope_ok = False
+        rsi_slope_ok = False
+        power3 = 50
+
+    entry_ok = (
+        raw_direction in ["LONG", "SHORT"]
+        and score >= 68
+        and edge >= 8
+        and confirmations >= 4
+        and float(direction_power) >= 55
+        and float(opposite_power) <= 55
+    )
+
+    spread_percent = get_spread_percent(symbol)
+    funding_rate = get_funding_rate(symbol)
+    open_interest = get_open_interest(symbol)
+
+    if entry_ok:
+        final_direction = raw_direction
+        stop_loss, tp1, tp2 = calculate_trade_levels(final_direction, price, atr, support, resistance)
+        rr = risk_reward(final_direction, price, stop_loss, tp1)
+        risk_level = _std_risk_from_context(score, adx_value, rr, spread_percent, max(ema_distance_atr, vwap_distance_atr))
+        entry_mode = "CLASSIC_TECHNICAL"
+        entry_status = "ACTIVE"
+        grade = "ENTRY"
+    else:
+        final_direction = "NO TRADE"
+        stop_loss = tp1 = tp2 = None
+        rr = 0
+        risk_level = "بالا"
+        entry_mode = "NO_ENTRY"
+        entry_status = "NO_ENTRY"
+        grade = "NO_ENTRY"
+        reasons = reasons + [
+            f"تاییدیه‌ها برای سیگنال مستقیم کافی نیستند؛ score={score}, edge={edge}, confirmations={confirmations}"
+        ]
+
+    freshness = _std_freshness(confirmations, direction_power, power3, macd_slope_ok, rsi_slope_ok)
+    win_prob = win_probability(score, risk_level, rr, adx_value, "A" if grade == "ENTRY" else "Reject")
+    win_prob = max(0, min(int(win_prob), 90))
+
+    return {
+        "symbol": symbol,
+        "price": safe_round(price, 8),
+        "direction": final_direction,
+        "raw_direction": raw_direction,
+        "score": cap_score(score),
+        "long_score": cap_score(long_score),
+        "short_score": cap_score(short_score),
+        "entry_grade": grade,
+        "risk_level": risk_level,
+        "risk_reward": rr,
+        "win_probability": win_prob,
+        "validity": signal_validity(score, final_direction),
+        "signal_timeframe": signal_timeframe(score, final_direction),
+        "rsi": safe_round(last_5m["rsi"], 2),
+        "macd": safe_round(last_5m["macd"], 6),
+        "macd_signal": safe_round(last_5m["macd_signal"], 6),
+        "macd_hist": safe_round(last_5m["macd_hist"], 6),
+        "ema20": safe_round(last_5m["ema20"], 8),
+        "ema50": safe_round(last_5m["ema50"], 8),
+        "ema200": safe_round(last_5m["ema200"], 8),
+        "atr": safe_round(atr, 8),
+        "adx": safe_round(adx_value, 2),
+        "vwap": safe_round(last_5m["vwap"], 8),
+        "stop_loss": None if stop_loss is None else safe_round(stop_loss, 8),
+        "tp1": None if tp1 is None else safe_round(tp1, 8),
+        "tp2": None if tp2 is None else safe_round(tp2, 8),
+        "candidate_stop_loss": None if stop_loss is None else safe_round(stop_loss, 8),
+        "candidate_tp1": None if tp1 is None else safe_round(tp1, 8),
+        "candidate_tp2": None if tp2 is None else safe_round(tp2, 8),
+        "support": safe_round(support, 8),
+        "resistance": safe_round(resistance, 8),
+        "buy_power": buy20,
+        "sell_power": sell20,
+        "power2_buy": buy2,
+        "power2_sell": sell2,
+        "power3_buy": buy3,
+        "power3_sell": sell3,
+        "power_acceleration": round((buy2 - buy6) if raw_direction == "LONG" else (sell2 - sell6), 2),
+        "predictive_confirmations": confirmations,
+        "freshness": freshness,
+        "entry_mode": entry_mode,
+        "entry_status": entry_status,
+        "entry_confirmed": bool(entry_ok),
+        "setup_waiting_activation": False,
+        "activation_ready": bool(entry_ok),
+        "activation_entry_mode": entry_mode if entry_ok else None,
+        "activation_direction": final_direction if entry_ok else None,
+        "setup_score": 0,
+        "setup_long_score": cap_score(long_score),
+        "setup_short_score": cap_score(short_score),
+        "setup_reasons": [],
+        "compression_active": False,
+        "compression_score": 0,
+        "compression_label": "غیرفعال",
+        "compression_reasons": [],
+        "ema_distance_atr": safe_round(ema_distance_atr, 2),
+        "vwap_distance_atr": safe_round(vwap_distance_atr, 2),
+        "trendline": "none",
+        "breakout": "none",
+        "market_structure": "none",
+        "trends": trends,
+        "btc_filter": "disabled",
+        "candle_pattern": pattern,
+        "multi_candle": "standard",
+        "liquidity_grab": "none",
+        "stop_hunt": "none",
+        "fvg": fvg,
+        "order_block": order_block,
+        "rsi_divergence": rsi_divergence,
+        "macd_divergence": macd_divergence,
+        "fake_breakout": "none",
+        "trend_exhaustion": "none",
+        "vwap_status": vwap_status,
+        "poc_price": None,
+        "volume_profile_status": "disabled",
+        "market_regime": "technical_only",
+        "market_regime_text": "فقط تکنیکال",
+        "market_regime_label": "فقط تکنیکال",
+        "market_breadth_status": "disabled",
+        "market_breadth_label": "غیرفعال",
+        "market_breadth_bullish_pct": None,
+        "market_breadth_bearish_pct": None,
+        "fear_greed": None,
+        "fear_greed_text": "غیرفعال",
+        "btc_dominance": None,
+        "dominance_status": "غیرفعال",
+        "altseason_status": "غیرفعال",
+        "funding_rate": funding_rate,
+        "open_interest": open_interest,
+        "spread_percent": spread_percent,
+        "late_entry": late_entry,
+        "late_entry_reason": "فاصله قیمت از EMA/VWAP زیاد است" if late_entry else None,
+        "tp_space_ok": True,
+        "tp_space_reason": None,
+        "tp_space_atr": None,
+        "trap_risk": False,
+        "trap_reason": None,
+        "candle_forecast": "technical_direct",
+        "candle_forecast_reason": "سیگنال بر اساس همسویی تکنیکال استاندارد صادر شده است",
+        "reasons": reasons,
+        "block_reasons": [] if entry_ok else reasons[-2:],
+        "news_block": False,
+        "news_reason": "غیرفعال",
+        "very_safe": bool(entry_ok and risk_level == "پایین" and confirmations >= 6 and score >= 78),
+        "very_safe_reasons": reasons[:6],
+    }
+
+
+try:
+    _legacy_analyze_symbol = analyze_symbol
+except Exception:
+    _legacy_analyze_symbol = None
+
+def analyze_symbol(symbol):
+    return _standard_direct_technical_analyze_symbol(symbol)
+
