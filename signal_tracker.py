@@ -249,7 +249,7 @@ def reset_stats():
 def has_active_or_pending_symbol(active, user_id, symbol):
     for item in active:
         if int(item.get("user_id", 0)) == int(user_id) and item.get("symbol") == symbol:
-            if item.get("status") in ["ACTIVE", "PENDING_ACTIVATION"]:
+            if item.get("status") == "ACTIVE":
                 return True
     return False
 
@@ -259,7 +259,7 @@ def get_watchlist_count(user_id):
     return sum(
         1 for item in active
         if int(item.get("user_id", 0)) == int(user_id)
-        and item.get("status") in ["ACTIVE", "PENDING_ACTIVATION"]
+        and item.get("status") == "ACTIVE"
     )
 
 
@@ -279,7 +279,7 @@ def can_add_automatic_signal(user_id, symbol):
     count = sum(
         1 for item in active
         if int(item.get("user_id", 0)) == int(user_id)
-        and item.get("status") in ["ACTIVE", "PENDING_ACTIVATION"]
+        and item.get("status") == "ACTIVE"
     )
 
     if count >= target_size:
@@ -305,7 +305,7 @@ def price_in_entry_zone(signal, price):
         return False
 
 def activate_pending_signal(signal, price, live_result=None):
-    """ستاپ را فقط بعد از تایید دوباره Tracker فعال می‌کند.
+    """سیگنال را فقط بعد از تایید دوباره Tracker فعال می‌کند.
     اگر live_result موجود باشد، سطوح و داده‌های ورود با آخرین تحلیل به‌روز می‌شوند.
     """
     signal["status"] = "ACTIVE"
@@ -351,7 +351,7 @@ def close_pending_setup(signal, reason):
     closed["event_type"] = "CANCELLED"
     closed["event_at"] = closed["closed_at"]
 
-    # جلوگیری از ثبت چندباره لغو برای یک ستاپ
+    # جلوگیری از ثبت چندباره لغو برای یک سیگنال
     exists = any(
         item.get("signal_id") == closed["signal_id"] and item.get("event_type", item.get("status")) == "CANCELLED"
         for item in stats
@@ -360,7 +360,7 @@ def close_pending_setup(signal, reason):
         stats.append(closed)
         save_signal_stats(stats)
 
-    return f"🚫 ستاپ {signal.get('symbol')} لغو شد\n\nجهت: {fa_direction(signal.get('direction'))}\nعلت: {reason}"
+    return f"🚫 سیگنال {signal.get('symbol')} لغو شد\n\nجهت: {fa_direction(signal.get('direction'))}\nعلت: {reason}"
 
 
 
@@ -399,13 +399,10 @@ def add_signal_to_tracking(user_id, chat_id, message_id, result):
     active = get_active_signals()
 
     if has_active_or_pending_symbol(active, user_id, result.get("symbol")):
-        return False, f"⚠️ {result.get('symbol')} از قبل زیر نظر یا در انتظار فعال‌سازی است."
+        return False, f"⚠️ {result.get('symbol')} از قبل زیر نظر است."
 
-    # Classic Direct Mode:
-    # در نسخه کلاسیک سیگنال منتظر فعال‌سازی نداریم.
-    # هر سیگنال قابل پیگیری از همان ابتدا ACTIVE ذخیره می‌شود تا TP/SL مستقیم بررسی شود.
-    result_entry_mode = result.get("entry_mode")
-    result_entry_status = result.get("entry_status")
+    # CLASSIC DIRECT MODE:
+    # در این نسخه سیگنال معلق نداریم؛ هر سیگنال قابل پیگیری مستقیم ACTIVE ذخیره می‌شود.
     entry_confirmed = True
     initial_status = "ACTIVE"
     signal_uid = f"{result['symbol']}_{message_id}_{now_ts()}"
@@ -517,7 +514,7 @@ def add_signal_to_tracking(user_id, chat_id, message_id, result):
             msg += f"\n\n{paper_msg}"
         return True, msg
 
-    return True, f"👀 ستاپ {signal['symbol']} ذخیره شد و منتظر فعال‌سازی ورود است."
+    return True, f"👀 سیگنال {signal['symbol']} ذخیره شد و فعال است."
 
 
 def price_hit_tp1(signal, price):
@@ -606,7 +603,7 @@ def close_signal(signal, result_type, exit_price):
         f"قیمت خروج: {exit_price}\n"
         f"نتیجه: حد ضرر ❌\n"
         f"درصد حرکت: {closed['result_percent']}٪\n\n"
-        f"دلایل احتمالی استاپ:\n"
+        f"دلایل احتمالی اسیگنال:\n"
         f"{reasons_text}"
     )
 
@@ -839,8 +836,8 @@ def weakness_warning_for_signal(signal, result, price):
 
 def evaluate_pending_setup_state(signal, live):
     """
-    اگر ستاپ Pending جهتش را از دست بدهد، مخالف شود، یا بازار رنج/بی‌جهت شود، قبل از فعال‌سازی لغو می‌شود.
-    این تابع ستاپ جدید نمی‌سازد؛ Scanner در چرخه بعدی فرصت بهتر را پیدا می‌کند.
+    اگر سیگنال Pending جهتش را از دست بدهد، مخالف شود، یا بازار رنج/بی‌جهت شود، قبل از فعال‌سازی لغو می‌شود.
+    این تابع سیگنال جدید نمی‌سازد؛ Scanner در چرخه بعدی فرصت بهتر را پیدا می‌کند.
     """
     signal_direction = signal.get("direction")
     live = live or {}
@@ -849,13 +846,13 @@ def evaluate_pending_setup_state(signal, live):
     live_entry_mode = live.get("entry_mode")
 
     if live_direction not in ["LONG", "SHORT"]:
-        return "CANCEL", "بازار وارد حالت رنج/بی‌جهت شد و ستاپ دیگر معتبر نیست"
+        return "CANCEL", "بازار وارد حالت رنج/بی‌جهت شد و سیگنال دیگر معتبر نیست"
 
     if live_direction != signal_direction:
         return "CANCEL", f"جهت تحلیل از {fa_direction(signal_direction)} به {fa_direction(live_direction)} تغییر کرد"
 
     if live_raw_direction in ["LONG", "SHORT"] and live_raw_direction != signal_direction:
-        return "CANCEL", f"جهت خام تحلیل با ستاپ قبلی همسو نیست و به {fa_direction(live_raw_direction)} تغییر کرده"
+        return "CANCEL", f"جهت خام تحلیل با سیگنال قبلی همسو نیست و به {fa_direction(live_raw_direction)} تغییر کرده"
 
     try:
         setup_score = int(live.get("setup_score") or 0)
@@ -866,7 +863,7 @@ def evaluate_pending_setup_state(signal, live):
     activation_ready = bool(live.get("activation_ready"))
 
     if not still_setup and not activation_ready and setup_score < 4:
-        return "CANCEL", "ستاپ از نظر تکنیکال ضعیف/رنج شده و تایید کافی برای ادامه مانیتور ندارد"
+        return "CANCEL", "سیگنال از نظر تکنیکال ضعیف/رنج شده و تایید کافی برای ادامه مانیتور ندارد"
 
     return "KEEP", None
 
@@ -878,77 +875,14 @@ def check_active_signals():
     for signal in active:
         try:
             if signal.get("status") == "PENDING_ACTIVATION":
-                age = now_ts() - int(signal.get("created_at") or now_ts())
-                if age > int(PENDING_SETUP_TIMEOUT_MINUTES) * 60:
-                    msg = close_pending_setup(signal, "زمان انتظار فعال‌سازی تمام شد")
-                    messages.append({
-                        "chat_id": signal["chat_id"],
-                        "reply_to_message_id": signal.get("message_id"),
-                        "message": msg
-                    })
-                    continue
-
-                try:
-                    live = analyze_symbol(signal["symbol"])
-                    action, cancel_reason = evaluate_pending_setup_state(signal, live)
-
-                    if action == "CANCEL":
-                        msg = close_pending_setup(signal, cancel_reason)
-                        messages.append({
-                            "chat_id": signal["chat_id"],
-                            "reply_to_message_id": signal.get("message_id"),
-                            "message": msg
-                        })
-                        continue
-
-                    price = get_last_close_from_1m_or_ticker(signal["symbol"], signal)
-                    same_direction = (
-                        live.get("direction") == signal.get("direction")
-                        and (live.get("activation_direction") in [None, signal.get("direction")])
-                    )
-                    activated_now = (
-                        bool(live.get("activation_ready"))
-                        and live.get("activation_entry_mode") == "PREDICTIVE_TRIGGER"
-                    )
-
-                    if same_direction and activated_now and price_in_entry_zone(signal, price):
-                        signal = activate_pending_signal(signal, price, live)
-                        paper_open_msg = try_open_paper_trade(signal)
-                        activation_msg = (
-                            "✅ ورود فعال شد\n\n"
-                            f"ارز: {signal['symbol']}\n"
-                            f"جهت: {fa_direction(signal['direction'])}\n"
-                            f"قیمت فعال‌سازی: {round(float(price), 8)}\n"
-                            f"تاییدیه‌ها: {signal.get('predictive_confirmations')}\n"
-                            f"Power 2 کندلی: خرید {signal.get('power2_buy')}٪ / فروش {signal.get('power2_sell')}٪\n"
-                            "ستاپ دوباره بررسی شد و تاییدیه‌های ورود کامل شدند."
-                        )
-                        messages.append({
-                            "chat_id": signal["chat_id"],
-                            "reply_to_message_id": signal.get("message_id"),
-                            "message": activation_msg
-                        })
-                        if paper_open_msg:
-                            messages.append({
-                                "chat_id": signal["chat_id"],
-                                "reply_to_message_id": signal.get("message_id"),
-                                "message": paper_open_msg
-                            })
-                    else:
-                        signal["last_checked_at"] = now_ts()
-                        signal["last_checked_at_text"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                except Exception as e:
-                    if is_quiet_tracker_error(e):
-                        signal = mark_tracker_data_error(signal, e)
-                        print("TRACK DATA SKIP:", signal.get("symbol"), str(e)[:160])
-                    else:
-                        log_exception("فعال‌سازی/اعتبارسنجی ستاپ", e, "signal_tracker.py", "check_active_signals", signal.get("symbol"))
-                        signal["last_checked_at"] = now_ts()
-                        signal["last_checked_at_text"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                remaining.append(signal)
-                continue
+                # مهاجرت امن از نسخه سیگنالی قدیمی: سیگنال‌های Pending موجود مستقیم ACTIVE می‌شوند.
+                signal["status"] = "ACTIVE"
+                signal["entry_confirmed"] = True
+                signal["entry_status"] = "ACTIVE"
+                signal["entry_mode"] = "CLASSIC_DIRECT"
+                signal["activated_at"] = signal.get("activated_at") or now_ts()
+                signal["activated_at_text"] = signal.get("activated_at_text") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                signal["activated_price"] = signal.get("activated_price") or signal.get("entry")
 
             result_type, exit_price = detect_signal_hit_from_candles(signal)
 
@@ -1210,7 +1144,7 @@ def get_profit_simulation_report(margin, leverage, days=None):
         f"لوریج: {leverage}x\n\n"
         f"تعداد معاملات: {total}\n"
         f"بردها: {len(wins)}\n"
-        f"استاپ‌ها: {len(losses)}\n\n"
+        f"اسیگنال‌ها: {len(losses)}\n\n"
         f"سود کل TPها:\n"
         f"{format_money(gross_profit)}\n\n"
         f"ضرر کل SLها:\n"
@@ -1443,19 +1377,18 @@ def get_stats_report(days=None):
     stats = _filter_stats_by_days(raw_stats, days)
     active_now = get_active_signals()
 
-    setup_events = _unique_events(stats, "SETUP_CREATED")
+    setup_events = _unique_events(stats, "SETUP_CREATED")  # فقط برای سازگاری با آمار قدیمی
     activated_events = _unique_events(stats, "ACTIVATED")
     cancelled_events = _closed_records(stats, "CANCELLED")
     tp1_records = _closed_records(stats, "TP1")
     tp2_records = _closed_records(stats, "TP2")
     sl_records = _closed_records(stats, "SL")
 
-    active_pending = [s for s in active_now if s.get("status") == "PENDING_ACTIVATION"]
     active_trades = [s for s in active_now if s.get("status") == "ACTIVE"]
 
     setups = len(setup_events)
     activated = len(activated_events)
-    pending = len(active_pending)
+    pending = 0
     cancelled = len(cancelled_events)
     tp1 = len(tp1_records)
     tp2 = len(tp2_records)
@@ -1503,11 +1436,7 @@ def get_stats_report(days=None):
 
     report = f"""📊 {title}
 
-ستاپ ساخته‌شده:{setups}
-✅ ورود فعال‌شده:{activated}
-👀 هنوز منتظر فعال‌سازی:{pending}
-🚫 لغوشده:{cancelled}
-Activation Rate:{activation_rate}٪
+سیگنال مستقیم صادرشده:{activated}
 معاملات فعال باز:{open_active}
 --------------------
 TP1:{tp1}
@@ -1518,9 +1447,8 @@ TP2 Rate از TP1:{tp2_rate}٪
 میانگین برد:{_avg(win_percents)}٪
 میانگین باخت:{_avg(loss_percents)}٪
 --------------------
-میانگین زمان تا فعال‌سازی:{_avg(activation_times)} دقیقه
-میانگین زمان تا TP1 بعد از فعال‌سازی:{_avg(tp1_times)} دقیقه
-میانگین زمان تا SL بعد از فعال‌سازی:{_avg(sl_times)} دقیقه
+میانگین زمان تا TP1:{_avg(tp1_times)} دقیقه
+میانگین زمان تا SL:{_avg(sl_times)} دقیقه
 --------------------
 {dir_line('لانگ', long_records)}
 {dir_line('شورت', short_records)}
