@@ -118,6 +118,7 @@ def is_active_trades_command(text):
     clean = text.strip().lower()
     return clean in [
         "ترید فعال",
+        "تریدفعال",
         "تریدهای فعال",
         "معاملات فعال",
         "سیگنال فعال",
@@ -193,7 +194,7 @@ def handle_trade_section_command(message, text):
             bot.reply_to(message, build_active_trades_text(message.from_user.id))
         return True
 
-    if clean in ["ترید فعال", "تریدهای فعال", "معاملات فعال", "سیگنال فعال", "سیگنال‌های فعال", "سیگنالهای فعال", "زیرنظرها", "زیر نظرها"]:
+    if clean in ["ترید فعال", "تریدفعال", "تریدهای فعال", "معاملات فعال", "سیگنال فعال", "سیگنال‌های فعال", "سیگنالهای فعال", "زیرنظرها", "زیر نظرها"]:
         bot.reply_to(message, build_active_trades_text(message.from_user.id))
         return True
 
@@ -415,7 +416,7 @@ def build_analysis_text(result):
     return f"""
 📊 تحلیل فیوچرز {result['symbol']}
 
-وضعیت ورود: {"✅ فعال" if result.get("entry_confirmed") else "👀 منتظر فعال‌سازی" if result.get("setup_waiting_activation") else "غیرفعال"}
+وضعیت ورود: {"✅ سیگنال مستقیم / فعال" if result.get("entry_confirmed") else "غیرفعال"}
 قیمت فعلی: {result['price']}
 
 جهت نهایی: {fa_direction(result['direction'])}
@@ -517,14 +518,10 @@ def send_auto_signal_to_all_users(result):
     direction_fa = "لانگ" if result["direction"] == "LONG" else "شورت"
 
     entry_mode = result.get("entry_mode")
-    is_setup_waiting = (
-        bool(result.get("setup_waiting_activation"))
-        or entry_mode == "PREDICTIVE_SETUP"
-        or not bool(result.get("entry_confirmed"))
-    )
 
-    title = "🚨 سیگنال آماده" if is_setup_waiting else "🚨 سیگنال خودکار"
-    entry_status_text = "👀 منتظر فعال‌سازی ورود" if is_setup_waiting else "✅ ورود فعال"
+    # Classic Direct Mode: سیگنال خودکار مستقیم و فعال ارسال می‌شود؛ ستاپ انتظار فعال‌سازی نداریم.
+    title = "🚨 سیگنال خودکار"
+    entry_status_text = "✅ ورود فعال"
 
     text = f"""
 {title}
