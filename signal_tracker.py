@@ -401,13 +401,13 @@ def add_signal_to_tracking(user_id, chat_id, message_id, result):
     if has_active_or_pending_symbol(active, user_id, result.get("symbol")):
         return False, f"⚠️ {result.get('symbol')} از قبل زیر نظر یا در انتظار فعال‌سازی است."
 
-    # اگر سیگنال واقعاً با ورود فعال صادر شده باشد، باید از همان ابتدا ACTIVE ذخیره شود
-    # تا Tracker بتواند بعد از آن TP1/SL را بررسی و نتیجه را ارسال کند.
-    # ستاپ‌های عادی همچنان PENDING_ACTIVATION می‌مانند.
+    # Classic Direct Mode:
+    # در نسخه کلاسیک سیگنال منتظر فعال‌سازی نداریم.
+    # هر سیگنال قابل پیگیری از همان ابتدا ACTIVE ذخیره می‌شود تا TP/SL مستقیم بررسی شود.
     result_entry_mode = result.get("entry_mode")
     result_entry_status = result.get("entry_status")
-    entry_confirmed = bool(result.get("entry_confirmed")) or result_entry_status == "ACTIVE" or result_entry_mode == "PREDICTIVE_TRIGGER"
-    initial_status = "ACTIVE" if entry_confirmed else "PENDING_ACTIVATION"
+    entry_confirmed = True
+    initial_status = "ACTIVE"
     signal_uid = f"{result['symbol']}_{message_id}_{now_ts()}"
 
     signal = {
