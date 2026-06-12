@@ -135,6 +135,26 @@ def trend_direction(df):
     return "range"
 
 
+
+
+def ema50_200_direction(df):
+    """HTF direction only from EMA50/EMA200. EMA20 is reserved for entry position/distance."""
+    last = df.iloc[-1]
+    close = float(last["close"])
+    ema50 = float(last["ema50"])
+    ema200 = float(last["ema200"])
+
+    if close > ema50 > ema200:
+        return "bullish"
+    if close < ema50 < ema200:
+        return "bearish"
+    if ema50 > ema200 and close > ema200:
+        return "weak_bullish"
+    if ema50 < ema200 and close < ema200:
+        return "weak_bearish"
+    return "range"
+
+
 def buy_sell_power(df, candles=20):
     recent = df.tail(candles)
     green = recent[recent["close"] > recent["open"]]["volume"].sum()
@@ -454,6 +474,16 @@ def apply_soft_context(symbol, long_score, short_score, long_reasons, short_reas
 
 # ---------- Main scoring ----------
 def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
+    """
+    5-layer clean technical entry:
+    1) EMA50/EMA200 on 4H + 1H for direction
+    2) RSI on 15M for momentum
+    3) MACD on 15M/30M for trend confirmation
+    4) MACD Histogram on 15M for trend strength
+    5) EMA20 position + distance from EMA20 + VWAP for entry quality
+
+    Power2/3/6/20 are calculated only for display, not for scoring or rejection.
+    """
     long_score = 0
     short_score = 0
     long_reasons = []
@@ -468,110 +498,89 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         "15M": trend_direction(df_15m),
         "5M": trend_direction(df_5m),
     }
+    htf_direction = {
+        "4H": ema50_200_direction(df_4h),
+        "1H": ema50_200_direction(df_1h),
+    }
 
     last_4h = df_4h.iloc[-1]
     last_1h = df_1h.iloc[-1]
     last_30 = df_30m.iloc[-1]
     last_15 = df_15m.iloc[-1]
     prev_15 = df_15m.iloc[-2]
-    last_5 = df_5m.iloc[-1]
 
     buy2, sell2 = buy_sell_power(df_5m, 2)
     buy3, sell3 = buy_sell_power(df_5m, 3)
     buy6, sell6 = buy_sell_power(df_5m, 6)
     buy20, sell20 = buy_sell_power(df_5m, 20)
-    distance_15_ema20_atr = distance_from_ema20_atr(df_15m)
 
+    distance_15_ema20_atr = distance_from_ema20_atr(df_15m)
     adx_15 = float(last_15["adx"])
     ob = simple_order_block(df_15m)
     vol_status, vol_ratio = volume_quality(df_15m)
     pattern = candle_pattern(df_15m)
     context = get_soft_context()
 
-    # 1) Higher timeframe direction: soft background
-    if trends["4H"] in ["bullish", "weak_bullish"]:
-        long_score += 8
-        long_reasons.append("4H: زمینه کلی صعودی است")
-    elif trends["4H"] in ["bearish", "weak_bearish"]:
-        short_score += 8
-        short_reasons.append("4H: زمینه کلی نزولی است")
-
-    if trends["1H"] in ["bullish", "weak_bullish"]:
-        long_score += 12
+    # Layer 1: Direction with EMA50/EMA200 only. EMA20 is not used here.
+    if htf_direction["4H"] in ["bullish", "weak_bullish"]:
+        long_score += 10
         confirmations_long += 1
-        long_reasons.append("1H: جهت اصلی لانگ است")
-    elif trends["1H"] in ["bearish", "weak_bearish"]:
-        short_score += 12
+        long_reasons.append("4H: جهت با EMA50/EMA200 صعودی است")
+    elif htf_direction["4H"] in ["bearish", "weak_bearish"]:
+        short_score += 10
         confirmations_short += 1
-        short_reasons.append("1H: جهت اصلی شورت است")
+        short_reasons.append("4H: جهت با EMA50/EMA200 نزولی است")
 
-    # 2) 30M entry context: important, but below 15M
-    if trends["30M"] in ["bullish", "weak_bullish"]:
-        long_score += 14
+    if htf_direction["1H"] in ["bullish", "weak_bullish"]:
+        long_score += 18
         confirmations_long += 1
-        long_reasons.append("30M: جهت ورود لانگ را تایید می‌کند")
-    elif trends["30M"] in ["bearish", "weak_bearish"]:
-        short_score += 14
+        long_reasons.append("1H: جهت اصلی با EMA50/EMA200 لانگ است")
+    elif htf_direction["1H"] in ["bearish", "weak_bearish"]:
+        short_score += 18
         confirmations_short += 1
-        short_reasons.append("30M: جهت ورود شورت را تایید می‌کند")
+        short_reasons.append("1H: جهت اصلی با EMA50/EMA200 شورت است")
 
+    # 30M/15M technical alignment. 15M has the highest entry weight.
     if last_30["close"] > last_30["ema20"] and last_30["macd"] > last_30["macd_signal"]:
         long_score += 10
         confirmations_long += 1
-        long_reasons.append("30M: EMA20 و MACD لانگ را تایید می‌کنند")
+        long_reasons.append("30M: EMA20 و MACD با لانگ هماهنگ است")
     if last_30["close"] < last_30["ema20"] and last_30["macd"] < last_30["macd_signal"]:
         short_score += 10
         confirmations_short += 1
-        short_reasons.append("30M: EMA20 و MACD شورت را تایید می‌کنند")
+        short_reasons.append("30M: EMA20 و MACD با شورت هماهنگ است")
 
-    # 3) 15M main entry engine: highest weight
-    if trends["15M"] in ["bullish", "weak_bullish"]:
-        long_score += 20
-        confirmations_long += 1
-        long_reasons.append("15M: تایم اصلی ورود لانگ را تایید می‌کند")
-    elif trends["15M"] in ["bearish", "weak_bearish"]:
-        short_score += 20
-        confirmations_short += 1
-        short_reasons.append("15M: تایم اصلی ورود شورت را تایید می‌کند")
-
-    if last_15["close"] > last_15["ema20"] > last_15["ema50"]:
-        long_score += 14
-        confirmations_long += 1
-        long_reasons.append("15M: قیمت بالای EMA20 و EMA50 است")
-    if last_15["close"] < last_15["ema20"] < last_15["ema50"]:
-        short_score += 14
-        confirmations_short += 1
-        short_reasons.append("15M: قیمت پایین EMA20 و EMA50 است")
-
-    if last_15["macd"] > last_15["macd_signal"]:
+    # Layer 2: RSI momentum on 15M.
+    if float(last_15["rsi"]) >= 52:
         long_score += 10
         confirmations_long += 1
-        long_reasons.append("15M: MACD مثبت است")
-    if last_15["macd"] < last_15["macd_signal"]:
+        long_reasons.append("15M: RSI مومنتوم لانگ را تایید می‌کند")
+    elif float(last_15["rsi"]) <= 48:
         short_score += 10
         confirmations_short += 1
-        short_reasons.append("15M: MACD منفی است")
+        short_reasons.append("15M: RSI مومنتوم شورت را تایید می‌کند")
 
-    if last_15["macd_hist"] > prev_15["macd_hist"]:
-        long_score += 6
+    # Layer 3: MACD trend confirmation.
+    if last_15["macd"] > last_15["macd_signal"]:
+        long_score += 16
         confirmations_long += 1
-        long_reasons.append("15M: هیستوگرام MACD رو به تقویت صعودی است")
-    if last_15["macd_hist"] < prev_15["macd_hist"]:
-        short_score += 6
+        long_reasons.append("15M: MACD تایید روند لانگ است")
+    if last_15["macd"] < last_15["macd_signal"]:
+        short_score += 16
         confirmations_short += 1
-        short_reasons.append("15M: هیستوگرام MACD رو به تقویت نزولی است")
+        short_reasons.append("15M: MACD تایید روند شورت است")
 
-    # RSI balanced, not hard
-    if last_15["rsi"] > prev_15["rsi"] and 45 <= last_15["rsi"] <= 68:
-        long_score += 6
+    # Layer 4: MACD histogram trend strength.
+    if last_15["macd_hist"] > 0 and last_15["macd_hist"] >= prev_15["macd_hist"]:
+        long_score += 12
         confirmations_long += 1
-        long_reasons.append("15M: RSI در محدوده مناسب رو به بالا است")
-    if last_15["rsi"] < prev_15["rsi"] and 32 <= last_15["rsi"] <= 55:
-        short_score += 6
+        long_reasons.append("15M: Histogram قدرت روند لانگ را تایید می‌کند")
+    if last_15["macd_hist"] < 0 and last_15["macd_hist"] <= prev_15["macd_hist"]:
+        short_score += 12
         confirmations_short += 1
-        short_reasons.append("15M: RSI در محدوده مناسب رو به پایین است")
+        short_reasons.append("15M: Histogram قدرت روند شورت را تایید می‌کند")
 
-    # ADX hard reject under 20, bonus above 20
+    # ADX hard reject under 20.
     if adx_15 >= ADX_HARD_MIN:
         long_score += 8
         short_score += 8
@@ -583,7 +592,7 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         long_reasons.append("رد: ADX 15M زیر 20 است")
         short_reasons.append("رد: ADX 15M زیر 20 است")
 
-    # Volume: soft technical component
+    # Volume: soft technical confirmation.
     if vol_status == "high_volume":
         long_score += 5
         short_score += 5
@@ -600,26 +609,17 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         long_reasons.append("Vol 15M ضعیف است؛ امتیاز محافظه‌کار شد")
         short_reasons.append("Vol 15M ضعیف است؛ امتیاز محافظه‌کار شد")
 
-    # VWAP from 15M/5M: soft confirmation
-    if last_15["close"] > last_15["vwap"]:
-        long_score += 4
-        long_reasons.append("15M: قیمت بالای VWAP است")
-    elif last_15["close"] < last_15["vwap"]:
-        short_score += 4
-        short_reasons.append("15M: قیمت پایین VWAP است")
+    # Layer 5-A: EMA20 entry position on 15M.
+    if last_15["close"] > last_15["ema20"]:
+        long_score += 12
+        confirmations_long += 1
+        long_reasons.append("15M: قیمت بالای EMA20 است؛ موقعیت ورود لانگ معتبر است")
+    elif last_15["close"] < last_15["ema20"]:
+        short_score += 12
+        confirmations_short += 1
+        short_reasons.append("15M: قیمت پایین EMA20 است؛ موقعیت ورود شورت معتبر است")
 
-    if last_5["close"] > last_5["vwap"]:
-        long_score += 2
-        long_reasons.append("5M: VWAP با لانگ تضاد ندارد")
-    elif last_5["close"] < last_5["vwap"]:
-        short_score += 2
-        short_reasons.append("5M: VWAP با شورت تضاد ندارد")
-
-    # Power2/Power3/Power6/Power20 فقط برای نمایش گزارش نگه داشته شده‌اند.
-    # طبق تصمیم جدید، هیچ‌کدام امتیاز ورود نمی‌سازند و شرط اجباری نیستند،
-    # چون در تست‌ها باعث تعقیب کندل‌های داغ و استاپ‌های پشت سر هم شدند.
-
-    # Distance from EMA20: جلوگیری از ورود دیر وسط پامپ/دامپ.
+    # Layer 5-B: Distance from EMA20, late-entry protection.
     if distance_15_ema20_atr <= MAX_ENTRY_DISTANCE_EMA20_ATR:
         long_score += 8
         short_score += 8
@@ -631,6 +631,18 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         long_reasons.append(f"رد: فاصله قیمت از EMA20 زیاد است: {distance_15_ema20_atr} ATR")
         short_reasons.append(f"رد: فاصله قیمت از EMA20 زیاد است: {distance_15_ema20_atr} ATR")
 
+    # Layer 5-C: VWAP final confirmation.
+    if last_15["close"] > last_15["vwap"]:
+        long_score += 8
+        confirmations_long += 1
+        long_reasons.append("15M: VWAP تایید نهایی لانگ است")
+    elif last_15["close"] < last_15["vwap"]:
+        short_score += 8
+        confirmations_short += 1
+        short_reasons.append("15M: VWAP تایید نهایی شورت است")
+
+    # Power values are display-only. No scoring, no rejection.
+
     # Order block soft penalty only. Same-direction gives no bonus.
     if ob == "bearish_order_block":
         long_score -= 3
@@ -639,7 +651,7 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         short_score -= 3
         short_reasons.append("Order Block مخالف شورت است؛ جریمه نرم 3 امتیازی")
 
-    # Candle pattern small technical effect
+    # Candle pattern small technical effect only.
     if pattern.startswith("bullish"):
         long_score += 3
         long_reasons.append(f"کندل 15M تاییدی لانگ: {pattern}")
@@ -647,38 +659,31 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         short_score += 3
         short_reasons.append(f"کندل 15M تاییدی شورت: {pattern}")
 
-    # Soft market context: market regime, altseason, fear & greed
+    # Soft market context: market regime, altseason, fear & greed.
     long_score, short_score = apply_soft_context(
         symbol, long_score, short_score, long_reasons, short_reasons, context
     )
 
-    # Hard validity: 5-layer clean entry. Same logic for LONG and SHORT.
-    # 1) 4H/1H direction, 2) 30M/15M agreement, 3) ADX/MACD/Histogram/RSI,
-    # 4) not far from EMA20, 5) VWAP same direction.
     long_valid = (
         adx_15 >= ADX_HARD_MIN
-        and trends["4H"] in ["bullish", "weak_bullish"]
-        and trends["1H"] in ["bullish", "weak_bullish"]
-        and trends["30M"] in ["bullish", "weak_bullish"]
-        and trends["15M"] in ["bullish", "weak_bullish"]
+        and htf_direction["4H"] in ["bullish", "weak_bullish"]
+        and htf_direction["1H"] in ["bullish", "weak_bullish"]
         and last_15["close"] > last_15["ema20"]
         and last_15["macd"] > last_15["macd_signal"]
         and last_15["macd_hist"] > 0
-        and float(last_15["rsi"]) >= 50
+        and float(last_15["rsi"]) >= 52
         and distance_15_ema20_atr <= MAX_ENTRY_DISTANCE_EMA20_ATR
         and last_15["close"] > last_15["vwap"]
     )
 
     short_valid = (
         adx_15 >= ADX_HARD_MIN
-        and trends["4H"] in ["bearish", "weak_bearish"]
-        and trends["1H"] in ["bearish", "weak_bearish"]
-        and trends["30M"] in ["bearish", "weak_bearish"]
-        and trends["15M"] in ["bearish", "weak_bearish"]
+        and htf_direction["4H"] in ["bearish", "weak_bearish"]
+        and htf_direction["1H"] in ["bearish", "weak_bearish"]
         and last_15["close"] < last_15["ema20"]
         and last_15["macd"] < last_15["macd_signal"]
         and last_15["macd_hist"] < 0
-        and float(last_15["rsi"]) <= 50
+        and float(last_15["rsi"]) <= 48
         and distance_15_ema20_atr <= MAX_ENTRY_DISTANCE_EMA20_ATR
         and last_15["close"] < last_15["vwap"]
     )
@@ -696,6 +701,7 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         "confirmations_long": confirmations_long,
         "confirmations_short": confirmations_short,
         "trends": trends,
+        "htf_direction": htf_direction,
         "order_block": ob,
         "market_regime": context.get("market_regime"),
         "altseason_status": context.get("altseason_status"),
