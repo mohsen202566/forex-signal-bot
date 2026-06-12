@@ -4,7 +4,7 @@ import telebot
 import threading
 import time
 
-from config import BOT_TOKEN, AUTO_SIGNAL_ENABLED, AUTO_SCAN_INTERVAL_MINUTES, TRACKER_CHECK_INTERVAL_SECONDS, AUTO_TRACK_AUTO_SIGNALS
+from config import BOT_TOKEN, AUTO_SCAN_INTERVAL_MINUTES, TRACKER_CHECK_INTERVAL_SECONDS, AUTO_TRACK_AUTO_SIGNALS
 from coins_fa import COINS_FA
 from analysis import analyze_symbol
 from scanner import get_best_signals, SCAN_SYMBOLS, should_send_auto_signal
@@ -24,6 +24,32 @@ from signal_tracker import (
     can_add_automatic_signal,
 )
 
+try:
+    from paper_trader import (
+        set_trade_enabled,
+        emergency_stop,
+        set_trade_margin,
+        set_leverage,
+        set_max_open_positions,
+        format_trade_status,
+        format_open_positions,
+        format_trade_stats,
+        format_trade_settings,
+        format_empty_slots,
+    )
+except Exception as e:
+    print("PAPER TRADER IMPORT ERROR:", str(e))
+    set_trade_enabled = None
+    emergency_stop = None
+    set_trade_margin = None
+    set_leverage = None
+    set_max_open_positions = None
+    format_trade_status = None
+    format_open_positions = None
+    format_trade_stats = None
+    format_trade_settings = None
+    format_empty_slots = None
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN تنظیم نشده است. اول روی VPS دستور export BOT_TOKEN را بزن.")
 
@@ -33,6 +59,9 @@ bot = telebot.TeleBot(BOT_TOKEN)
 MESSAGE_RESULTS = {}
 
 TRACK_COMMANDS = ["\u0632\u06cc\u0631 \u0646\u0638\u0631", "\u0632\u06cc\u0631\u0646\u0638\u0631", "\u0632\u06cc\u0631 \u0646\u0638\u0631 \u0628\u06af\u06cc\u0631", "\u0646\u0638\u0631"]
+
+# حافظه موقت برای دستورهای چندمرحله‌ای ترید مثل «ترید دلار» و «ترید لوریج»
+TRADE_WAITING_ACTION = {}
 
 
 def safe(value, default="\u0646\u0627\u0645\u0634\u062e\u0635"):
@@ -85,6 +114,142 @@ def is_market_status_command(text):
         "محاسبه وضعیت بازار",
         "بررسی",
     ]
+
+
+
+def _paper_trade_unavailable_text():
+    return "⚠️ بخش Paper Trade روی این نسخه کامل لود نشده است. فایل‌های paper_trader.py و auto_trade_config.py را چک کن."
+
+
+def _owner_only(message):
+    if not is_owner(message.from_user.id):
+        bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند این دستور ترید را اجرا کند.")
+        return True
+    return False
+
+
+def _reply_paper_result(message, func, *args):
+    if not func:
+        bot.reply_to(message, _paper_trade_unavailable_text())
+        return True
+    try:
+        result = func(*args)
+        # بعضی توابع tuple برمی‌گردانند: (ok, msg)
+        if isinstance(result, tuple) and len(result) >= 2:
+            bot.reply_to(message, str(result[1]))
+        else:
+            bot.reply_to(message, str(result))
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطا در اجرای دستور ترید:\n{e}")
+    return True
+
+
+def handle_trade_waiting_input(message, text):
+    """مرحله دوم دستورهای ترید مثل «ترید دلار»، «ترید لوریج»، «حداکثر پوزیشن»."""
+    user_id = int(message.from_user.id)
+
+    if user_id not in TRADE_WAITING_ACTION:
+        return False
+
+    action = TRADE_WAITING_ACTION.pop(user_id)
+
+    if _owner_only(message):
+        return True
+
+    clean_value = str(text).strip()
+
+    if action == "trade_margin":
+        return _reply_paper_result(message, set_trade_margin, clean_value)
+
+    if action == "leverage":
+        return _reply_paper_result(message, set_leverage, clean_value)
+
+    if action == "max_positions":
+        return _reply_paper_result(message, set_max_open_positions, clean_value)
+
+    bot.reply_to(message, "❌ دستور تنظیم ترید نامشخص بود.")
+    return True
+
+
+def handle_trade_command(message, text):
+    """دستورات Paper Trade مثل نسخه فیوچرز اصلی، قبل از تشخیص ارز اجرا می‌شوند."""
+    clean = text.strip().lower()
+    user_id = int(message.from_user.id)
+
+    # داشبورد و گزارش‌ها
+    if clean in ["ترید", "وضعیت ترید", "داشبورد"]:
+        return _reply_paper_result(message, format_trade_status)
+
+    if clean in ["آمار ترید", "امار ترید"]:
+        return _reply_paper_result(message, format_trade_stats)
+
+    if clean in [
+        "پوزیشن ها", "پوزیشن‌ها", "پوزیشنهای باز", "پوزیشن های باز",
+        "پوزیشن فعال", "پوزیشن‌های فعال", "پوزیشنهای فعال",
+        "تریدهای فعال", "معاملات فعال", "سیگنال فعال", "سیگنال‌های فعال", "سیگنالهای فعال"
+    ]:
+        return _reply_paper_result(message, format_open_positions)
+
+    if clean in ["تنظیمات ترید", "تنظیم ترید"]:
+        return _reply_paper_result(message, format_trade_settings)
+
+    if clean in ["اسلات خالی", "اسلات ترید"]:
+        return _reply_paper_result(message, format_empty_slots)
+
+    # دستورهای مالک
+    owner_commands = [
+        "ترید فعال", "تریدفعال", "ترید روشن",
+        "ترید غیرفعال", "ترید خاموش", "تریدغیرفعال",
+        "توقف اضطراری", "توقف ترید", "استاپ ترید",
+        "ترید دلار", "ترید لوریج", "حداکثر پوزیشن",
+    ]
+    if clean in owner_commands and _owner_only(message):
+        return True
+
+    if clean in ["ترید فعال", "تریدفعال", "ترید روشن"]:
+        return _reply_paper_result(message, set_trade_enabled, True)
+
+    if clean in ["ترید غیرفعال", "ترید خاموش", "تریدغیرفعال"]:
+        return _reply_paper_result(message, set_trade_enabled, False)
+
+    if clean in ["توقف اضطراری", "توقف ترید", "استاپ ترید"]:
+        return _reply_paper_result(message, emergency_stop)
+
+    if clean == "ترید دلار":
+        TRADE_WAITING_ACTION[user_id] = "trade_margin"
+        bot.reply_to(message, "مقدار دلاری هر پوزیشن را وارد کن:\nمثلاً: 5")
+        return True
+
+    if clean == "ترید لوریج":
+        TRADE_WAITING_ACTION[user_id] = "leverage"
+        bot.reply_to(message, "لوریج معاملات بعدی را وارد کن:\nمثلاً: 10")
+        return True
+
+    if clean == "حداکثر پوزیشن":
+        TRADE_WAITING_ACTION[user_id] = "max_positions"
+        bot.reply_to(message, "حداکثر تعداد پوزیشن همزمان را وارد کن:\nمثلاً: 5")
+        return True
+
+    # نسخه تک‌مرحله‌ای هم پشتیبانی شود: «مارجین 10»، «لوریج 5»، «حداکثر پوزیشن 5»
+    if clean.startswith("مارجین "):
+        if _owner_only(message):
+            return True
+        value = clean.split(maxsplit=1)[1]
+        return _reply_paper_result(message, set_trade_margin, value)
+
+    if clean.startswith("لوریج "):
+        if _owner_only(message):
+            return True
+        value = clean.split(maxsplit=1)[1]
+        return _reply_paper_result(message, set_leverage, value)
+
+    if clean.startswith("حداکثر پوزیشن "):
+        if _owner_only(message):
+            return True
+        value = clean.split()[-1]
+        return _reply_paper_result(message, set_max_open_positions, value)
+
+    return False
 
 
 def find_symbol(text):
@@ -596,7 +761,7 @@ def handle_message(message):
     send_analysis(message, symbol)
 
 
-if AUTO_SIGNAL_ENABLED:
+if os.getenv("AUTO_SIGNAL_ENABLED", "1") == "1":
     threading.Thread(target=auto_signal_loop, daemon=True).start()
 
 threading.Thread(target=signal_tracking_loop, daemon=True).start()
