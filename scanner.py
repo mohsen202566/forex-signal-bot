@@ -78,9 +78,9 @@ def is_high_quality_signal(result):
 
     # ADX balance for auto signals:
     # below 18 is too weak; 18-20 is allowed only with a score penalty.
-    if adx < 18:
-        return False
     if adx < 20:
+        return False
+    if adx < 22:
         score -= 8
 
     if score < int(AUTO_SIGNAL_SCORE):
