@@ -4,7 +4,7 @@ import telebot
 import threading
 import time
 
-from config import BOT_TOKEN, AUTO_SCAN_INTERVAL_MINUTES, TRACKER_CHECK_INTERVAL_SECONDS, AUTO_TRACK_AUTO_SIGNALS
+from config import BOT_TOKEN, AUTO_SIGNAL_ENABLED, AUTO_SCAN_INTERVAL_MINUTES, TRACKER_CHECK_INTERVAL_SECONDS, AUTO_TRACK_AUTO_SIGNALS
 from coins_fa import COINS_FA
 from analysis import analyze_symbol
 from scanner import get_best_signals, SCAN_SYMBOLS, should_send_auto_signal
@@ -14,7 +14,6 @@ from diagnostics import format_error_report, log_exception
 from signal_tracker import (
     add_signal_to_tracking,
     check_active_signals,
-    get_active_signals,
     get_stats_report,
     parse_days_from_text,
     parse_profit_calc_text,
@@ -25,32 +24,6 @@ from signal_tracker import (
     can_add_automatic_signal,
 )
 
-try:
-    from paper_trader import (
-        set_trade_enabled,
-        emergency_stop,
-        set_trade_margin,
-        set_leverage,
-        set_max_open_positions,
-        format_trade_status,
-        format_open_positions,
-        format_trade_stats,
-        format_trade_settings,
-        format_empty_slots,
-    )
-except Exception as e:
-    print("PAPER TRADER IMPORT ERROR:", str(e))
-    set_trade_enabled = None
-    emergency_stop = None
-    set_trade_margin = None
-    set_leverage = None
-    set_max_open_positions = None
-    format_trade_status = None
-    format_open_positions = None
-    format_trade_stats = None
-    format_trade_settings = None
-    format_empty_slots = None
-
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN تنظیم نشده است. اول روی VPS دستور export BOT_TOKEN را بزن.")
 
@@ -60,9 +33,6 @@ bot = telebot.TeleBot(BOT_TOKEN)
 MESSAGE_RESULTS = {}
 
 TRACK_COMMANDS = ["\u0632\u06cc\u0631 \u0646\u0638\u0631", "\u0632\u06cc\u0631\u0646\u0638\u0631", "\u0632\u06cc\u0631 \u0646\u0638\u0631 \u0628\u06af\u06cc\u0631", "\u0646\u0638\u0631"]
-
-# حافظه موقت برای تنظیمات چندمرحله‌ای ترید مثل «ترید دلار» و «ترید لوریج»
-TRADE_WAITING_ACTION = {}
 
 
 def safe(value, default="\u0646\u0627\u0645\u0634\u062e\u0635"):
@@ -116,111 +86,6 @@ def is_market_status_command(text):
         "بررسی",
     ]
 
-
-
-def handle_trade_waiting_input(message, text):
-    """مرحله دوم دستورهای ترید مثل ترید دلار / ترید لوریج."""
-    user_id = int(message.from_user.id)
-
-    if user_id not in TRADE_WAITING_ACTION:
-        return False
-
-    action = TRADE_WAITING_ACTION.pop(user_id)
-
-    if not is_owner(user_id):
-        bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند تنظیمات ترید را تغییر دهد.")
-        return True
-
-    try:
-        if action == "trade_margin":
-            ok, reply = set_trade_margin(text)
-            bot.reply_to(message, reply)
-            return True
-
-        if action == "leverage":
-            ok, reply = set_leverage(text)
-            bot.reply_to(message, reply)
-            return True
-
-        if action == "max_positions":
-            ok, reply = set_max_open_positions(text)
-            bot.reply_to(message, reply)
-            return True
-
-        bot.reply_to(message, "❌ دستور تنظیم نامشخص بود.")
-        return True
-
-    except Exception as e:
-        bot.reply_to(message, f"❌ خطا در ثبت تنظیم:\n{e}")
-        return True
-
-
-def handle_trade_command(message, text):
-    """دستورات Paper Trade مثل نسخه فیوچرز اصلی."""
-    clean = text.strip().lower()
-    user_id = int(message.from_user.id)
-
-    trade_owner_commands = [
-        "ترید فعال",
-        "ترید غیرفعال",
-        "توقف اضطراری",
-        "ترید دلار",
-        "ترید لوریج",
-        "حداکثر پوزیشن",
-    ]
-
-    if clean in trade_owner_commands and not is_owner(user_id):
-        bot.reply_to(message, "⛔ فقط مالک ربات می‌تواند دستورهای ترید را اجرا کند.")
-        return True
-
-    if clean == "ترید فعال":
-        bot.reply_to(message, set_trade_enabled(True))
-        return True
-
-    if clean == "ترید غیرفعال":
-        bot.reply_to(message, set_trade_enabled(False))
-        return True
-
-    if clean == "توقف اضطراری":
-        bot.reply_to(message, emergency_stop())
-        return True
-
-    if clean in ["وضعیت ترید", "داشبورد"]:
-        bot.reply_to(message, format_trade_status())
-        return True
-
-    if clean in ["آمار ترید", "امار ترید"]:
-        bot.reply_to(message, format_trade_stats())
-        return True
-
-    if clean in ["پوزیشن ها", "پوزیشن‌ها", "پوزیشنهای باز", "پوزیشن های باز"]:
-        bot.reply_to(message, format_open_positions())
-        return True
-
-    if clean in ["تنظیمات ترید", "تنظیم ترید"]:
-        bot.reply_to(message, format_trade_settings())
-        return True
-
-    if clean == "اسلات خالی":
-        bot.reply_to(message, format_empty_slots())
-        return True
-
-    if clean == "ترید دلار":
-        TRADE_WAITING_ACTION[user_id] = "trade_margin"
-        bot.reply_to(message, "مقدار دلاری هر پوزیشن را وارد کن:\nمثلاً: 5")
-        return True
-
-    if clean == "ترید لوریج":
-        TRADE_WAITING_ACTION[user_id] = "leverage"
-        bot.reply_to(message, "لوریج معاملات بعدی را وارد کن:\nمثلاً: 10")
-        return True
-
-    if clean == "حداکثر پوزیشن":
-        TRADE_WAITING_ACTION[user_id] = "max_positions"
-        bot.reply_to(message, "حداکثر تعداد پوزیشن همزمان را وارد کن:\nمثلاً: 5")
-        return True
-
-    return False
 
 def find_symbol(text):
     text = text.lower().strip()
@@ -346,7 +211,7 @@ def build_analysis_text(result):
     return f"""
 📊 تحلیل فیوچرز {result['symbol']}
 
-وضعیت ورود: {"✅ فعال" if result.get("entry_confirmed") else "غیرفعال"}
+وضعیت ورود: {"✅ فعال" if result.get("entry_confirmed") else "👀 منتظر فعال‌سازی" if result.get("setup_waiting_activation") else "غیرفعال"}
 قیمت فعلی: {result['price']}
 
 جهت نهایی: {fa_direction(result['direction'])}
@@ -447,8 +312,15 @@ ADX: {safe(r.get('adx'))}
 def send_auto_signal_to_all_users(result):
     direction_fa = "لانگ" if result["direction"] == "LONG" else "شورت"
 
-    title = "🚨 سیگنال خودکار"
-    entry_status_text = "✅ ورود فعال"
+    entry_mode = result.get("entry_mode")
+    is_setup_waiting = (
+        bool(result.get("setup_waiting_activation"))
+        or entry_mode == "PREDICTIVE_SETUP"
+        or not bool(result.get("entry_confirmed"))
+    )
+
+    title = "🚨 سیگنال آماده" if is_setup_waiting else "🚨 سیگنال خودکار"
+    entry_status_text = "👀 منتظر فعال‌سازی ورود" if is_setup_waiting else "✅ ورود فعال"
 
     text = f"""
 {title}
@@ -641,12 +513,6 @@ def handle_message(message):
 
     text = message.text.strip()
 
-    if handle_trade_waiting_input(message, text):
-        return
-
-    if handle_trade_command(message, text):
-        return
-
     if is_market_status_command(text):
         bot.reply_to(message, "⏳ در حال محاسبه وضعیت بازار...")
         try:
@@ -730,7 +596,7 @@ def handle_message(message):
     send_analysis(message, symbol)
 
 
-if os.getenv("AUTO_SIGNAL_ENABLED", "1") == "1":
+if AUTO_SIGNAL_ENABLED:
     threading.Thread(target=auto_signal_loop, daemon=True).start()
 
 threading.Thread(target=signal_tracking_loop, daemon=True).start()
