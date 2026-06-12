@@ -360,7 +360,12 @@ def handle_trade_command(message, text):
         bot.reply_to(message, "مقدار دلاری هر پوزیشن را وارد کن:\nمثلاً: 5"); return True
     if clean in ["ترید لوریج", "لوریج ترید", "اهرم ترید"]:
         TRADE_WAITING_ACTION[user_id] = "leverage"
-        bot.reply_to(message, "لوریج معاملات بعدی را وارد کن:\nمثلاً: 10"); return True
+        bot.reply_to(
+            message,
+            "📈 لوریج معاملات را انتخاب کن.\n\n"
+            "یک عدد بین 1 تا 50 ارسال کن.\n"
+            "مثال:\n12"
+        ); return True
     if clean in ["حداکثر پوزیشن", "حد اکثر پوزیشن", "حداکثر معاملات"]:
         TRADE_WAITING_ACTION[user_id] = "max_positions"
         bot.reply_to(message, "حداکثر تعداد پوزیشن همزمان را وارد کن:\nمثلاً: 5"); return True
