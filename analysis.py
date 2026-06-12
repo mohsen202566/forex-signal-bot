@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Simple Classic Technical Engine + Smart TP/SL
+Simple Classic Balanced Soft Engine + Smart TP/SL
 
 هدف این نسخه:
 - برگشت به ربات ساده کلاسیک اولیه
 - بدون Setup / Watchlist / Pending
 - بدون Power2/Power3/Power6 و بدون تاییدهای کندلی سنگین
-- تحلیل فقط با EMA / RSI / MACD / MACD Histogram / ADX / VWAP
-- ورود مستقیم، ساده و قابل دیباگ
+- تحلیل فقط با EMA / RSI / MACD / MACD Histogram / ADX / VWAP؛ فقط ADX زیر 20 و score زیر 85 رد قطعی هستند
+- ورود مستقیم، ساده، قابل دیباگ و نرم‌تر از نسخه خشک
 - TP/SL هوشمند با سطوح 5M + 15M + 30M، Strength Score، ATR و پروفایل نوسان هر کوین
 - حداقل فاصله SL همیشه ATR × 1.25 است
 """
@@ -314,27 +314,43 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         confirmations_short += 1
         short_reasons.append("15M: قیمت پایین EMA20؛ موقعیت ورود شورت")
 
-    # جلوگیری از ورود دیر: خیلی دور از EMA20 نباشد
+    # جلوگیری از ورود دیر: نرم و امتیازی، نه فیلتر خشک
     if dist_15 <= 0.85:
         long_score += 6
         short_score += 6
         long_reasons.append(f"فاصله از EMA20 مناسب است: {round(dist_15, 2)} ATR")
         short_reasons.append(f"فاصله از EMA20 مناسب است: {round(dist_15, 2)} ATR")
-    elif dist_15 > 1.25:
-        long_score = min(long_score, 69)
-        short_score = min(short_score, 69)
-        long_reasons.append(f"رد: فاصله از EMA20 زیاد است: {round(dist_15, 2)} ATR")
-        short_reasons.append(f"رد: فاصله از EMA20 زیاد است: {round(dist_15, 2)} ATR")
-    else:
+    elif dist_15 <= 1.25:
         long_score -= 4
         short_score -= 4
         long_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
         short_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
+    elif dist_15 <= 1.60:
+        long_score -= 10
+        short_score -= 10
+        long_reasons.append(f"فاصله از EMA20 زیاد است؛ جریمه ورود دیر: {round(dist_15, 2)} ATR")
+        short_reasons.append(f"فاصله از EMA20 زیاد است؛ جریمه ورود دیر: {round(dist_15, 2)} ATR")
+    else:
+        long_score -= 18
+        short_score -= 18
+        long_reasons.append(f"فاصله از EMA20 خیلی زیاد است؛ جریمه سنگین: {round(dist_15, 2)} ATR")
+        short_reasons.append(f"فاصله از EMA20 خیلی زیاد است؛ جریمه سنگین: {round(dist_15, 2)} ATR")
 
     # 5) Final confirmation: ADX + VWAP
-    if adx_15 >= ADX_HARD_MIN:
+    # ADX تنها فیلتر سخت این لایه است؛ بالای 20 به صورت پله‌ای امتیاز می‌دهد.
+    if adx_15 >= 35:
+        long_score += 15
+        short_score += 15
+        long_reasons.append("ADX 15M بالای 35؛ قدرت روند قوی")
+        short_reasons.append("ADX 15M بالای 35؛ قدرت روند قوی")
+    elif adx_15 >= 25:
         long_score += 10
         short_score += 10
+        long_reasons.append("ADX 15M بالای 25؛ قدرت روند خوب")
+        short_reasons.append("ADX 15M بالای 25؛ قدرت روند خوب")
+    elif adx_15 >= ADX_HARD_MIN:
+        long_score += 5
+        short_score += 5
         long_reasons.append("ADX 15M بالای 20؛ قدرت روند قابل قبول")
         short_reasons.append("ADX 15M بالای 20؛ قدرت روند قابل قبول")
     else:
@@ -366,35 +382,9 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         long_reasons.append("حجم 15M ضعیف است؛ امتیاز محافظه‌کار شد")
         short_reasons.append("حجم 15M ضعیف است؛ امتیاز محافظه‌کار شد")
 
-    # Validity: no power/candle/fresh momentum involved
-    long_valid = (
-        adx_15 >= ADX_HARD_MIN
-        and trends["4H"] == "bullish"
-        and trends["1H"] == "bullish"
-        and trends["30M"] == "bullish"
-        and last_15["close"] > last_15["ema20"]
-        and last_15["macd"] > last_15["macd_signal"]
-        and last_15["close"] > last_15["vwap"]
-        and 52 <= float(last_15["rsi"]) <= 68
-        and dist_15 <= 1.25
-    )
-
-    short_valid = (
-        adx_15 >= ADX_HARD_MIN
-        and trends["4H"] == "bearish"
-        and trends["1H"] == "bearish"
-        and trends["30M"] == "bearish"
-        and last_15["close"] < last_15["ema20"]
-        and last_15["macd"] < last_15["macd_signal"]
-        and last_15["close"] < last_15["vwap"]
-        and 32 <= float(last_15["rsi"]) <= 48
-        and dist_15 <= 1.25
-    )
-
-    if not long_valid:
-        long_score = min(long_score, 69)
-    if not short_valid:
-        short_score = min(short_score, 69)
+    # Validity: خشک نیست. فقط ADX زیر 20 رد کامل می‌شود؛ بقیه لایه‌ها با امتیاز تصمیم می‌گیرند.
+    long_valid = adx_15 >= ADX_HARD_MIN
+    short_valid = adx_15 >= ADX_HARD_MIN
 
     buy2, sell2 = buy_sell_power(df_5m, 2)
     buy3, sell3 = buy_sell_power(df_5m, 3)
@@ -675,8 +665,6 @@ def analyze_symbol(symbol: str) -> Dict:
         if (
             not valid_direction
             or final_score < min_required_score
-            or confirmations < int(MIN_MANUAL_CONFIRMATIONS)
-            or edge < 8
         ):
             direction = "NO TRADE"
             entry_confirmed = False
