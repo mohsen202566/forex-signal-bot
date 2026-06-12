@@ -11,6 +11,8 @@ Balanced Classic Technical Engine
 - Order Block فقط جریمه نرم 2 تا 3 امتیازی دارد؛ هم‌جهت امتیاز اضافه نمی‌گیرد
 - Fear & Greed، Altseason و وضعیت کلی بازار فقط اثر نرم دارند
 - SL/TP با حمایت و مقاومت 5M تنظیم می‌شود؛ TP قبل از سطح و SL پشت سطح با buffer هوشمند
+- ورود دیگر بر اساس Power2/Power3/Power6 یا تایید چندکندلی نیست
+- ورود با 5 لایه: جهت 4H/1H، تایید 30M/15M، MACD/RSI/ADX، فاصله از EMA20، VWAP
 """
 
 import time
@@ -37,9 +39,9 @@ ADX_HARD_MIN = max(float(MIN_ADX_FOR_TREND), 20.0)
 SL_ATR_MULTIPLIER = 1.25
 TP1_ATR_MULTIPLIER = 0.75
 TP2_ATR_MULTIPLIER = 1.40
-POWER2_SIGNAL_MIN = 80.0
 MIN_SL_ATR_MULTIPLIER = 1.25
 MAX_SL_ATR_MULTIPLIER = 1.90
+MAX_ENTRY_DISTANCE_EMA20_ATR = 0.85
 
 # Soft context cache
 _CONTEXT_CACHE = {"ts": 0, "data": None}
@@ -286,6 +288,16 @@ def volume_quality(df):
     return "neutral_volume", ratio
 
 
+
+def distance_from_ema20_atr(df):
+    """فاصله قیمت از EMA20 بر اساس ATR؛ برای جلوگیری از ورود دیر استفاده می‌شود."""
+    last = df.iloc[-1]
+    price = float(last["close"])
+    ema20 = float(last["ema20"])
+    atr = max(float(last["atr"]), price * 0.0015)
+    return round(abs(price - ema20) / atr, 2)
+
+
 def simple_order_block(df):
     """تشخیص سبک و نرم OB. فقط برای جریمه خلاف جهت استفاده می‌شود؛ امتیاز مثبت نمی‌دهد."""
     recent = df.tail(30)
@@ -468,6 +480,7 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
     buy3, sell3 = buy_sell_power(df_5m, 3)
     buy6, sell6 = buy_sell_power(df_5m, 6)
     buy20, sell20 = buy_sell_power(df_5m, 20)
+    distance_15_ema20_atr = distance_from_ema20_atr(df_15m)
 
     adx_15 = float(last_15["adx"])
     ob = simple_order_block(df_15m)
@@ -602,36 +615,21 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         short_score += 2
         short_reasons.append("5M: VWAP با شورت تضاد ندارد")
 
-    # Power is secondary, not a signal maker
-    if buy20 > sell20 + 8:
-        long_score += 5
-        long_reasons.append("قدرت 20 کندلی خرید برتری دارد")
-    elif sell20 > buy20 + 8:
-        short_score += 5
-        short_reasons.append("قدرت 20 کندلی فروش برتری دارد")
+    # Power2/Power3/Power6/Power20 فقط برای نمایش گزارش نگه داشته شده‌اند.
+    # طبق تصمیم جدید، هیچ‌کدام امتیاز ورود نمی‌سازند و شرط اجباری نیستند،
+    # چون در تست‌ها باعث تعقیب کندل‌های داغ و استاپ‌های پشت سر هم شدند.
 
-    if buy6 > sell6 + 6:
-        long_score += 3
-        long_reasons.append("قدرت 6 کندلی خرید هم‌جهت است")
-    elif sell6 > buy6 + 6:
-        short_score += 3
-        short_reasons.append("قدرت 6 کندلی فروش هم‌جهت است")
-
-    # 2-candle power is a hard quality gate for automatic/direct signals.
-    # LONG requires buy power >= 80%. SHORT requires sell power >= 80%.
-    if buy2 >= POWER2_SIGNAL_MIN:
-        long_score += 3
-        long_reasons.append("قدرت خرید 2 کندلی بالای 80٪ و هم‌جهت لانگ است")
+    # Distance from EMA20: جلوگیری از ورود دیر وسط پامپ/دامپ.
+    if distance_15_ema20_atr <= MAX_ENTRY_DISTANCE_EMA20_ATR:
+        long_score += 8
+        short_score += 8
+        long_reasons.append(f"فاصله قیمت از EMA20 مناسب است: {distance_15_ema20_atr} ATR")
+        short_reasons.append(f"فاصله قیمت از EMA20 مناسب است: {distance_15_ema20_atr} ATR")
     else:
         long_score = min(long_score, 69)
-        long_reasons.append("رد لانگ: قدرت خرید 2 کندلی زیر 80٪ است")
-
-    if sell2 >= POWER2_SIGNAL_MIN:
-        short_score += 3
-        short_reasons.append("قدرت فروش 2 کندلی بالای 80٪ و هم‌جهت شورت است")
-    else:
         short_score = min(short_score, 69)
-        short_reasons.append("رد شورت: قدرت فروش 2 کندلی زیر 80٪ است")
+        long_reasons.append(f"رد: فاصله قیمت از EMA20 زیاد است: {distance_15_ema20_atr} ATR")
+        short_reasons.append(f"رد: فاصله قیمت از EMA20 زیاد است: {distance_15_ema20_atr} ATR")
 
     # Order block soft penalty only. Same-direction gives no bonus.
     if ob == "bearish_order_block":
@@ -654,23 +652,35 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         symbol, long_score, short_score, long_reasons, short_reasons, context
     )
 
-    # Hard validity: 15M + 30M entry must agree enough, ADX >= 20, and final score high.
+    # Hard validity: 5-layer clean entry. Same logic for LONG and SHORT.
+    # 1) 4H/1H direction, 2) 30M/15M agreement, 3) ADX/MACD/Histogram/RSI,
+    # 4) not far from EMA20, 5) VWAP same direction.
     long_valid = (
         adx_15 >= ADX_HARD_MIN
-        and trends["15M"] in ["bullish", "weak_bullish"]
+        and trends["4H"] in ["bullish", "weak_bullish"]
+        and trends["1H"] in ["bullish", "weak_bullish"]
         and trends["30M"] in ["bullish", "weak_bullish"]
+        and trends["15M"] in ["bullish", "weak_bullish"]
         and last_15["close"] > last_15["ema20"]
         and last_15["macd"] > last_15["macd_signal"]
-        and buy2 >= POWER2_SIGNAL_MIN
+        and last_15["macd_hist"] > 0
+        and float(last_15["rsi"]) >= 50
+        and distance_15_ema20_atr <= MAX_ENTRY_DISTANCE_EMA20_ATR
+        and last_15["close"] > last_15["vwap"]
     )
 
     short_valid = (
         adx_15 >= ADX_HARD_MIN
-        and trends["15M"] in ["bearish", "weak_bearish"]
+        and trends["4H"] in ["bearish", "weak_bearish"]
+        and trends["1H"] in ["bearish", "weak_bearish"]
         and trends["30M"] in ["bearish", "weak_bearish"]
+        and trends["15M"] in ["bearish", "weak_bearish"]
         and last_15["close"] < last_15["ema20"]
         and last_15["macd"] < last_15["macd_signal"]
-        and sell2 >= POWER2_SIGNAL_MIN
+        and last_15["macd_hist"] < 0
+        and float(last_15["rsi"]) <= 50
+        and distance_15_ema20_atr <= MAX_ENTRY_DISTANCE_EMA20_ATR
+        and last_15["close"] < last_15["vwap"]
     )
 
     if not long_valid:
@@ -705,7 +715,7 @@ def technical_direction_score(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         "long_valid": long_valid,
         "short_valid": short_valid,
         "adx_15": adx_15,
-        "power2_signal_min": POWER2_SIGNAL_MIN,
+        "distance_15_ema20_atr": distance_15_ema20_atr,
     }
 
 
