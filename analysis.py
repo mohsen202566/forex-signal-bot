@@ -6,7 +6,7 @@ Simple Classic Balanced Soft Engine + Smart TP/SL
 - برگشت به ربات ساده کلاسیک اولیه
 - بدون Setup / Watchlist / Pending
 - بدون Power2/Power3/Power6 و بدون تاییدهای کندلی سنگین
-- تحلیل فقط با EMA / RSI / MACD / MACD Histogram / ADX / VWAP؛ فقط ADX زیر 20 و score زیر 85 رد قطعی هستند
+- تحلیل فقط با EMA / RSI / MACD / MACD Histogram / ADX / VWAP؛ برای شورت منطق قبلی حفظ شده و برای لانگ VWAP/1H سخت‌تر شده است
 - ورود مستقیم، ساده، قابل دیباگ و نرم‌تر از نسخه خشک
 - TP/SL هوشمند با سطوح 5M + 15M + 30M، Strength Score، ATR و پروفایل نوسان هر کوین
 - حداقل فاصله SL همیشه ATR × 1.25 است
@@ -359,6 +359,10 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         long_reasons.append("رد: ADX 15M زیر 20 است")
         short_reasons.append("رد: ADX 15M زیر 20 است")
 
+    # VWAP:
+    # SHORT logic remains unchanged.
+    # LONG is stricter now: if price is below VWAP, LONG is blocked instead of only receiving a small penalty.
+    long_vwap_ok = True
     if last_15["close"] > last_15["vwap"]:
         long_score += 8
         confirmations_long += 1
@@ -368,7 +372,8 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         short_score += 8
         confirmations_short += 1
         short_reasons.append("15M: قیمت پایین VWAP؛ تایید نهایی شورت")
-        long_score -= 2.7
+        long_vwap_ok = False
+        long_reasons.append("رد لانگ: قیمت زیر VWAP است و VWAP خلاف جهت لانگ قرار دارد")
 
     # Volume is soft and simple
     if vol_status == "high_volume":
@@ -382,8 +387,19 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         long_reasons.append("حجم 15M ضعیف است؛ امتیاز محافظه‌کار شد")
         short_reasons.append("حجم 15M ضعیف است؛ امتیاز محافظه‌کار شد")
 
-    # Validity: خشک نیست. فقط ADX زیر 20 رد کامل می‌شود؛ بقیه لایه‌ها با امتیاز تصمیم می‌گیرند.
-    long_valid = adx_15 >= ADX_HARD_MIN
+    # Validity:
+    # SHORT remains unchanged: ADX is the only hard validity filter for shorts.
+    # LONG is stricter: ADX + same-direction VWAP + stronger 1H confirmation.
+    long_1h_strict_ok = (
+        trends["1H"] == "bullish"
+        and float(last_1h["close"]) > float(last_1h["ema20"])
+        and float(last_1h["close"]) > float(last_1h["ema50"])
+    )
+
+    if not long_1h_strict_ok:
+        long_reasons.append("رد لانگ: تایید 1H برای لانگ کافی نیست")
+
+    long_valid = adx_15 >= ADX_HARD_MIN and long_vwap_ok and long_1h_strict_ok
     short_valid = adx_15 >= ADX_HARD_MIN
 
     buy2, sell2 = buy_sell_power(df_5m, 2)
