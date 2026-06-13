@@ -280,7 +280,10 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         short_score += 5
         short_reasons.append("5M: قیمت پایین EMA20؛ تایید سریع شورت")
 
-    # Avoid late entries, but keep it soft so the bot does not become dry.
+    # Late-entry control:
+    # 1.60-1.80 ATR is allowed but heavily penalized.
+    # >=1.80 ATR is considered too late for scalp-style direct entry and is blocked.
+    too_late_entry = False
     if dist_15 <= 0.85:
         long_score += 6
         short_score += 6
@@ -291,16 +294,17 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         short_score -= 3
         long_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
         short_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
-    elif dist_15 <= 1.60:
-        long_score -= 8
-        short_score -= 8
-        long_reasons.append(f"فاصله از EMA20 زیاد است؛ احتمال ورود دیر: {round(dist_15, 2)} ATR")
-        short_reasons.append(f"فاصله از EMA20 زیاد است؛ احتمال ورود دیر: {round(dist_15, 2)} ATR")
+    elif dist_15 < 1.80:
+        long_score -= 18
+        short_score -= 18
+        long_reasons.append(f"فاصله از EMA20 زیاد است؛ ورود دیر جریمه شد: {round(dist_15, 2)} ATR")
+        short_reasons.append(f"فاصله از EMA20 زیاد است؛ ورود دیر جریمه شد: {round(dist_15, 2)} ATR")
     else:
-        long_score -= 14
-        short_score -= 14
-        long_reasons.append(f"فاصله از EMA20 خیلی زیاد است؛ ریسک ورود دیر: {round(dist_15, 2)} ATR")
-        short_reasons.append(f"فاصله از EMA20 خیلی زیاد است؛ ریسک ورود دیر: {round(dist_15, 2)} ATR")
+        too_late_entry = True
+        long_score = min(long_score, 69)
+        short_score = min(short_score, 69)
+        long_reasons.append(f"رد: فاصله از EMA20 خیلی زیاد است؛ ورود دیر: {round(dist_15, 2)} ATR")
+        short_reasons.append(f"رد: فاصله از EMA20 خیلی زیاد است؛ ورود دیر: {round(dist_15, 2)} ATR")
 
     # 2) RSI layer: momentum zone + slope.
     rsi_15 = float(last_15["rsi"])
@@ -401,9 +405,9 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         long_reasons.append("ADX 15M ضعیف است؛ امتیاز کم شد")
         short_reasons.append("ADX 15M ضعیف است؛ امتیاز کم شد")
 
-    # Validity should stay simple: score will make the final decision.
-    long_valid = True
-    short_valid = True
+    # Validity should stay simple, but direct entries that are too far from EMA20 are blocked.
+    long_valid = not too_late_entry
+    short_valid = not too_late_entry
 
     buy2, sell2 = buy_sell_power(df_5m, 2)
     buy3, sell3 = buy_sell_power(df_5m, 3)
