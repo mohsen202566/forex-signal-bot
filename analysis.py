@@ -29,7 +29,7 @@ exchange = ccxt.okx({
 })
 
 # --- Core thresholds ---
-AUTO_DIRECT_SCORE_MIN = 85
+AUTO_DIRECT_SCORE_MIN = 82
 ADX_HARD_MIN = max(float(MIN_ADX_FOR_TREND), 20.0)
 
 # --- Smart TP/SL constants ---
@@ -321,18 +321,18 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         long_reasons.append(f"فاصله از EMA20 مناسب است: {round(dist_15, 2)} ATR")
         short_reasons.append(f"فاصله از EMA20 مناسب است: {round(dist_15, 2)} ATR")
     elif dist_15 <= 1.25:
-        long_score -= 4
-        short_score -= 4
+        long_score -= 3.6
+        short_score -= 3.6
         long_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
         short_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
     elif dist_15 <= 1.60:
-        long_score -= 10
-        short_score -= 10
+        long_score -= 9
+        short_score -= 9
         long_reasons.append(f"فاصله از EMA20 زیاد است؛ جریمه ورود دیر: {round(dist_15, 2)} ATR")
         short_reasons.append(f"فاصله از EMA20 زیاد است؛ جریمه ورود دیر: {round(dist_15, 2)} ATR")
     else:
-        long_score -= 18
-        short_score -= 18
+        long_score -= 16.2
+        short_score -= 16.2
         long_reasons.append(f"فاصله از EMA20 خیلی زیاد است؛ جریمه سنگین: {round(dist_15, 2)} ATR")
         short_reasons.append(f"فاصله از EMA20 خیلی زیاد است؛ جریمه سنگین: {round(dist_15, 2)} ATR")
 
@@ -363,12 +363,12 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         long_score += 8
         confirmations_long += 1
         long_reasons.append("15M: قیمت بالای VWAP؛ تایید نهایی لانگ")
-        short_score -= 3
+        short_score -= 2.7
     elif last_15["close"] < last_15["vwap"]:
         short_score += 8
         confirmations_short += 1
         short_reasons.append("15M: قیمت پایین VWAP؛ تایید نهایی شورت")
-        long_score -= 3
+        long_score -= 2.7
 
     # Volume is soft and simple
     if vol_status == "high_volume":
@@ -377,8 +377,8 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         long_reasons.append(f"حجم 15M قوی است؛ نسبت حجم {round(vol_ratio, 2)}")
         short_reasons.append(f"حجم 15M قوی است؛ نسبت حجم {round(vol_ratio, 2)}")
     elif vol_status == "weak_volume":
-        long_score -= 3
-        short_score -= 3
+        long_score -= 2.7
+        short_score -= 2.7
         long_reasons.append("حجم 15M ضعیف است؛ امتیاز محافظه‌کار شد")
         short_reasons.append("حجم 15M ضعیف است؛ امتیاز محافظه‌کار شد")
 
