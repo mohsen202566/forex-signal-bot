@@ -24,10 +24,6 @@ from auto_trade_config import (
 )
 
 
-MIN_START_BALANCE_USDT = 5
-MAX_START_BALANCE_USDT = 1000
-
-
 def now_ts():
     return int(time.time())
 
@@ -233,13 +229,8 @@ def can_open_new_trade(signal):
     if signal.get("direction") not in ["LONG", "SHORT"]:
         return False, "جهت سیگنال معتبر نیست."
 
-    risk_raw = signal.get("risk_level")
-    risk = str(risk_raw or "").strip().upper()
-    low_risk_values = ["LOW", "LOW_RISK", "پایین", "ریسک پایین", "کم", "LOW ✅"]
-
-    if risk not in [str(x).strip().upper() for x in low_risk_values]:
-        shown_risk = risk_raw if risk_raw not in [None, ""] else "نامشخص"
-        return False, f"فقط سیگنال‌های ریسک پایین معامله می‌شوند. ریسک این سیگنال: {shown_risk}"
+    # Paper Trading should record every valid ACTIVE signal, regardless of risk_level.
+    # Risk is still shown in signal text/statistics, but it no longer blocks opening Paper positions.
 
     if signal.get("tp1") is None or signal.get("stop_loss") is None:
         return False, "TP1 یا SL در سیگنال وجود ندارد."
@@ -364,6 +355,11 @@ def close_paper_trade_by_signal(signal, result_type, exit_price):
     )
 
 
+
+MIN_START_BALANCE_USDT = 5
+MAX_START_BALANCE_USDT = 1000
+
+
 def reset_trade_stats():
     """Reset Paper Trading history while preserving current trade settings."""
     state = get_state()
@@ -387,17 +383,14 @@ def reset_trade_stats():
 
 def set_trade_balance(value):
     """Set Paper Trading starting balance and reset Paper Trading stats."""
-    raw_value = safe_float(value, -1)
-
-    # سرمایه باید عدد صحیح باشد تا خطای تایپی مثل 50.5 وارد آمار نشود.
     try:
         text_value = str(value).strip()
         if not text_value.isdigit():
             return False, "❌ فرمت درست: سرمایه ترید 50"
+        balance = int(text_value)
     except Exception:
         return False, "❌ فرمت درست: سرمایه ترید 50"
 
-    balance = int(raw_value)
     if balance < MIN_START_BALANCE_USDT or balance > MAX_START_BALANCE_USDT:
         return False, f"❌ سرمایه ترید باید بین {MIN_START_BALANCE_USDT} تا {MAX_START_BALANCE_USDT} دلار باشد."
 
@@ -417,7 +410,6 @@ def set_trade_balance(value):
         "📊 آمار ترید ریست شد و از نو شروع شد.\n"
         f"💰 بالانس فعلی Paper: {balance}$"
     )
-
 
 def set_trade_enabled(enabled):
     state = get_state()
