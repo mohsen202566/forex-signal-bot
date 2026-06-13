@@ -6,7 +6,7 @@ Simple Classic Balanced Soft Engine + Smart TP/SL
 - برگشت به ربات ساده کلاسیک اولیه
 - بدون Setup / Watchlist / Pending
 - بدون Power2/Power3/Power6 در ورود و بدون تاییدهای کندلی سنگین
-- تحلیل اصلی فقط با EMA / RSI / MACD / MACD Histogram و زیرشاخه‌هایشان؛ ADX فقط کمک‌کننده سبک است
+- تحلیل اصلی با EMA / RSI / MACD / MACD Histogram؛ VWAP نرم ±4، ADX زیر 20 رد، روند کلی بازار ±3
 - ورود مستقیم، ساده، قابل دیباگ، شبیه ربات اولیه
 - TP/SL هوشمند با سطوح 5M + 15M + 30M، Strength Score، ATR و پروفایل نوسان هر کوین
 - حداقل فاصله SL همیشه ATR × 1.25 است
@@ -240,7 +240,7 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         "1H": 18,
         "30M": 12,
         "15M": 15,
-        "5M": 7,
+        "5M": 10,
     }
     for tf, trend in trends.items():
         w = ema_tf_weights.get(tf, 0)
@@ -274,37 +274,30 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         short_reasons.append("15M: قیمت پایین EMA20؛ ورود شورت با روند کوتاه‌مدت")
 
     if last_5["close"] > last_5["ema20"]:
-        long_score += 5
+        long_score += 8
         long_reasons.append("5M: قیمت بالای EMA20؛ تایید سریع لانگ")
     elif last_5["close"] < last_5["ema20"]:
-        short_score += 5
+        short_score += 8
         short_reasons.append("5M: قیمت پایین EMA20؛ تایید سریع شورت")
 
-    # Late-entry control:
-    # 1.60-1.80 ATR is allowed but heavily penalized.
-    # >=1.80 ATR is considered too late for scalp-style direct entry and is blocked.
-    too_late_entry = False
-    if dist_15 <= 0.85:
-        long_score += 6
-        short_score += 6
-        long_reasons.append(f"فاصله از EMA20 مناسب است: {round(dist_15, 2)} ATR")
-        short_reasons.append(f"فاصله از EMA20 مناسب است: {round(dist_15, 2)} ATR")
-    elif dist_15 <= 1.25:
-        long_score -= 3
+    # Simple overall market trend bias: small soft effect only (±3).
+    # Based on higher-timeframe EMA direction; it should not hard-filter signals.
+    bullish_context = len([tf for tf in ["4H", "1H", "30M"] if trends.get(tf) == "bullish"])
+    bearish_context = len([tf for tf in ["4H", "1H", "30M"] if trends.get(tf) == "bearish"])
+    if bullish_context > bearish_context:
+        long_score += 3
         short_score -= 3
-        long_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
-        short_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
-    elif dist_15 < 1.80:
-        long_score -= 18
-        short_score -= 18
-        long_reasons.append(f"فاصله از EMA20 زیاد است؛ ورود دیر جریمه شد: {round(dist_15, 2)} ATR")
-        short_reasons.append(f"فاصله از EMA20 زیاد است؛ ورود دیر جریمه شد: {round(dist_15, 2)} ATR")
-    else:
-        too_late_entry = True
-        long_score = min(long_score, 69)
-        short_score = min(short_score, 69)
-        long_reasons.append(f"رد: فاصله از EMA20 خیلی زیاد است؛ ورود دیر: {round(dist_15, 2)} ATR")
-        short_reasons.append(f"رد: فاصله از EMA20 خیلی زیاد است؛ ورود دیر: {round(dist_15, 2)} ATR")
+        long_reasons.append("روند کلی بازار کمی به نفع لانگ است (+3)")
+        short_reasons.append("روند کلی بازار کمی خلاف شورت است (-3)")
+    elif bearish_context > bullish_context:
+        short_score += 3
+        long_score -= 3
+        short_reasons.append("روند کلی بازار کمی به نفع شورت است (+3)")
+        long_reasons.append("روند کلی بازار کمی خلاف لانگ است (-3)")
+
+    # Late-entry control removed by request.
+    # Distance from EMA20 is still calculated and returned for display,
+    # but it no longer adds score, subtracts score, or blocks direct entry.
 
     # 2) RSI layer: momentum zone + slope.
     rsi_15 = float(last_15["rsi"])
@@ -337,10 +330,10 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         short_reasons.append("30M: RSI پایین 50 است")
 
     if rsi_5 > rsi_5_prev:
-        long_score += 3
+        long_score += 6
         long_reasons.append("5M: RSI کوتاه‌مدت رو به بالا است")
     elif rsi_5 < rsi_5_prev:
-        short_score += 3
+        short_score += 6
         short_reasons.append("5M: RSI کوتاه‌مدت رو به پایین است")
 
     # 3) MACD layer: MACD cross + histogram direction/sign.
@@ -377,14 +370,22 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         short_reasons.append("30M: MACD با شورت هم‌جهت است")
 
     if last_5["macd"] > last_5["macd_signal"]:
-        long_score += 4
+        long_score += 7
         long_reasons.append("5M: MACD سریع با لانگ هم‌جهت است")
     elif last_5["macd"] < last_5["macd_signal"]:
-        short_score += 4
+        short_score += 7
         short_reasons.append("5M: MACD سریع با شورت هم‌جهت است")
 
-    # 4) ADX only as a small trend-strength helper. No VWAP/Volume entry scoring here.
-    if adx_15 >= 35:
+    # 4) ADX rule by request:
+    # Below 20 = hard reject. Above 20 = accepted. Above 25 = positive score.
+    adx_rejected = False
+    if adx_15 < 20:
+        adx_rejected = True
+        long_score = min(long_score, 69)
+        short_score = min(short_score, 69)
+        long_reasons.append("رد: ADX 15M زیر 20 است")
+        short_reasons.append("رد: ADX 15M زیر 20 است")
+    elif adx_15 >= 35:
         long_score += 8
         short_score += 8
         long_reasons.append("ADX 15M قوی است")
@@ -392,22 +393,27 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
     elif adx_15 >= 25:
         long_score += 5
         short_score += 5
-        long_reasons.append("ADX 15M مناسب است")
-        short_reasons.append("ADX 15M مناسب است")
-    elif adx_15 >= 18:
-        long_score += 2
-        short_score += 2
-        long_reasons.append("ADX 15M قابل قبول است")
-        short_reasons.append("ADX 15M قابل قبول است")
+        long_reasons.append("ADX 15M بالای 25؛ امتیاز مثبت")
+        short_reasons.append("ADX 15M بالای 25؛ امتیاز مثبت")
     else:
-        long_score -= 6
-        short_score -= 6
-        long_reasons.append("ADX 15M ضعیف است؛ امتیاز کم شد")
-        short_reasons.append("ADX 15M ضعیف است؛ امتیاز کم شد")
+        long_reasons.append("ADX 15M بالای 20؛ قابل قبول بدون امتیاز اضافه")
+        short_reasons.append("ADX 15M بالای 20؛ قابل قبول بدون امتیاز اضافه")
 
-    # Validity should stay simple, but direct entries that are too far from EMA20 are blocked.
-    long_valid = not too_late_entry
-    short_valid = not too_late_entry
+    # VWAP soft scoring by request: same direction +4, opposite direction -4.
+    if last_15["close"] > last_15["vwap"]:
+        long_score += 4
+        short_score -= 4
+        long_reasons.append("15M: قیمت بالای VWAP؛ +4 برای لانگ")
+        short_reasons.append("15M: قیمت بالای VWAP؛ -4 برای شورت")
+    elif last_15["close"] < last_15["vwap"]:
+        short_score += 4
+        long_score -= 4
+        short_reasons.append("15M: قیمت پایین VWAP؛ +4 برای شورت")
+        long_reasons.append("15M: قیمت پایین VWAP؛ -4 برای لانگ")
+
+    # Validity: ADX below 20 is the only hard rejection in this layer.
+    long_valid = not adx_rejected
+    short_valid = not adx_rejected
 
     buy2, sell2 = buy_sell_power(df_5m, 2)
     buy3, sell3 = buy_sell_power(df_5m, 3)
