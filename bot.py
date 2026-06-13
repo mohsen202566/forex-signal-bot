@@ -888,7 +888,12 @@ def handle_message(message):
     send_analysis(message, symbol)
 
 
-if os.getenv("AUTO_SIGNAL_ENABLED", "1") == "1":
+def _env_bool(name, default="1"):
+    value = str(os.getenv(name, default)).strip().lower()
+    return value in ["1", "true", "yes", "on", "enable", "enabled"]
+
+
+if _env_bool("AUTO_SIGNAL_ENABLED", "1"):
     threading.Thread(target=auto_signal_loop, daemon=True).start()
 
 threading.Thread(target=signal_tracking_loop, daemon=True).start()
