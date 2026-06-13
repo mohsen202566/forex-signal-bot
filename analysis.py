@@ -5,9 +5,9 @@ Simple Classic Balanced Soft Engine + Smart TP/SL
 هدف این نسخه:
 - برگشت به ربات ساده کلاسیک اولیه
 - بدون Setup / Watchlist / Pending
-- بدون Power2/Power3/Power6 و بدون تاییدهای کندلی سنگین
-- تحلیل فقط با EMA / RSI / MACD / MACD Histogram / ADX / VWAP؛ برای شورت منطق قبلی حفظ شده و برای لانگ VWAP/1H سخت‌تر شده است
-- ورود مستقیم، ساده، قابل دیباگ و نرم‌تر از نسخه خشک
+- بدون Power2/Power3/Power6 در ورود و بدون تاییدهای کندلی سنگین
+- تحلیل اصلی فقط با EMA / RSI / MACD / MACD Histogram و زیرشاخه‌هایشان؛ ADX فقط کمک‌کننده سبک است
+- ورود مستقیم، ساده، قابل دیباگ، شبیه ربات اولیه
 - TP/SL هوشمند با سطوح 5M + 15M + 30M، Strength Score، ATR و پروفایل نوسان هر کوین
 - حداقل فاصله SL همیشه ATR × 1.25 است
 """
@@ -199,8 +199,15 @@ def buy_sell_power(df: pd.DataFrame, candles: int = 20) -> Tuple[float, float]:
 
 
 def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, df_30m: pd.DataFrame, df_15m: pd.DataFrame, df_5m: pd.DataFrame) -> Dict:
-    long_score = 0
-    short_score = 0
+    """Classic first-bot style engine.
+
+    Core entry logic is intentionally focused on EMA / RSI / MACD only.
+    VWAP, Volume and Buy/Sell Power are kept only for output/backward compatibility
+    and do not create or block entries in this simple version.
+    ADX is only a small trend-strength helper, not the main signal source.
+    """
+    long_score = 0.0
+    short_score = 0.0
     long_reasons: List[str] = []
     short_reasons: List[str] = []
     confirmations_long = 0
@@ -211,7 +218,7 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         "1H": ema_direction(df_1h),
         "30M": ema_direction(df_30m),
         "15M": ema_direction(df_15m),
-        "5M": ema_direction(df_5m),  # نمایشی/کمکی؛ موتور ورود نیست
+        "5M": ema_direction(df_5m),
     }
 
     last_4h = df_4h.iloc[-1]
@@ -220,80 +227,141 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
     last_15 = df_15m.iloc[-1]
     prev_15 = df_15m.iloc[-2]
     last_5 = df_5m.iloc[-1]
+    prev_5 = df_5m.iloc[-2]
 
     adx_15 = float(last_15["adx"])
     dist_15 = distance_from_ema20_atr(df_15m)
     vol_status, vol_ratio = volume_quality(df_15m)
 
-    # 1) Direction: EMA50/EMA200 on 4H and 1H
-    if trends["4H"] == "bullish":
-        long_score += 12
-        confirmations_long += 1
-        long_reasons.append("4H: EMA50 بالای EMA200؛ جهت کلی صعودی")
-    elif trends["4H"] == "bearish":
-        short_score += 12
-        confirmations_short += 1
-        short_reasons.append("4H: EMA50 پایین EMA200؛ جهت کلی نزولی")
+    # 1) EMA multi-timeframe trend: the main direction layer.
+    # This is the closest part to the first/simple bot idea: EMA50/EMA200 trend + EMA20 position.
+    ema_tf_weights = {
+        "4H": 10,
+        "1H": 18,
+        "30M": 12,
+        "15M": 15,
+        "5M": 7,
+    }
+    for tf, trend in trends.items():
+        w = ema_tf_weights.get(tf, 0)
+        if trend == "bullish":
+            long_score += w
+            confirmations_long += 1 if tf in ["1H", "30M", "15M"] else 0
+            long_reasons.append(f"{tf}: EMA50 بالای EMA200؛ تایید روند لانگ")
+        elif trend == "bearish":
+            short_score += w
+            confirmations_short += 1 if tf in ["1H", "30M", "15M"] else 0
+            short_reasons.append(f"{tf}: EMA50 پایین EMA200؛ تایید روند شورت")
 
-    if trends["1H"] == "bullish":
-        long_score += 20
-        confirmations_long += 1
-        long_reasons.append("1H: EMA50 بالای EMA200؛ جهت اصلی لانگ")
-    elif trends["1H"] == "bearish":
-        short_score += 20
-        confirmations_short += 1
-        short_reasons.append("1H: EMA50 پایین EMA200؛ جهت اصلی شورت")
-
-    # 30M as medium confirmation
-    if trends["30M"] == "bullish":
+    # EMA stack on 15M: EMA20/50/200 alignment is stronger than simple EMA50/200.
+    if last_15["ema20"] > last_15["ema50"] > last_15["ema200"]:
         long_score += 10
         confirmations_long += 1
-        long_reasons.append("30M: جهت میان‌مدت لانگ را تایید می‌کند")
-    elif trends["30M"] == "bearish":
+        long_reasons.append("15M: چینش EMA20/50/200 کاملاً صعودی است")
+    elif last_15["ema20"] < last_15["ema50"] < last_15["ema200"]:
         short_score += 10
         confirmations_short += 1
-        short_reasons.append("30M: جهت میان‌مدت شورت را تایید می‌کند")
+        short_reasons.append("15M: چینش EMA20/50/200 کاملاً نزولی است")
 
-    # 2) Momentum: RSI 15M and 30M
-    if 52 <= float(last_15["rsi"]) <= 68:
+    # EMA20 entry position on 15M and 5M.
+    if last_15["close"] > last_15["ema20"]:
         long_score += 12
         confirmations_long += 1
-        long_reasons.append("15M: RSI مومنتوم لانگ مناسب دارد")
-    elif 32 <= float(last_15["rsi"]) <= 48:
+        long_reasons.append("15M: قیمت بالای EMA20؛ ورود لانگ با روند کوتاه‌مدت")
+    elif last_15["close"] < last_15["ema20"]:
         short_score += 12
         confirmations_short += 1
-        short_reasons.append("15M: RSI مومنتوم شورت مناسب دارد")
+        short_reasons.append("15M: قیمت پایین EMA20؛ ورود شورت با روند کوتاه‌مدت")
 
-    if float(last_15["rsi"]) > float(prev_15["rsi"]):
-        long_score += 4
-        long_reasons.append("15M: شیب RSI رو به بالا است")
-    elif float(last_15["rsi"]) < float(prev_15["rsi"]):
-        short_score += 4
-        short_reasons.append("15M: شیب RSI رو به پایین است")
+    if last_5["close"] > last_5["ema20"]:
+        long_score += 5
+        long_reasons.append("5M: قیمت بالای EMA20؛ تایید سریع لانگ")
+    elif last_5["close"] < last_5["ema20"]:
+        short_score += 5
+        short_reasons.append("5M: قیمت پایین EMA20؛ تایید سریع شورت")
 
-    if float(last_30["rsi"]) >= 50:
+    # Avoid late entries, but keep it soft so the bot does not become dry.
+    if dist_15 <= 0.85:
+        long_score += 6
+        short_score += 6
+        long_reasons.append(f"فاصله از EMA20 مناسب است: {round(dist_15, 2)} ATR")
+        short_reasons.append(f"فاصله از EMA20 مناسب است: {round(dist_15, 2)} ATR")
+    elif dist_15 <= 1.25:
+        long_score -= 3
+        short_score -= 3
+        long_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
+        short_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
+    elif dist_15 <= 1.60:
+        long_score -= 8
+        short_score -= 8
+        long_reasons.append(f"فاصله از EMA20 زیاد است؛ احتمال ورود دیر: {round(dist_15, 2)} ATR")
+        short_reasons.append(f"فاصله از EMA20 زیاد است؛ احتمال ورود دیر: {round(dist_15, 2)} ATR")
+    else:
+        long_score -= 14
+        short_score -= 14
+        long_reasons.append(f"فاصله از EMA20 خیلی زیاد است؛ ریسک ورود دیر: {round(dist_15, 2)} ATR")
+        short_reasons.append(f"فاصله از EMA20 خیلی زیاد است؛ ریسک ورود دیر: {round(dist_15, 2)} ATR")
+
+    # 2) RSI layer: momentum zone + slope.
+    rsi_15 = float(last_15["rsi"])
+    rsi_15_prev = float(prev_15["rsi"])
+    rsi_30 = float(last_30["rsi"])
+    rsi_5 = float(last_5["rsi"])
+    rsi_5_prev = float(prev_5["rsi"])
+
+    if 50 <= rsi_15 <= 68:
+        long_score += 12
+        confirmations_long += 1
+        long_reasons.append("15M: RSI در محدوده سالم لانگ است")
+    elif 32 <= rsi_15 <= 50:
+        short_score += 12
+        confirmations_short += 1
+        short_reasons.append("15M: RSI در محدوده سالم شورت است")
+
+    if rsi_15 > rsi_15_prev:
+        long_score += 6
+        long_reasons.append("15M: شیب RSI صعودی است")
+    elif rsi_15 < rsi_15_prev:
+        short_score += 6
+        short_reasons.append("15M: شیب RSI نزولی است")
+
+    if rsi_30 >= 50:
         long_score += 4
         long_reasons.append("30M: RSI بالای 50 است")
-    elif float(last_30["rsi"]) <= 50:
+    else:
         short_score += 4
         short_reasons.append("30M: RSI پایین 50 است")
 
-    # 3) Trend confirmation: MACD + Histogram on 15M / 30M
+    if rsi_5 > rsi_5_prev:
+        long_score += 3
+        long_reasons.append("5M: RSI کوتاه‌مدت رو به بالا است")
+    elif rsi_5 < rsi_5_prev:
+        short_score += 3
+        short_reasons.append("5M: RSI کوتاه‌مدت رو به پایین است")
+
+    # 3) MACD layer: MACD cross + histogram direction/sign.
     if last_15["macd"] > last_15["macd_signal"]:
         long_score += 14
         confirmations_long += 1
-        long_reasons.append("15M: MACD لانگ را تایید می‌کند")
+        long_reasons.append("15M: MACD بالای Signal؛ تایید لانگ")
     elif last_15["macd"] < last_15["macd_signal"]:
         short_score += 14
         confirmations_short += 1
-        short_reasons.append("15M: MACD شورت را تایید می‌کند")
+        short_reasons.append("15M: MACD پایین Signal؛ تایید شورت")
+
+    if last_15["macd_hist"] > 0:
+        long_score += 6
+        long_reasons.append("15M: MACD Histogram مثبت است")
+    elif last_15["macd_hist"] < 0:
+        short_score += 6
+        short_reasons.append("15M: MACD Histogram منفی است")
 
     if last_15["macd_hist"] > prev_15["macd_hist"]:
-        long_score += 8
+        long_score += 7
         confirmations_long += 1
         long_reasons.append("15M: MACD Histogram در حال تقویت صعودی است")
     elif last_15["macd_hist"] < prev_15["macd_hist"]:
-        short_score += 8
+        short_score += 7
         confirmations_short += 1
         short_reasons.append("15M: MACD Histogram در حال تقویت نزولی است")
 
@@ -304,103 +372,38 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         short_score += 7
         short_reasons.append("30M: MACD با شورت هم‌جهت است")
 
-    # 4) Entry position: EMA20 + distance from EMA20
-    if last_15["close"] > last_15["ema20"]:
-        long_score += 12
-        confirmations_long += 1
-        long_reasons.append("15M: قیمت بالای EMA20؛ موقعیت ورود لانگ")
-    elif last_15["close"] < last_15["ema20"]:
-        short_score += 12
-        confirmations_short += 1
-        short_reasons.append("15M: قیمت پایین EMA20؛ موقعیت ورود شورت")
+    if last_5["macd"] > last_5["macd_signal"]:
+        long_score += 4
+        long_reasons.append("5M: MACD سریع با لانگ هم‌جهت است")
+    elif last_5["macd"] < last_5["macd_signal"]:
+        short_score += 4
+        short_reasons.append("5M: MACD سریع با شورت هم‌جهت است")
 
-    # جلوگیری از ورود دیر: نرم و امتیازی، نه فیلتر خشک
-    if dist_15 <= 0.85:
-        long_score += 6
-        short_score += 6
-        long_reasons.append(f"فاصله از EMA20 مناسب است: {round(dist_15, 2)} ATR")
-        short_reasons.append(f"فاصله از EMA20 مناسب است: {round(dist_15, 2)} ATR")
-    elif dist_15 <= 1.25:
-        long_score -= 3.6
-        short_score -= 3.6
-        long_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
-        short_reasons.append(f"فاصله از EMA20 کمی زیاد است: {round(dist_15, 2)} ATR")
-    elif dist_15 <= 1.60:
-        long_score -= 9
-        short_score -= 9
-        long_reasons.append(f"فاصله از EMA20 زیاد است؛ جریمه ورود دیر: {round(dist_15, 2)} ATR")
-        short_reasons.append(f"فاصله از EMA20 زیاد است؛ جریمه ورود دیر: {round(dist_15, 2)} ATR")
-    else:
-        long_score -= 16.2
-        short_score -= 16.2
-        long_reasons.append(f"فاصله از EMA20 خیلی زیاد است؛ جریمه سنگین: {round(dist_15, 2)} ATR")
-        short_reasons.append(f"فاصله از EMA20 خیلی زیاد است؛ جریمه سنگین: {round(dist_15, 2)} ATR")
-
-    # 5) Final confirmation: ADX + VWAP
-    # ADX تنها فیلتر سخت این لایه است؛ بالای 20 به صورت پله‌ای امتیاز می‌دهد.
+    # 4) ADX only as a small trend-strength helper. No VWAP/Volume entry scoring here.
     if adx_15 >= 35:
-        long_score += 15
-        short_score += 15
-        long_reasons.append("ADX 15M بالای 35؛ قدرت روند قوی")
-        short_reasons.append("ADX 15M بالای 35؛ قدرت روند قوی")
+        long_score += 8
+        short_score += 8
+        long_reasons.append("ADX 15M قوی است")
+        short_reasons.append("ADX 15M قوی است")
     elif adx_15 >= 25:
-        long_score += 10
-        short_score += 10
-        long_reasons.append("ADX 15M بالای 25؛ قدرت روند خوب")
-        short_reasons.append("ADX 15M بالای 25؛ قدرت روند خوب")
-    elif adx_15 >= ADX_HARD_MIN:
         long_score += 5
         short_score += 5
-        long_reasons.append("ADX 15M بالای 20؛ قدرت روند قابل قبول")
-        short_reasons.append("ADX 15M بالای 20؛ قدرت روند قابل قبول")
+        long_reasons.append("ADX 15M مناسب است")
+        short_reasons.append("ADX 15M مناسب است")
+    elif adx_15 >= 18:
+        long_score += 2
+        short_score += 2
+        long_reasons.append("ADX 15M قابل قبول است")
+        short_reasons.append("ADX 15M قابل قبول است")
     else:
-        long_score = min(long_score, 69)
-        short_score = min(short_score, 69)
-        long_reasons.append("رد: ADX 15M زیر 20 است")
-        short_reasons.append("رد: ADX 15M زیر 20 است")
+        long_score -= 6
+        short_score -= 6
+        long_reasons.append("ADX 15M ضعیف است؛ امتیاز کم شد")
+        short_reasons.append("ADX 15M ضعیف است؛ امتیاز کم شد")
 
-    # VWAP:
-    # SHORT logic remains unchanged.
-    # LONG is stricter now: if price is below VWAP, LONG is blocked instead of only receiving a small penalty.
-    long_vwap_ok = True
-    if last_15["close"] > last_15["vwap"]:
-        long_score += 8
-        confirmations_long += 1
-        long_reasons.append("15M: قیمت بالای VWAP؛ تایید نهایی لانگ")
-        short_score -= 2.7
-    elif last_15["close"] < last_15["vwap"]:
-        short_score += 8
-        confirmations_short += 1
-        short_reasons.append("15M: قیمت پایین VWAP؛ تایید نهایی شورت")
-        long_vwap_ok = False
-        long_reasons.append("رد لانگ: قیمت زیر VWAP است و VWAP خلاف جهت لانگ قرار دارد")
-
-    # Volume is soft and simple
-    if vol_status == "high_volume":
-        long_score += 4
-        short_score += 4
-        long_reasons.append(f"حجم 15M قوی است؛ نسبت حجم {round(vol_ratio, 2)}")
-        short_reasons.append(f"حجم 15M قوی است؛ نسبت حجم {round(vol_ratio, 2)}")
-    elif vol_status == "weak_volume":
-        long_score -= 2.7
-        short_score -= 2.7
-        long_reasons.append("حجم 15M ضعیف است؛ امتیاز محافظه‌کار شد")
-        short_reasons.append("حجم 15M ضعیف است؛ امتیاز محافظه‌کار شد")
-
-    # Validity:
-    # SHORT remains unchanged: ADX is the only hard validity filter for shorts.
-    # LONG is stricter: ADX + same-direction VWAP + stronger 1H confirmation.
-    long_1h_strict_ok = (
-        trends["1H"] == "bullish"
-        and float(last_1h["close"]) > float(last_1h["ema20"])
-        and float(last_1h["close"]) > float(last_1h["ema50"])
-    )
-
-    if not long_1h_strict_ok:
-        long_reasons.append("رد لانگ: تایید 1H برای لانگ کافی نیست")
-
-    long_valid = adx_15 >= ADX_HARD_MIN and long_vwap_ok and long_1h_strict_ok
-    short_valid = adx_15 >= ADX_HARD_MIN
+    # Validity should stay simple: score will make the final decision.
+    long_valid = True
+    short_valid = True
 
     buy2, sell2 = buy_sell_power(df_5m, 2)
     buy3, sell3 = buy_sell_power(df_5m, 3)
@@ -427,7 +430,6 @@ def simple_classic_score(symbol: str, df_4h: pd.DataFrame, df_1h: pd.DataFrame, 
         "short_valid": short_valid,
         "adx_15": adx_15,
     }
-
 
 # ---------- Smart TP/SL ----------
 def find_swing_levels(df: pd.DataFrame, timeframe: str, lookback: int = LEVEL_LOOKBACK, window: int = SWING_WINDOW) -> List[Dict]:
