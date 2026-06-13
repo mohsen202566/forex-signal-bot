@@ -76,12 +76,12 @@ def is_high_quality_signal(result):
     except Exception:
         adx = 0.0
 
-    # ADX balance for auto signals:
-    # below 18 is too weak; 18-20 is allowed only with a score penalty.
-    if adx < 20:
+    # Simple-core scanner: ADX is only a light helper now, not a heavy filter.
+    # Very weak trend is rejected; borderline trend only gets a small score penalty.
+    if adx < 18:
         return False
-    if adx < 22:
-        score -= 8
+    if adx < 20:
+        score -= 4
 
     if score < int(AUTO_SIGNAL_SCORE):
         return False
