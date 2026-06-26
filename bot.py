@@ -174,12 +174,22 @@ class Bot:
             except Exception as exc:
                 print(f"telegram update handle error: {exc}")
 
+    def _is_allowed_chat(self, message_or_callback_message: dict[str, Any]) -> bool:
+        if not self.telegram.chat_id:
+            return True
+        chat = message_or_callback_message.get("chat") or {}
+        return str(chat.get("id", "")) == str(self.telegram.chat_id)
+
     def _handle_message_update(self, message: dict[str, Any]) -> None:
+        if not self._is_allowed_chat(message):
+            return
         text = str(message.get("text") or "").strip()
         if not text:
             return
-        reply = self.router.handle(text)
-        buttons = main_buttons() if text in {"ترید", "وضعیت", "پنل", "/start"} else None
+        normalized_text = "ترید" if text in {"/start", "start", "پنل"} else text
+        print(f"telegram command received: {normalized_text}")
+        reply = self.router.handle(normalized_text)
+        buttons = main_buttons() if normalized_text in {"ترید", "وضعیت"} else None
         msg_id = message.get("message_id")
         if msg_id:
             # پاسخ مستقیم به دستور کاربر؛ برای پنل دکمه هم می‌فرستیم.
@@ -191,10 +201,25 @@ class Bot:
         data = str(callback.get("data") or "")
         callback_id = str(callback.get("id") or "")
         self.telegram.answer_callback(callback_id)
-        reply = self.router.handle_callback(data)
+        if not self._is_allowed_chat(callback.get("message") or {}):
+            return
+        print(f"telegram callback received: {data}")
+        if hasattr(self.router, "handle_callback"):
+            reply = self.router.handle_callback(data)
+        else:
+            callback_to_command = {
+                "panel": "ترید",
+                "trade_on": "ترید فعال",
+                "trade_off": "ترید خاموش",
+                "stats": "آمار",
+                "positions": "پوزیشن",
+                "coins": "کوین‌ها",
+                "help": "راهنما",
+            }
+            reply = self.router.handle(callback_to_command.get(data, "ترید"))
         message = callback.get("message") or {}
         msg_id = message.get("message_id")
-        buttons = main_buttons() if data in {"trade_on", "trade_off", "stats", "positions", "coins", "help"} else None
+        buttons = main_buttons() if data in {"panel", "trade_on", "trade_off", "stats", "positions", "coins", "help"} else None
         if msg_id:
             self.telegram._send_message(text=reply, reply_to_message_id=int(msg_id), buttons=buttons)
         else:
