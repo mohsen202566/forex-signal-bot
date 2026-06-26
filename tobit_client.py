@@ -9,7 +9,7 @@ Locked responsibility:
 - Opens one market position using the configured margin amount with TP/SL attached.
 - Rounds quantity by quantity step and TP/SL by tick size.
 - Verifies the real margin used after quantity rounding is close to configured margin.
-- After every order attempt, waits 70 seconds and then verifies whether the position exists.
+- After real order submission, returns immediately; bot slot monitor verifies after 70 seconds.
 - Does not analyze markets, render Telegram messages, manage learning, decide AI entries,
   calculate TP/SL, or own slot accounting.
 
@@ -46,7 +46,7 @@ class ToobitConfig:
     base_url: str
     recv_window: int = 5000
     timeout_seconds: int = 12
-    verify_after_error_seconds: int = 70
+    verify_after_error_seconds: int = 70  # backward-compatible env; slot monitor owns the 70s confirmation
     margin_tolerance_pct: float = 1.0
 
     @classmethod
@@ -147,6 +147,103 @@ class ToobitClient:
         self.param_tp = os.getenv("TOBIT_PARAM_TP", "takeProfit")
         self.param_sl = os.getenv("TOBIT_PARAM_SL", "stopLoss")
         self.param_quantity = os.getenv("TOBIT_PARAM_QUANTITY", "quantity")
+
+        # Optional result/history endpoints. Keep them env-configurable because
+        # Toobit futures API variants may expose different paths/field names.
+        self.path_closed_pnl = os.getenv("TOBIT_PATH_CLOSED_PNL", "/api/v1/futures/income")
+        self.path_trade_history = os.getenv("TOBIT_PATH_TRADE_HISTORY", "/api/v1/futures/userTrades")
+        self.closed_result_lookback_ms = int(os.getenv("TOBIT_CLOSED_RESULT_LOOKBACK_MS", "86400000"))
+
+    def account_panel(self) -> dict[str, Any]:
+        """Return live Toobit account data for the Telegram trade panel.
+
+        The panel must not invent balance/margin values. If a field cannot be
+        read, we return a clear error field and let the UI show it transparently.
+        """
+        panel: dict[str, Any] = {"connected": True}
+        try:
+            wallet = self.get_wallet_margin_usdt()
+            panel.update({
+                "balance": wallet,
+                "wallet_margin_usdt": wallet,
+                "free_margin": wallet,
+            })
+        except Exception as exc:
+            panel.update({"connected": False, "balance_error": str(exc)})
+
+        try:
+            positions = self.get_open_positions()
+            panel["open_positions"] = len(positions)
+            panel["positions"] = [p.raw for p in positions]
+            panel["floating_pnl"] = sum(float(p.unrealized_pnl) for p in positions)
+        except Exception as exc:
+            panel["positions_error"] = str(exc)
+
+        return panel
+
+    def position_exists(self, symbol: str, side: Direction | None = None) -> dict[str, Any]:
+        """Compatibility method used by position_monitor.py after 70 seconds."""
+        symbol = symbol.upper()
+        if side is not None:
+            _validate_direction(side)
+        for position in self.get_open_positions(symbol):
+            if side and position.side != side:
+                continue
+            return {
+                "exists": True,
+                "position_id": _extract_position_id(position.raw),
+                "position": position.raw,
+                "entry_price": position.entry_price,
+                "quantity": position.quantity,
+                "unrealized_pnl": position.unrealized_pnl,
+            }
+        return {"exists": False}
+
+    def closed_result(self, symbol: str, side: Direction, position_id: str | None = None) -> dict[str, Any]:
+        """Return real closed position result from Toobit, never from OKX.
+
+        If the position is still open, returns ``closed=False``. If the position
+        is no longer open, this method tries configurable Toobit history/PnL
+        endpoints. If those endpoints are not available for the account/API
+        variant, the method returns ``closed=False`` with a clear error instead
+        of fabricating a TP/SL result.
+        """
+        symbol = symbol.upper()
+        _validate_direction(side)
+        if self._verify_position(symbol, side) is not None:
+            return {"closed": False, "reason": "POSITION_STILL_OPEN"}
+
+        history_errors: list[str] = []
+        for path in (self.path_closed_pnl, self.path_trade_history):
+            try:
+                item = self._latest_closed_item(symbol=symbol, side=side, path=path, position_id=position_id)
+            except Exception as exc:
+                history_errors.append(f"{path}: {exc}")
+                continue
+            if not item:
+                continue
+            net_pnl = _first_decimal(item, "net_pnl", "netPnl", "realizedPnl", "realizedProfit", "income", "pnl")
+            price = _first_decimal(item, "price", "avgPrice", "closePrice", "fillPrice")
+            net = float(net_pnl or Decimal("0"))
+            if net > 0:
+                result = "TP"
+            elif net < 0:
+                result = "SL"
+            else:
+                result = "EXPIRED"
+            return {
+                "closed": True,
+                "result": result,
+                "net_pnl": net,
+                "price": float(price) if price is not None else None,
+                "raw": item,
+            }
+
+        return {
+            "closed": False,
+            "error": "CLOSED_HISTORY_NOT_AVAILABLE",
+            "history_errors": history_errors,
+        }
 
     def get_wallet_margin_usdt(self) -> float:
         payload = self._request("GET", self.path_balance, signed=True)
@@ -290,24 +387,8 @@ class ToobitClient:
         try:
             raw = self._request("POST", self.path_order, params=params, signed=True)
         except Exception as exc:
-            position = self._verify_position_after_order(symbol, direction)
-            if position is not None:
-                return OpenOrderResult(
-                    symbol=symbol,
-                    direction=direction,
-                    requested_margin_usdt=float(margin_usdt),
-                    actual_margin_usdt=float(actual_margin),
-                    leverage=int(leverage),
-                    quantity=float(quantity_decimal),
-                    entry_price=float(entry_price),
-                    tp_price=float(tp_decimal),
-                    sl_price=float(sl_decimal),
-                    opened=True,
-                    order_id=None,
-                    position=position,
-                    reason=f"سفارش خطا داد ولی بعد از تایید {self.config.verify_after_error_seconds} ثانیه‌ای پوزیشن باز پیدا شد: {exc}",
-                    raw=None,
-                )
+            # No synchronous 70s wait here. The bot already reserved a pending slot
+            # and position_monitor.py must confirm/release it after 70 seconds.
             return OpenOrderResult(
                 symbol=symbol,
                 direction=direction,
@@ -321,12 +402,11 @@ class ToobitClient:
                 opened=False,
                 order_id=None,
                 position=None,
-                reason=f"سفارش خطا داد و بعد از تایید {self.config.verify_after_error_seconds} ثانیه‌ای پوزیشن باز نشد: {exc}",
+                reason=f"ارسال سفارش توبیت ناموفق بود: {exc}",
                 raw=None,
             )
 
         order_id = _extract_order_id(raw)
-        position = self._verify_position_after_order(symbol, direction)
         return OpenOrderResult(
             symbol=symbol,
             direction=direction,
@@ -337,10 +417,13 @@ class ToobitClient:
             entry_price=float(entry_price),
             tp_price=float(tp_decimal),
             sl_price=float(sl_decimal),
-            opened=position is not None,
+            # opened=True here means the market order request was accepted/submitted
+            # by the exchange client. The actual open position is verified later by
+            # position_monitor.py after TOBIT_OPEN_CONFIRM_SECONDS.
+            opened=True,
             order_id=order_id,
-            position=position,
-            reason=f"سفارش ارسال شد و بعد از تایید {self.config.verify_after_error_seconds} ثانیه‌ای وضعیت پوزیشن بررسی شد.",
+            position=None,
+            reason="سفارش REAL با TP/SL همزمان ارسال شد؛ تایید پوزیشن بعد از ۷۰ ثانیه با مانیتور انجام می‌شود.",
             raw=raw if isinstance(raw, dict) else {"response": raw},
         )
     def get_mark_price(self, symbol: str) -> float:
@@ -439,11 +522,41 @@ class ToobitClient:
         return None
 
     def _verify_position_after_order(self, symbol: str, direction: Direction) -> PositionInfo | None:
-        wait_seconds = max(0.0, float(self.config.verify_after_error_seconds))
-        if wait_seconds > 0:
-            time.sleep(wait_seconds)
+        # Backward-compatible helper. Do not sleep here; the bot-level slot monitor
+        # owns the 70-second confirmation cycle.
         return self._verify_position(symbol, direction)
 
+
+    def _latest_closed_item(self, *, symbol: str, side: Direction, path: str, position_id: str | None = None) -> dict[str, Any] | None:
+        params: dict[str, Any] = {"symbol": symbol.upper()}
+        now_ms = int(time.time() * 1000)
+        params.setdefault("startTime", now_ms - int(self.closed_result_lookback_ms))
+        params.setdefault("endTime", now_ms)
+        if position_id:
+            params["positionId"] = position_id
+        payload = self._request("GET", path, params=params, signed=True)
+        candidates: list[dict[str, Any]] = []
+        for item in _extract_dicts(payload):
+            item_symbol = str(item.get("symbol") or item.get("contractCode") or "").upper()
+            if item_symbol and item_symbol != symbol.upper():
+                continue
+            raw_side = str(item.get("side") or item.get("positionSide") or item.get("direction") or "").upper()
+            if raw_side in {"BUY", "LONG"}:
+                parsed_side = "LONG"
+            elif raw_side in {"SELL", "SHORT"}:
+                parsed_side = "SHORT"
+            else:
+                parsed_side = side
+            if parsed_side != side:
+                continue
+            if position_id:
+                raw_id = _extract_position_id(item)
+                if raw_id and raw_id != str(position_id):
+                    continue
+            candidates.append(item)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda x: int(_first_decimal(x, "time", "timestamp", "updateTime", "closeTime") or Decimal("0")))
 
     def _read_margin_mode(self, symbol: str) -> str:
         payload = self._request("GET", self.path_position_settings, params={"symbol": symbol.upper()}, signed=True)
@@ -672,6 +785,20 @@ def _round_price_to_tick(value: Decimal, tick: Decimal, direction: Direction, *,
 def _decimal_to_api(value: float | Decimal) -> str:
     decimal_value = Decimal(str(value)).normalize()
     return format(decimal_value, "f")
+
+
+def _extract_position_id(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        for key in ("positionId", "position_id", "posId", "id", "orderId", "order_id"):
+            value = payload.get(key)
+            if value not in (None, ""):
+                return str(value)
+    for item in _extract_dicts(payload):
+        for key in ("positionId", "position_id", "posId", "id", "orderId", "order_id"):
+            value = item.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return None
 
 
 def _extract_order_id(payload: Any) -> str | None:
