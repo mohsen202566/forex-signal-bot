@@ -433,8 +433,10 @@ class Bot:
             old_score = float(strongest.get("final_score", 0.0))
             can_replace = bool(plan.get("can_replace", True))
             if can_replace and new_score >= old_score + config.REPLACE_SIGNAL_MIN_IMPROVEMENT:
+                # سیگنال ضعیف‌تر فقط در state بسته/جایگزین می‌شود؛
+                # هیچ پیام نتیجه‌ای برای REPLACED ارسال نمی‌کنیم.
+                # خروجی تلگرام فقط برای TP / SL و خطای عملیاتی REAL مجاز است.
                 self.state.replace_signal(strongest["id"], {"replaced_by_score": new_score})
-                self.telegram.reply(strongest.get("telegram_message_id"), result_message(strongest, "REPLACED"))
             else:
                 return None
 
