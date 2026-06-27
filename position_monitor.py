@@ -3,8 +3,8 @@
 قفل‌های اجرایی:
 - سیگنال عادی با قیمت OKX مانیتور می‌شود.
 - سیگنال توبیت با Toobit تایید می‌شود.
-- نتیجه همیشه با reply روی پیام اصلی سیگنال اعلام می‌شود.
-- سیگنال عادی فقط ۳ دقیقه معتبر است، مگر قبل از آن TP/SL بخورد.
+- نتیجه TP/SL همیشه با reply روی پیام اصلی سیگنال اعلام می‌شود.
+- سیگنال عادی بعد از ۳ دقیقه پیام «منقضی شد» نمی‌دهد؛ تا برخورد TP یا SL مانیتور می‌شود.
 - سیگنال توبیت بعد از ارسال سفارش، ۷۰ ثانیه در وضعیت PENDING_OPEN می‌ماند.
 - اگر بعد از ۷۰ ثانیه پوزیشن واقعی پیدا نشد، اسلات آزاد و FAILED_OPEN ثبت می‌شود.
 - اگر پوزیشن واقعی پیدا شد، وضعیت OPEN می‌شود و از آن به بعد نتیجه فقط از Toobit خوانده می‌شود.
@@ -60,19 +60,16 @@ class PositionMonitor:
         if sig.get("status") != "ACTIVE":
             return
 
-        age = self._age_seconds(sig)
+        # سیگنال عادی نباید فقط به خاطر پایان اعتبار ۳ دقیقه‌ای پیام «منقضی شد» بدهد.
+        # اعتبار ۳ دقیقه‌ای فقط برای ورود/جایگزینی سیگنال است؛ نتیجه باید فقط TP یا SL باشد.
         price = self._safe_okx_price(sig.get("coin"))
         if price is None:
             return
 
         result = self._price_result(sig, price)
-        if result:
+        if result in {"TP", "SL"}:
             self._close_and_reply(sig, result, {"result_price": price}, price=price)
             return
-
-        valid_seconds = int(sig.get("valid_seconds") or config.SIGNAL_VALID_SECONDS)
-        if age >= valid_seconds:
-            self._close_and_reply(sig, "EXPIRED", {"result_price": price}, price=price)
 
     def _monitor_tobit(self, sig: dict[str, Any]) -> None:
         """مانیتور سیگنال واقعی Toobit.
@@ -152,6 +149,13 @@ class PositionMonitor:
             return
 
         self.state.close_signal(sig["id"], result, extra or {})
+
+        # طبق معماری نهایی، پیام نتیجه برای سیگنال فقط باید TP یا SL باشد.
+        # EXPIRED/UNKNOWN داخلی ثبت می‌شود ولی به تلگرام ارسال نمی‌شود.
+        # FAILED_OPEN برای سفارش واقعی Toobit پیام عملیاتی است و باقی می‌ماند.
+        if result == "EXPIRED":
+            return
+
         self.send_reply(
             sig.get("telegram_message_id"),
             result_message(sig, result, price=price, net_pnl=net_pnl),
