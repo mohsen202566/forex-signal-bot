@@ -1,266 +1,324 @@
-"""Router دستورات فارسی ربات.
-
-قفل‌های UI/Command:
-- همه کنترل‌ها از تلگرام و با فارسی ساده انجام می‌شود.
-- دستور «ترید» مثل پنل صرافی وضعیت کامل را نشان می‌دهد.
-- ترید خاموش فقط اجرای REAL را خاموش می‌کند؛ سیگنال عادی همچنان صادر، مانیتور و آمارگیری می‌شود.
-- بازه تنظیمات دقیق است و مقدار خارج از بازه Clamp نمی‌شود؛ خطای واضح فارسی برمی‌گردد.
-- آمار، پوزیشن‌ها و کوین‌ها با تفکیک SIGNAL / TOBIT نمایش داده می‌شوند.
 """
+command_router.py
+Level 4 / 1H Smart Scalp Bot
+
+Telegram command routing layer.
+
+Architecture lock:
+- Parses user text and returns a lightweight CommandRoute.
+- Does not execute trades, make AI decisions, fetch market data, monitor positions,
+  write JSON state, call Toobit, or send Telegram messages.
+- bot.py is responsible for executing the route.
+- Allowed project imports:
+  constants.py, utils.py, telegram_ui.py only.
+"""
+
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Optional
 
-import config
-from state_store import StateStore, now_ts
-from telegram_ui import (
-    coins_panel,
-    help_text,
-    main_buttons,
-    panel,
-    positions_panel,
-    setting_prompt,
-    stats_panel,
-)
+from constants import STATUS_FAILED, STATUS_OK, STRATEGY_LEVEL, SYSTEM_VERSION
+from telegram_ui import render_help, render_unknown_command
+from utils import normalize_symbol, safe_float, safe_int, safe_str, utc_now_iso
 
 
-PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٫٬", "0123456789..")
+COMMAND_ROUTER_VERSION: str = SYSTEM_VERSION
 
 
-class CommandRouter:
-    def __init__(self, state: StateStore, tobit_client: Any):
-        self.state = state
-        self.tobit = tobit_client
-
-    # ------------------------------------------------------------------
-    # Public entry points
-    # ------------------------------------------------------------------
-    def handle(self, text: str) -> str:
-        """Handle normal Telegram text commands."""
-        t = self._normalize_text(text)
-        if not t:
-            return help_text()
-
-        if t in {"/start", "start", "راهنما", "کمک", "help"}:
-            return help_text()
-
-        if t in {"ترید", "وضعیت", "پنل"}:
-            return self.trade_panel()
-
-        if t == "آمار":
-            return stats_panel(self._view_state())
-
-        if t in {"پوزیشن", "پوزیشن‌ها", "پوزیشن ها"}:
-            return positions_panel(self._view_state())
-
-        if t in {"کوین‌ها", "کوین ها", "کوین"}:
-            return self.coins_status_panel()
-
-        if t in {"استراتژی", "استراتژی لول 4", "استراتژی لول۴", "لول 4", "لول۴"}:
-            return self.strategy_text()
-
-        if t == "ترید فعال":
-            self.state.update_setting("real_trade_enabled", True)
-            return "✅ ترید واقعی فعال شد.\nاز این لحظه اگر قوانین REAL پاس شوند، پیام با عنوان «🔴 سیگنال توبیت» ارسال می‌شود."
-
-        if t == "ترید خاموش":
-            self.state.update_setting("real_trade_enabled", False)
-            return "⏸ ترید واقعی خاموش شد.\n📡 سیگنال‌های عادی همچنان صادر، مانیتور و در آمار ثبت می‌شوند."
-
-        if t.startswith("ترید دلار "):
-            return self._set_float(
-                text=t,
-                prefix="ترید دلار ",
-                key="trade_margin_usdt",
-                label="دلار هر پوزیشن",
-                lo=config.TRADE_MARGIN_MIN,
-                hi=config.TRADE_MARGIN_MAX,
-                suffix="USDT",
-            )
-
-        if t.startswith("ترید لوریج "):
-            return self._set_int(
-                text=t,
-                prefix="ترید لوریج ",
-                key="leverage",
-                label="لوریج",
-                lo=config.LEVERAGE_MIN,
-                hi=config.LEVERAGE_MAX,
-                suffix="x",
-            )
-
-        if t.startswith("حداکثر پوزیشن "):
-            return self._set_int(
-                text=t,
-                prefix="حداکثر پوزیشن ",
-                key="max_open_positions",
-                label="حداکثر پوزیشن",
-                lo=config.MAX_POSITIONS_MIN,
-                hi=config.MAX_POSITIONS_MAX,
-                suffix="",
-            )
-
-        if t.startswith("حداقل سود خالص "):
-            return self._set_float(
-                text=t,
-                prefix="حداقل سود خالص ",
-                key="min_net_profit_usdt",
-                label="حداقل سود خالص",
-                lo=config.MIN_NET_PROFIT_MIN,
-                hi=config.MIN_NET_PROFIT_MAX,
-                suffix="USDT",
-            )
-
-        return "دستور نامعتبر است.\n\n" + help_text()
-
-    def handle_callback(self, data: str) -> str:
-        """Handle inline-button callback data.
-
-        The actual Telegram adapter can call this and send the returned text.
-        """
-        d = str(data or "").strip()
-        settings = self.state.settings()
-
-        if d == "trade_on":
-            return self.handle("ترید فعال")
-        if d == "trade_off":
-            return self.handle("ترید خاموش")
-        if d == "stats":
-            return self.handle("آمار")
-        if d == "positions":
-            return self.handle("پوزیشن")
-        if d == "coins":
-            return self.handle("کوین‌ها")
-        if d == "help":
-            return help_text()
-        if d == "set_margin":
-            return setting_prompt("trade_margin_usdt", settings.get("trade_margin_usdt")) + "\n\nنمونه: ترید دلار 7"
-        if d == "set_leverage":
-            return setting_prompt("leverage", settings.get("leverage")) + "\n\nنمونه: ترید لوریج 10"
-        if d == "set_max_positions":
-            return setting_prompt("max_open_positions", settings.get("max_open_positions")) + "\n\nنمونه: حداکثر پوزیشن 1"
-        if d == "set_min_profit":
-            return setting_prompt("min_net_profit_usdt", settings.get("min_net_profit_usdt")) + "\n\nنمونه: حداقل سود خالص 0.10"
-
-        return help_text()
-
-    # ------------------------------------------------------------------
-    # Panels
-    # ------------------------------------------------------------------
-    def trade_panel(self) -> str:
-        exchange = self._safe_account_panel()
-        body = panel(self._view_state(), exchange)
-        buttons = self._button_hint()
-        return f"{body}\n\n{buttons}".strip()
-
-    def coins_status_panel(self) -> str:
-        base = coins_panel(config.WATCHLIST)
-        lines = [base, "", "وضعیت لحظه‌ای کوین‌ها:"]
-        for coin in config.WATCHLIST:
-            active = self.state.active_by_coin(coin)
-            real_active = [s for s in active if s.get("kind") == "TOBIT"]
-            normal_active = [s for s in active if s.get("kind") == "SIGNAL"]
-            if real_active:
-                status = "🔴 توبیت فعال/Pending"
-            elif normal_active:
-                status = "📡 سیگنال فعال"
-            else:
-                status = "🟢 آزاد"
-            lines.append(f"{coin}: {status}")
-        return "\n".join(lines)
-
-    def strategy_text(self) -> str:
-        return """
-استراتژی قفل‌شده نسخه ۱۵ تا ۳۰ دقیقه
-
-- تایم معامله: ۱۵ تا ۳۰ دقیقه
-- واچ‌لیست: ۱۰ کوین ثابت
-- منبع تحلیل و سیگنال عادی: OKX
-- اجرای REAL و نتیجه واقعی: Toobit
-- سیگنال عادی حتی در حالت ترید خاموش هم صادر و مانیتور می‌شود.
-- سیگنال عادی ۳ دقیقه معتبر است.
-- اگر همان کوین/همان جهت با امتیاز قوی‌تر بیاید، سیگنال قبلی REPLACED می‌شود.
-- برای هر کوین فقط یک REAL فعال یا Pending مجاز است.
-- Entry Score + Continuation Score + Confidence Penalty
-- Confidence فقط جریمه‌کننده است، نه سیگنال‌ساز.
-- محور تصمیم: شتاب RSI / ATR / ADX / Volume / OI
-- بازار رنج جریمه سنگین دارد، مگر شتاب حرکت واقعاً قوی باشد.
-- TP و SL همزمان با پوزیشن توبیت ارسال می‌شوند.
-- حداقل سود خالص بعد از کارمزد و اسلیپیج قبل از REAL چک می‌شود.
-- آمار جداست: 🔴 توبیت و 📡 سیگنال.
-""".strip()
-
-    # ------------------------------------------------------------------
-    # Setting helpers
-    # ------------------------------------------------------------------
-    def _set_float(self, *, text: str, prefix: str, key: str, label: str, lo: float, hi: float, suffix: str) -> str:
-        raw = text.replace(prefix, "", 1).strip()
-        try:
-            value = self._parse_float(raw)
-        except ValueError:
-            return f"❌ مقدار {label} نامعتبر است.\nبازه مجاز: {lo:g} تا {hi:g} {suffix}".strip()
-
-        if value < lo or value > hi:
-            return f"❌ مقدار {label} خارج از بازه است.\nبازه مجاز: {lo:g} تا {hi:g} {suffix}\nمقدار واردشده: {value:g}"
-
-        self.state.update_setting(key, round(value, 8))
-        return f"✅ {label} تنظیم شد: {value:g} {suffix}".strip()
-
-    def _set_int(self, *, text: str, prefix: str, key: str, label: str, lo: int, hi: int, suffix: str) -> str:
-        raw = text.replace(prefix, "", 1).strip()
-        try:
-            value_float = self._parse_float(raw)
-        except ValueError:
-            return f"❌ مقدار {label} نامعتبر است.\nبازه مجاز: {lo} تا {hi} {suffix}".strip()
-
-        if not value_float.is_integer():
-            return f"❌ مقدار {label} باید عدد صحیح باشد.\nنمونه درست: {int(lo)}"
-
-        value = int(value_float)
-        if value < lo or value > hi:
-            return f"❌ مقدار {label} خارج از بازه است.\nبازه مجاز: {lo} تا {hi} {suffix}\nمقدار واردشده: {value}"
-
-        self.state.update_setting(key, value)
-        suffix_text = f"{suffix}" if suffix else ""
-        return f"✅ {label} تنظیم شد: {value}{suffix_text}"
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-    def _view_state(self) -> dict[str, Any]:
-        """Flatten runtime keys so telegram_ui can render both old/new state shapes."""
-        view = dict(self.state.data)
-        runtime = view.get("runtime", {})
-        if isinstance(runtime, dict):
-            for key in ("last_scan", "last_signal_id", "last_result", "engine_health"):
-                if key in runtime:
-                    view[key] = runtime[key]
-        return view
-
-    def _safe_account_panel(self) -> dict[str, Any]:
-        try:
-            out = self.tobit.account_panel()
-            return out if isinstance(out, dict) else {"connected": True, "raw": out}
-        except Exception as exc:
-            return {"connected": False, "error": str(exc)}
-
-    @staticmethod
-    def _normalize_text(text: str) -> str:
-        return " ".join(str(text or "").translate(PERSIAN_DIGITS).strip().split())
-
-    @staticmethod
-    def _parse_float(raw: str) -> float:
-        cleaned = raw.translate(PERSIAN_DIGITS).replace(",", ".").strip()
-        if not cleaned:
-            raise ValueError("empty")
-        return float(cleaned)
-
-    @staticmethod
-    def _button_hint() -> str:
-        rows = []
-        for row in main_buttons():
-            rows.append(" | ".join(label for label, _callback in row))
-        return "دکمه‌های پنل:\n" + "\n".join(rows)
+@dataclass
+class CommandRoute:
+    action: str
+    status: str = STATUS_OK
+    args: dict[str, Any] = field(default_factory=dict)
+    raw_text: str = ""
+    reply_text: str = ""
+    reason: str = ""
+    created_at: str = field(default_factory=utc_now_iso)
+    system_version: str = SYSTEM_VERSION
 
 
-__all__ = ["CommandRouter"]
+def normalize_text(text: Any) -> str:
+    t = safe_str(text).strip()
+    replacements = {"ي": "ی", "ك": "ک", "\u200c": " ", "\n": " ", "\t": " ", "_": " "}
+    for old, new in replacements.items():
+        t = t.replace(old, new)
+    while "  " in t:
+        t = t.replace("  ", " ")
+    t = t.strip()
+    if t.startswith("/"):
+        t = t[1:].strip()
+    return t
+
+
+def text_tokens(text: str) -> list[str]:
+    return [x for x in normalize_text(text).split(" ") if x]
+
+
+def contains_any(text: str, words: set[str]) -> bool:
+    normalized = normalize_text(text).lower()
+    return any(w.lower() in normalized for w in words)
+
+
+def first_number(text: str) -> Optional[int]:
+    for token in text_tokens(text):
+        cleaned = token.replace("x", "").replace("X", "")
+        value = safe_int(cleaned, None)
+        if value is not None:
+            return value
+    return None
+
+
+def first_float(text: str) -> Optional[float]:
+    for token in text_tokens(text):
+        cleaned = token.replace("$", "").replace(",", ".")
+        value = safe_float(cleaned, None)
+        if value is not None:
+            return value
+    return None
+
+
+def route(action: str, *, text: str = "", args: Optional[Mapping[str, Any]] = None, reply_text: str = "", reason: str = "", status: str = STATUS_OK) -> CommandRoute:
+    return CommandRoute(action=action, status=status, args=dict(args or {}), raw_text=text, reply_text=reply_text, reason=reason)
+
+
+def route_unknown(text: str = "") -> CommandRoute:
+    return route("UNKNOWN", text=text, reply_text=render_unknown_command(), reason="unknown_command", status=STATUS_FAILED)
+
+
+def _attach_context(command_route: CommandRoute, *, user_id: Optional[int] = None, chat_id: Optional[int] = None) -> CommandRoute:
+    if user_id is not None:
+        command_route.args["user_id"] = user_id
+    if chat_id is not None:
+        command_route.args["chat_id"] = chat_id
+    return command_route
+
+
+def parse_strategy_level(text: str) -> Optional[int]:
+    normalized = normalize_text(text).lower()
+    if "استراتژی" not in normalized and "strategy" not in normalized:
+        return None
+    if "لول" not in normalized and "level" not in normalized:
+        return None
+    value = first_number(normalized)
+    if value is None:
+        return None
+    if 1 <= value <= 9:
+        return value
+    return None
+
+
+def parse_symbol(text: str) -> str:
+    for token in text_tokens(text):
+        upper = token.upper().replace("/", "").replace("-", "")
+        if upper.endswith("USDT") and len(upper) >= 6:
+            return normalize_symbol(upper)
+    return ""
+
+
+def parse_runtime_update(text: str) -> Optional[CommandRoute]:
+    normalized = normalize_text(text).lower()
+
+    if any(x in normalized for x in [
+        "مارجین", "margin", "مبلغ",
+        "ترید دلار", "دلار ترید", "حجم ترید", "trade dollar", "trade dollars",
+        "سرمایه ترید", "مقدار ترید",
+    ]):
+        value = first_float(normalized)
+        if value is not None and value > 0:
+            return route("SET_MARGIN", text=text, args={"margin_usdt": value})
+
+    if any(x in normalized for x in ["لوریج", "leverage", "اهرم"]):
+        value = first_number(normalized)
+        if value is not None and value > 0:
+            return route("SET_LEVERAGE", text=text, args={"leverage": value})
+
+    if any(x in normalized for x in [
+        "حداکثر پوزیشن", "max position", "max_positions", "مکس پوزیشن",
+        "حداکثر معامله", "حداکثر ترید", "max trades", "max positions",
+    ]):
+        value = first_number(normalized)
+        if value is not None and value > 0:
+            return route("SET_MAX_POSITIONS", text=text, args={"max_positions": value})
+
+    if normalized in {"ریست ترید", "ریست تنظیمات ترید", "reset trade", "reset settings"}:
+        return route("RESET_TRADE_SETTINGS", text=text)
+
+    return None
+
+
+def parse_trade_toggle(text: str) -> Optional[CommandRoute]:
+    normalized = normalize_text(text).lower()
+
+    if "ترید" in normalized or "trade" in normalized:
+        if any(x in normalized for x in ["فعال", "روشن", "on", "enable", "enabled"]):
+            if not any(x in normalized for x in ["غیرفعال", "خاموش", "off", "disable", "disabled"]):
+                return route("ENABLE_REAL_TRADING", text=text)
+        if any(x in normalized for x in ["غیرفعال", "خاموش", "off", "disable", "disabled"]):
+            return route("DISABLE_REAL_TRADING", text=text)
+
+    if any(x in normalized for x in ["emergency", "اضطراری", "توقف فوری", "استاپ فوری"]):
+        return route("EMERGENCY_STOP", text=text)
+
+    return None
+
+
+def parse_status_commands(text: str) -> Optional[CommandRoute]:
+    normalized = normalize_text(text).lower()
+
+    if normalized in {"راهنما", "help", "/help", "دستورات", "/start", "start"}:
+        return route("HELP", text=text, reply_text=render_help())
+
+    if normalized in {"لیست استراتژی", "لیست استراتژی ها", "لیست استراتژی‌ها", "strategy list", "list strategies"}:
+        return route("LIST_STRATEGIES", text=text)
+
+    if normalized in {"استراتژی", "وضعیت استراتژی", "strategy", "strategy status"}:
+        return route("SHOW_STRATEGY", text=text)
+
+    if normalized in {"پنل", "panel", "main", "داشبورد"}:
+        return route("SHOW_TRADE_SETTINGS", text=text)
+
+    if normalized in {"وضعیت", "status", "/status"}:
+        return route("SHOW_STATUS", text=text)
+
+    if normalized in {"مارجین", "margin", "کیف پول", "موجودی"}:
+        return route("SHOW_TRADE_SETTINGS", text=text)
+
+    if normalized in {"اسلات", "اسلات ها", "اسلات‌ها", "slots"}:
+        return route("SHOW_TRADE_SETTINGS", text=text)
+
+    if normalized in {"سود امروز", "ضرر امروز", "سودضرر امروز", "pnl", "today pnl"}:
+        return route("SHOW_TRADE_SETTINGS", text=text)
+
+    if normalized in {"پوزیشن ها", "پوزیشن‌ها", "پوزیشن های باز", "positions", "open positions", "پوزیشن"}:
+        return route("SHOW_POSITIONS", text=text)
+
+    if normalized in {"حذف آمار", "حذف امار", "ریست آمار", "ریست امار", "reset stats"}:
+        return route("RESET_STATS", text=text)
+
+    if normalized in {"آمار", "امار", "stats", "statistics"}:
+        return route("SHOW_STATS", text=text)
+
+    if normalized in {
+        "هوش مصنوعی", "ai", "ai status", "وضعیت هوش مصنوعی",
+        "آمار هوشمند", "امار هوشمند", "حافظه ربات",
+    }:
+        return route("SHOW_AI_STATUS", text=text)
+
+    if normalized in {
+        "ترید", "trade",
+        "تنظیمات", "تنظیمات ترید", "وضعیت ترید", "trade settings",
+        "settings", "trade status", "وضعیت معامله",
+    }:
+        return route("SHOW_TRADE_SETTINGS", text=text)
+
+    return None
+
+
+def parse_analysis_command(text: str) -> Optional[CommandRoute]:
+    normalized = normalize_text(text).lower()
+
+    if any(x in normalized for x in ["تحلیل", "بررسی", "analyze", "analysis"]):
+        symbol = parse_symbol(text)
+        if symbol:
+            return route("ANALYZE_SYMBOL", text=text, args={"symbol": symbol})
+        return route("SCAN_MARKET", text=text)
+
+    if any(x in normalized for x in ["اسکن", "scan", "بازار"]):
+        return route("SCAN_MARKET", text=text)
+
+    return None
+
+
+def parse_position_action(text: str) -> Optional[CommandRoute]:
+    normalized = normalize_text(text).lower()
+    symbol = parse_symbol(text)
+
+    if any(x in normalized for x in ["بستن", "close", "خروج"]) and symbol:
+        return route("REQUEST_CLOSE_POSITION", text=text, args={"symbol": symbol})
+
+    if any(x in normalized for x in ["زیر نظر", "مانیتور", "monitor"]) and symbol:
+        return route("WATCH_POSITION", text=text, args={"symbol": symbol})
+
+    return None
+
+
+def parse_command(text: Any, *, user_id: Optional[int] = None, chat_id: Optional[int] = None) -> CommandRoute:
+    raw = safe_str(text)
+    normalized = normalize_text(raw)
+
+    if not normalized:
+        return _attach_context(route_unknown(raw), user_id=user_id, chat_id=chat_id)
+
+    level = parse_strategy_level(normalized)
+    if level is not None:
+        return _attach_context(route("SET_STRATEGY_LEVEL", text=raw, args={"level": level}), user_id=user_id, chat_id=chat_id)
+
+    for parser in (
+        parse_trade_toggle,
+        parse_runtime_update,
+        parse_status_commands,
+        parse_analysis_command,
+        parse_position_action,
+    ):
+        result = parser(normalized)
+        if result is not None:
+            result.raw_text = raw
+            return _attach_context(result, user_id=user_id, chat_id=chat_id)
+
+    return _attach_context(route_unknown(raw), user_id=user_id, chat_id=chat_id)
+
+
+def validate_route(command_route: CommandRoute) -> dict[str, Any]:
+    errors: list[str] = []
+    if command_route.system_version != SYSTEM_VERSION:
+        errors.append("INVALID_SYSTEM_VERSION")
+    if not command_route.action:
+        errors.append("MISSING_ACTION")
+    if command_route.status not in {STATUS_OK, STATUS_FAILED}:
+        errors.append("INVALID_STATUS")
+    if not isinstance(command_route.args, dict):
+        errors.append("ARGS_NOT_DICT")
+    return {
+        "status": STATUS_OK if not errors else STATUS_FAILED,
+        "valid": not errors,
+        "errors": errors,
+        "action": command_route.action,
+        "args": command_route.args,
+    }
+
+
+def route_to_dict(command_route: CommandRoute) -> dict[str, Any]:
+    return {
+        "system_version": command_route.system_version,
+        "created_at": command_route.created_at,
+        "action": command_route.action,
+        "status": command_route.status,
+        "args": dict(command_route.args),
+        "raw_text": command_route.raw_text,
+        "reply_text": command_route.reply_text,
+        "reason": command_route.reason,
+    }
+
+
+__all__ = [
+    "COMMAND_ROUTER_VERSION",
+    "CommandRoute",
+    "normalize_text",
+    "text_tokens",
+    "contains_any",
+    "first_number",
+    "first_float",
+    "route",
+    "route_unknown",
+    "parse_strategy_level",
+    "parse_symbol",
+    "parse_runtime_update",
+    "parse_trade_toggle",
+    "parse_status_commands",
+    "parse_analysis_command",
+    "parse_position_action",
+    "parse_command",
+    "validate_route",
+    "route_to_dict",
+]
