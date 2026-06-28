@@ -161,7 +161,7 @@ class AIController:
         if not risk.ok:
             return self._reject(entry=entry, tp=risk.tp, sl=risk.sl, breakdown=breakdown, reason="TP/SL اسکالپی برای این ورود قابل قبول نیست.", code="SCALP_RISK_REJECT", hard=True, **common)
         if not cost.ok:
-            return self._reject(entry=entry, tp=risk.tp, sl=risk.sl, breakdown=breakdown, reason="سود خالص بعد از fee/slippage کمتر از حد ثابت 0.08 دلار است.", code="NET_PROFIT_BELOW_0_10", hard=True, **common)
+            return self._reject(entry=entry, tp=risk.tp, sl=risk.sl, breakdown=breakdown, reason="سود خالص بعد از fee/slippage کمتر از حد ثابت 0.05 دلار است.", code="NET_PROFIT_BELOW_0_05", hard=True, **common)
         if indicator_ai.verdict == "NEGATIVE" and indicator_ai.experience >= 12:
             return SignalDecision(action="WATCH", accepted=False, direction=direction, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason="AI این بازه ارز/جهت/اندیکاتور را برای Real منفی می‌داند؛ فقط Ghost/Watch.", ready_alert=False, hunter=True, signal_label="هوش مصنوعی منفی - فقط واچ", **common)
 
