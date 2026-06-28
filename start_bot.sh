@@ -1,7 +1,6 @@
-#!/usr/bin/env bash
-set -e
-cd /root/forex-bot
-if [ -d venv ]; then
-  source venv/bin/activate
-fi
-python3 bot.py
+#!/bin/bash
+cd /root/crypto-ai-helper || exit 1
+set -a
+source .env
+set +a
+exec /root/crypto-ai-helper/venv/bin/python /root/crypto-ai-helper/main.py
