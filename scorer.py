@@ -6,8 +6,26 @@ from typing import Literal
 Direction = Literal["LONG", "SHORT"]
 DirectionState = Literal["LONG", "SHORT", "NEUTRAL", "DANGEROUS"]
 DecisionAction = Literal["REJECT", "WATCH", "SIGNAL"]
-EntryState = Literal["IGNITION_READY", "PRE_WATCH", "LATE", "CHASE", "NO_ENTRY", "EARLY_IGNITION", "GOOD_ENTRY", "WEAK_ENTRY", "LATE_ENTRY", "FAKE_MOVE_RISK"]
-PatternLabel = Literal["IGNITION_START", "PRE_IGNITION_WATCH", "MID_MOVE", "LATE_CHASE", "PULLBACK", "EXHAUSTION", "NOISE"]
+EntryState = Literal[
+    "EARLY_IGNITION",
+    "GOOD_ENTRY",
+    "POWER_BUILDING",
+    "REVERSAL_BUILDING",
+    "PRE_WATCH",
+    "WEAK_ENTRY",
+    "NO_ENTRY",
+    "FAKE_MOVE_RISK",
+    "EXHAUSTION",
+]
+PatternLabel = Literal[
+    "IGNITION_START",
+    "POWER_BUILDING",
+    "REVERSAL_BUILDING",
+    "PRE_IGNITION_WATCH",
+    "EXHAUSTION",
+    "PULLBACK",
+    "NOISE",
+]
 SessionState = Literal["GOOD", "NORMAL", "BAD_REAL_ONLY_NORMAL"]
 OrderBlockState = Literal["WITH_SIGNAL", "AGAINST_SIGNAL", "NEUTRAL"]
 
@@ -86,8 +104,13 @@ class SignalDecision:
 
     @property
     def real_priority(self) -> float:
-        # Size is not changed by score; this is only for picking which signal gets a real slot first.
-        q_bonus = 20 if self.entry_quality == "EARLY_IGNITION" else 12 if self.entry_quality == "GOOD_ENTRY" else 0
+        # Size is not changed by score; this only chooses which signal gets a real slot first.
+        q_bonus = {
+            "EARLY_IGNITION": 22,
+            "GOOD_ENTRY": 16,
+            "REVERSAL_BUILDING": 14,
+            "POWER_BUILDING": 12,
+        }.get(self.entry_quality, 0)
         return self.score + q_bonus + self.ai_confidence * 0.20 + max(0.0, self.net_edge * 1000.0)
 
 

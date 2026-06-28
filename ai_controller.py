@@ -152,19 +152,21 @@ class AIController:
             notes=notes,
         )
 
-        if entry_quality.quality in {"LATE_ENTRY", "FAKE_MOVE_RISK"}:
-            return self._reject(entry=entry, tp=risk.tp, sl=risk.sl, breakdown=breakdown, reason="کیفیت نقطه ورود دیر/فیک تشخیص داده شد؛ Real ممنوع.", code="ENTRY_QUALITY_REJECT", hard=True, **common)
+        if entry_quality.quality == "FAKE_MOVE_RISK":
+            return SignalDecision(action="WATCH", accepted=False, direction=direction, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason="حرکت کلایمکس/فیک تشخیص داده شد؛ فقط Watch/Ghost برای یادگیری.", ready_alert=False, hunter=False, signal_label="فیک‌ریسک - فقط واچ", **common)
         if not risk.ok:
             return self._reject(entry=entry, tp=risk.tp, sl=risk.sl, breakdown=breakdown, reason="TP/SL اسکالپی برای این ورود قابل قبول نیست.", code="SCALP_RISK_REJECT", hard=True, **common)
         # Profit/cost is logged for panel/statistics only; it no longer blocks signals.
-        if indicator_ai.verdict == "NEGATIVE" and indicator_ai.experience >= 12:
+        if indicator_ai.verdict == "NEGATIVE" and indicator_ai.experience >= 20:
             return SignalDecision(action="WATCH", accepted=False, direction=direction, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason="AI این بازه ارز/جهت/اندیکاتور را برای Real منفی می‌داند؛ فقط Ghost/Watch.", ready_alert=False, hunter=True, signal_label="هوش مصنوعی منفی - فقط واچ", **common)
 
-        ready_alert = total >= WATCH_THRESHOLD and entry_quality.quality in {"WEAK_ENTRY", "NO_ENTRY"}
-        if total >= WATCH_THRESHOLD and (entry_quality.quality in {"WEAK_ENTRY", "NO_ENTRY"} or ignition.state == "PRE_WATCH"):
-            return SignalDecision(action="WATCH", accepted=False, direction=direction, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason="شکارگاه اسکالپ آماده است ولی نقطه ورود هنوز برای Real کامل نیست.", ready_alert=ready_alert, hunter=True, signal_label="اسکالپ واچ", **common)
+        real_qualities = {"EARLY_IGNITION", "GOOD_ENTRY", "POWER_BUILDING", "REVERSAL_BUILDING"}
+        watch_qualities = {"WEAK_ENTRY", "NO_ENTRY"}
+        accepted = total >= SIGNAL_THRESHOLD and entry_quality.quality in real_qualities
+        ready_alert = total >= WATCH_THRESHOLD and entry_quality.quality in (watch_qualities | real_qualities)
+        if not accepted and total >= WATCH_THRESHOLD:
+            return SignalDecision(action="WATCH", accepted=False, direction=direction, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason="شکارگاه اسکالپ فعال است؛ برای تایید نهایی یا یادگیری Ghost زیر نظر گرفته شد.", ready_alert=ready_alert, hunter=True, signal_label="اسکالپ واچ", **common)
 
-        accepted = total >= SIGNAL_THRESHOLD and entry_quality.quality in {"EARLY_IGNITION", "GOOD_ENTRY"}
         return SignalDecision(
             action="SIGNAL" if accepted else "REJECT",
             accepted=accepted,
@@ -175,9 +177,9 @@ class AIController:
             score=total,
             threshold=SIGNAL_THRESHOLD,
             breakdown=breakdown,
-            reason="سیگنال اسکالپ معتبر است؛ شروع حرکت و نقطه ورود تایید شد." if accepted else "امتیاز یا کیفیت ورود به حد نهایی نرسید.",
-            reject_code=None if accepted else "LOW_SCORE_OR_ENTRY_NOT_READY",
-            hunter=entry_quality.quality in {"EARLY_IGNITION", "GOOD_ENTRY"},
+            reason="سیگنال اسکالپ معتبر است؛ شروع قدرت یا برگشت شکار تایید شد." if accepted else "امتیاز یا تریگر ورود هنوز به حد نهایی نرسید.",
+            reject_code=None if accepted else "LOW_SCORE_OR_TRIGGER_NOT_READY",
+            hunter=entry_quality.quality in real_qualities,
             signal_label="شکار اسکالپ" if accepted else "رد اسکالپ",
             **common,
         )

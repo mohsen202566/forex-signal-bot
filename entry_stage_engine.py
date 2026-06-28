@@ -20,15 +20,20 @@ class EntryStageEngine:
         if direction == "LONG":
             base = min(snapshot.ema20, snapshot.vwap, snapshot.recent_low)
             move_from_base = max(0.0, snapshot.close - base)
+            reclaim_bonus = snapshot.rsi_delta > 0 and snapshot.macd_hist_slope > 0
         else:
             base = max(snapshot.ema20, snapshot.vwap, snapshot.recent_high)
             move_from_base = max(0.0, base - snapshot.close)
+            reclaim_bonus = snapshot.rsi_delta < 0 and snapshot.macd_hist_slope < 0
         stage_pct = min(100.0, (move_from_base / max(atr * 3.2, snapshot.close * 0.0008)) * 100.0)
         reasons: list[str] = [f"Entry Stage={stage_pct:.1f}%"]
+
+        # This layer no longer blocks Real. It only grades location quality.
         if stage_pct <= 18:
-            return EntryStageResult(stage_pct, True, 5, tuple(reasons + ["ورود نزدیک شروع حرکت است."]))
-        if stage_pct <= 30:
-            return EntryStageResult(stage_pct, True, 2, tuple(reasons + ["ورود قابل قبول است ولی باید سریع مدیریت شود."]))
-        if stage_pct <= 45:
-            return EntryStageResult(stage_pct, False, -6, tuple(reasons + ["حرکت جلو رفته؛ برای Real مناسب نیست."]))
-        return EntryStageResult(stage_pct, False, -10, tuple(reasons + ["ورود وسط/آخر حرکت است."]))
+            return EntryStageResult(stage_pct, True, 5, tuple(reasons + ["ورود نزدیک مبنای حرکت است."]))
+        if stage_pct <= 35:
+            return EntryStageResult(stage_pct, True, 3, tuple(reasons + ["موقعیت ورود قابل اجراست و نیاز به مدیریت سریع دارد."]))
+        if stage_pct <= 58:
+            bonus = 1 if reclaim_bonus else -1
+            return EntryStageResult(stage_pct, True, bonus, tuple(reasons + ["حرکت جلو رفته اما با تأیید قدرت/برگشت هنوز قابل بررسی است."]))
+        return EntryStageResult(stage_pct, True, -3, tuple(reasons + ["فاصله از مبنای حرکت زیاد است؛ فقط با امتیاز کندل و قدرت قوی اجرا شود."]))

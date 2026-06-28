@@ -41,6 +41,17 @@ class IndicatorSnapshot:
     consecutive_up: int
     consecutive_down: int
 
+
+    @property
+    def ema20_slope_pct(self) -> float:
+        if self.prev_ema20 <= 0:
+            return 0.0
+        return (self.ema20 - self.prev_ema20) / self.prev_ema20
+
+    @property
+    def rsi_delta(self) -> float:
+        return self.rsi - self.prev_rsi
+
     @property
     def ema50_slope_pct(self) -> float:
         if self.prev_ema50 <= 0:

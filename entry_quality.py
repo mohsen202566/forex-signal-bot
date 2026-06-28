@@ -17,46 +17,64 @@ class EntryQualityResult:
 
 
 class EntryQualityEngine:
+    """Grades whether the current 5m/15m state is usable for Real.
+
+    There is deliberately no separate timing output. A move is either building power,
+    reversing after exhaustion, ready, watch-only, or fake-risk.
+    """
+
     def analyze(self, *, direction: Direction, snapshot_5m: IndicatorSnapshot, snapshot_15m: IndicatorSnapshot, candle: CandleHunterResult, stage: EntryStageResult) -> EntryQualityResult:
         reasons: list[str] = []
-        if candle.label in {"LATE_CHASE", "EXHAUSTION", "MID_MOVE"}:
-            return EntryQualityResult("LATE_ENTRY", False, -10, ("کندل نشان می‌دهد حرکت مصرف شده یا خسته است.",))
-        if not stage.ok_for_real:
-            return EntryQualityResult("LATE_ENTRY", False, -8, tuple(stage.reasons + ("EntryQuality: ورود برای Real دیر است.",)))
-        if direction == "LONG":
-            rsi_good = 49 <= snapshot_5m.rsi <= 58 and 46 <= snapshot_15m.rsi <= 60
-            rsi_late = snapshot_5m.rsi > 62 or snapshot_15m.rsi > 64
-            macd_start = snapshot_5m.macd_hist >= snapshot_5m.prev_macd_hist and snapshot_15m.macd_hist >= snapshot_15m.prev_macd_hist
-            di_ok = snapshot_15m.plus_di >= snapshot_15m.minus_di
-        else:
-            rsi_good = 42 <= snapshot_5m.rsi <= 52 and 40 <= snapshot_15m.rsi <= 54
-            rsi_late = snapshot_5m.rsi < 38 or snapshot_15m.rsi < 36
-            macd_start = snapshot_5m.macd_hist <= snapshot_5m.prev_macd_hist and snapshot_15m.macd_hist <= snapshot_15m.prev_macd_hist
-            di_ok = snapshot_15m.minus_di >= snapshot_15m.plus_di
-        if rsi_late:
-            return EntryQualityResult("LATE_ENTRY", False, -8, ("RSI به محدوده خستگی رسیده؛ قدرت کورکورانه محسوب نمی‌شود.",))
+        s5 = snapshot_5m
+        s15 = snapshot_15m
         score = 0
-        if rsi_good:
-            score += 5; reasons.append("RSI داخل بازه شروع حرکت است.")
+
+        if direction == "LONG":
+            rsi_power = (s5.rsi > 50 and s5.rsi_delta >= -0.10) or (s5.rsi >= 47 and s5.rsi_delta > 0.35)
+            rsi_15_ok = s15.rsi_delta > 0 or 47 <= s15.rsi <= 62
+            macd_start = s5.macd_hist_slope > 0 and s15.macd_hist_slope >= 0
+            di_ok = s15.plus_di >= s15.minus_di or s5.rsi_delta > 0.65
+            price_ok = s5.close >= min(s5.ema20, s5.vwap)
+            exhaustion_against_direction = s5.rsi > 73 and s5.rsi_delta < -0.35 and s5.upper_wick_pct > 0.35
+        else:
+            rsi_power = (s5.rsi < 50 and s5.rsi_delta <= 0.10) or (s5.rsi <= 53 and s5.rsi_delta < -0.35)
+            rsi_15_ok = s15.rsi_delta < 0 or 38 <= s15.rsi <= 53
+            macd_start = s5.macd_hist_slope < 0 and s15.macd_hist_slope <= 0
+            di_ok = s15.minus_di >= s15.plus_di or s5.rsi_delta < -0.65
+            price_ok = s5.close <= max(s5.ema20, s5.vwap)
+            exhaustion_against_direction = s5.rsi < 27 and s5.rsi_delta > 0.35 and s5.lower_wick_pct > 0.35
+
+        if exhaustion_against_direction and candle.label not in {"REVERSAL_BUILDING"}:
+            return EntryQualityResult("FAKE_MOVE_RISK", False, -7, ("حرکت کلایمکس و خلاف مومنتوم تازه دیده شد؛ Real ممنوع.",))
+
+        if rsi_power:
+            score += 5; reasons.append("RSI از محدوده تعادل به سمت جهت معامله فشار گرفته است.")
+        if rsi_15_ok:
+            score += 3; reasons.append("RSI 15m با شروع/ادامه جهت هماهنگ است.")
         if macd_start:
-            score += 5; reasons.append("MACD در فاز شروع تقویت است.")
-        if 14 <= snapshot_15m.adx <= 28 and di_ok:
-            score += 4; reasons.append("ADX/DI شروع روند را تأیید می‌کند.")
-        elif snapshot_15m.adx > 34:
-            score -= 4; reasons.append("ADX خیلی بالا است؛ احتمال ورود دیر.")
-        if 0.85 <= snapshot_5m.volume_ratio <= 2.6 and 0.80 <= snapshot_15m.volume_ratio <= 2.4:
-            score += 3; reasons.append("ولوم شروع فشار است، نه کلایمکس.")
-        elif snapshot_5m.volume_ratio > 3.2 or snapshot_15m.volume_ratio > 3.0:
-            score -= 5; reasons.append("ولوم کلایمکس‌مانند است.")
-        atr_ratio = snapshot_15m.atr / max(snapshot_15m.prev_atr, snapshot_15m.close * 0.0001)
-        if 0.90 <= atr_ratio <= 1.55:
-            score += 2; reasons.append("ATR در فاز شروع نوسان است.")
-        elif atr_ratio > 1.85:
-            score -= 4; reasons.append("ATR خیلی باز شده؛ ریسک ورود دیر.")
-        if candle.label == "IGNITION_START" and stage.stage_pct <= 18 and score >= 12:
-            return EntryQualityResult("EARLY_IGNITION", True, min(8, score), tuple(reasons + ["EntryQuality: نقطه ورود شروع حرکت است."]))
-        if candle.label == "IGNITION_START" and score >= 8:
-            return EntryQualityResult("GOOD_ENTRY", True, min(6, score), tuple(reasons + ["EntryQuality: ورود خوب و قابل اجرا است."]))
-        if candle.label == "PRE_IGNITION_WATCH" and score >= 7:
-            return EntryQualityResult("WEAK_ENTRY", False, min(4, score), tuple(reasons + ["EntryQuality: برای watch/ghost مناسب‌تر است."]))
-        return EntryQualityResult("NO_ENTRY", False, max(-5, score - 8), tuple(reasons + ["EntryQuality: نقطه ورود هنوز کامل نیست."]))
+            score += 5; reasons.append("MACD در فاز تقویت جهت است.")
+        if di_ok:
+            score += 4; reasons.append("DI یا شتاب کوتاه‌مدت جهت را تأیید می‌کند.")
+        if price_ok:
+            score += 3; reasons.append("قیمت نسبت به EMA20/VWAP موقعیت قابل اجرا دارد.")
+        if 0.65 <= s5.volume_ratio <= 3.4 and 0.60 <= s15.volume_ratio <= 3.0:
+            score += 3; reasons.append("ولوم برای شکار سریع قابل قبول است.")
+        elif s5.volume_ratio > 4.2 or s15.volume_ratio > 4.0:
+            score -= 3; reasons.append("ولوم بسیار انفجاری است؛ ریسک کلایمکس لحاظ شد.")
+        atr_ratio = s15.atr / max(s15.prev_atr, s15.close * 0.0001)
+        if 0.70 <= atr_ratio <= 2.05:
+            score += 2
+        elif atr_ratio > 2.35:
+            score -= 2; reasons.append("ATR خیلی باز شده؛ برای Real نیاز به تایید قوی‌تر است.")
+
+        if candle.label == "REVERSAL_BUILDING" and score >= 10:
+            return EntryQualityResult("REVERSAL_BUILDING", True, min(8, score), tuple(reasons + ["EntryQuality: برگشت بعد از پامپ/دامپ مصرف‌شده قابل شکار است."]))
+        if candle.label == "IGNITION_START" and score >= 13 and stage.stage_pct <= 35:
+            return EntryQualityResult("EARLY_IGNITION", True, min(8, score), tuple(reasons + ["EntryQuality: نقطه ورود شروع قدرت است."]))
+        if candle.label == "IGNITION_START" and score >= 10:
+            return EntryQualityResult("GOOD_ENTRY", True, min(7, score), tuple(reasons + ["EntryQuality: ورود خوب و قابل اجرا است."]))
+        if candle.label == "POWER_BUILDING" and score >= 10:
+            return EntryQualityResult("POWER_BUILDING", True, min(6, score), tuple(reasons + ["EntryQuality: قدرت جهت در حال ساخته شدن است."]))
+        if candle.label in {"PRE_IGNITION_WATCH", "EXHAUSTION"} and score >= 7:
+            return EntryQualityResult("WEAK_ENTRY", False, min(4, score), tuple(reasons + ["EntryQuality: برای Watch/Ghost مناسب‌تر است."]))
+        return EntryQualityResult("NO_ENTRY", False, max(-3, min(2, score - 8)), tuple(reasons + ["EntryQuality: هنوز تریگر کافی برای Real ندارد."]))

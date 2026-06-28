@@ -21,55 +21,52 @@ class PreIgnitionEngine:
         reasons: list[str] = []
         s15 = snapshot_15m
         s5 = snapshot_5m
+        neutral_band = min(3.5, max(1.0, s15.atr_pct * 120.0))
         if direction == "LONG":
-            if 48 <= s15.rsi <= 59:
-                points += 5; reasons.append("RSI 15m در بازه شروع پامپ است.")
-            elif s15.rsi > 63:
-                points -= 5; reasons.append("RSI 15m بالا است؛ احتمال خستگی پامپ.")
-            if 49 <= s5.rsi <= 58:
-                points += 4; reasons.append("RSI 5m برای ورود لانگ هنوز دیر نیست.")
-            elif s5.rsi > 62:
-                points -= 5
-            if s15.macd_hist >= s15.prev_macd_hist:
-                points += 5; reasons.append("MACD 15m تازه رو به تقویت لانگ است.")
-            if s5.macd_hist >= s5.prev_macd_hist:
-                points += 3
-            if 14 <= s15.adx <= 28 and s15.plus_di >= s15.minus_di:
-                points += 4; reasons.append("ADX/DI در فاز شروع قدرت لانگ است.")
+            if s5.rsi > 50 + neutral_band or (s5.rsi >= 47 and s5.rsi_delta > 0.30):
+                points += 5; reasons.append("RSI 5m به سمت لانگ فشار گرفته است.")
+            if s15.rsi_delta > 0 or s15.rsi > 50 + neutral_band * 0.6:
+                points += 5; reasons.append("RSI 15m برای لانگ بهتر شده است.")
+            if s15.macd_hist_slope > 0:
+                points += 5; reasons.append("MACD 15m در حال تقویت لانگ است.")
+            if s5.macd_hist_slope > 0:
+                points += 4
+            if s15.plus_di >= s15.minus_di or s5.rsi_delta > 0.65:
+                points += 4; reasons.append("DI یا شتاب کوتاه‌مدت لانگ را پشتیبانی می‌کند.")
             if s5.close >= min(s5.ema20, s5.vwap):
                 points += 2
+            if (s5.rsi <= 45 or s5.consecutive_down >= 2) and s5.rsi_delta > 0 and s5.macd_hist_slope > 0:
+                points += 5; reasons.append("دامپ قبلی در حال تبدیل به برگشت لانگ است.")
         else:
-            if 41 <= s15.rsi <= 52:
-                points += 5; reasons.append("RSI 15m در بازه شروع دامپ است.")
-            elif s15.rsi < 37:
-                points -= 5; reasons.append("RSI 15m خیلی پایین است؛ احتمال خستگی دامپ.")
-            if 42 <= s5.rsi <= 52:
-                points += 4; reasons.append("RSI 5m برای ورود شورت هنوز دیر نیست.")
-            elif s5.rsi < 38:
-                points -= 5
-            if s15.macd_hist <= s15.prev_macd_hist:
-                points += 5; reasons.append("MACD 15m تازه رو به تقویت شورت است.")
-            if s5.macd_hist <= s5.prev_macd_hist:
-                points += 3
-            if 14 <= s15.adx <= 28 and s15.minus_di >= s15.plus_di:
-                points += 4; reasons.append("ADX/DI در فاز شروع قدرت شورت است.")
+            if s5.rsi < 50 - neutral_band or (s5.rsi <= 53 and s5.rsi_delta < -0.30):
+                points += 5; reasons.append("RSI 5m به سمت شورت فشار گرفته است.")
+            if s15.rsi_delta < 0 or s15.rsi < 50 - neutral_band * 0.6:
+                points += 5; reasons.append("RSI 15m برای شورت ضعیف شده است.")
+            if s15.macd_hist_slope < 0:
+                points += 5; reasons.append("MACD 15m در حال تقویت شورت است.")
+            if s5.macd_hist_slope < 0:
+                points += 4
+            if s15.minus_di >= s15.plus_di or s5.rsi_delta < -0.65:
+                points += 4; reasons.append("DI یا شتاب کوتاه‌مدت شورت را پشتیبانی می‌کند.")
             if s5.close <= max(s5.ema20, s5.vwap):
                 points += 2
-        if 0.85 <= s15.volume_ratio <= 2.4:
+            if (s5.rsi >= 55 or s5.consecutive_up >= 2) and s5.rsi_delta < 0 and s5.macd_hist_slope < 0:
+                points += 5; reasons.append("پامپ قبلی در حال تبدیل به برگشت شورت است.")
+        if 0.60 <= s15.volume_ratio <= 3.0:
             points += 3
-        elif s15.volume_ratio > 3.0:
-            points -= 5; reasons.append("ولوم 15m کلایمکس‌مانند است.")
-        if 0.85 <= s5.volume_ratio <= 2.6:
-            points += 2
-        elif s5.volume_ratio > 3.3:
-            points -= 4; reasons.append("ولوم 5m خیلی انفجاری است؛ ریسک دیر شدن.")
+        elif s15.volume_ratio > 4.0:
+            points -= 2; reasons.append("ولوم 15m خیلی انفجاری است؛ کلایمکس محتمل است.")
+        if 0.60 <= s5.volume_ratio <= 3.4:
+            points += 3
+        elif s5.volume_ratio > 4.4:
+            points -= 2; reasons.append("ولوم 5m خیلی انفجاری است؛ باید با کندل تأیید شود.")
         atr_ratio = s15.atr / max(s15.prev_atr, s15.close * 0.0001)
-        if 0.92 <= atr_ratio <= 1.45:
+        if 0.70 <= atr_ratio <= 2.05:
             points += 2
-        elif atr_ratio > 1.8:
-            points -= 4
+        elif atr_ratio > 2.35:
+            points -= 2
         score = max(0, min(WEIGHTS.pre_ignition, points))
-        state: DirectionState = direction if score >= 13 else "NEUTRAL"
+        state: DirectionState = direction if score >= max(10, int(WEIGHTS.pre_ignition * 0.42)) else "NEUTRAL"
         confidence = int(min(100, score / max(1, WEIGHTS.pre_ignition) * 100))
-        reasons.append("پیش‌قدرت شکار فعال است." if state != "NEUTRAL" else "پیش‌قدرت هنوز کامل نیست؛ مناسب watch/ghost.")
+        reasons.append("پیش‌قدرت شکار فعال است." if state != "NEUTRAL" else "پیش‌قدرت کامل نیست؛ مناسب Watch/Ghost.")
         return PreIgnitionResult(state, score, confidence, tuple(reasons))

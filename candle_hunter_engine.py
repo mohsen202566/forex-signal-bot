@@ -27,47 +27,63 @@ class CandleHunterEngine:
         body_atr = body / atr
         range_atr = max(0.0, last.high - last.low) / atr
         reasons: list[str] = []
-        if direction == "LONG":
-            same_push = s.consecutive_up
-            candle_ok = last.close > last.open and last.close >= prev.high * 0.9995
-            wick_ok = s.upper_wick_pct <= 0.48
-            rsi_late = s.rsi > 62
-            macd_ok = s.macd_hist >= s.prev_macd_hist
-            rsi_start = 49 <= s.rsi <= 58
-        else:
-            same_push = s.consecutive_down
-            candle_ok = last.close < last.open and last.close <= prev.low * 1.0005
-            wick_ok = s.lower_wick_pct <= 0.48
-            rsi_late = s.rsi < 38
-            macd_ok = s.macd_hist <= s.prev_macd_hist
-            rsi_start = 42 <= s.rsi <= 52
-        if same_push >= 3:
-            return CandleHunterResult("LATE_CHASE", 0, ("چند کندل هم‌جهت پشت‌سرهم؛ ورود دیر/تعقیبی است.",))
-        if range_atr > 1.85 and s.body_pct > 0.62 and s.volume_ratio > 2.75:
-            return CandleHunterResult("EXHAUSTION", 0, ("کندل بزرگ + ولوم کلایمکس؛ احتمال ته حرکت.",))
-        if rsi_late:
-            return CandleHunterResult("LATE_CHASE", 2, ("RSI برای اسکالپ به محدوده خستگی/دیر شدن رسیده است.",))
         points = 0
-        if candle_ok:
-            points += 8; reasons.append("کندل 5m شکست/فشار میکرو در جهت درست دارد.")
-        if 0.25 <= body_atr <= 1.20 and s.body_pct >= 0.38:
-            points += 5; reasons.append("اندازه کندل برای شروع حرکت مناسب است، نه کلایمکس.")
+
+        bullish = last.close > last.open
+        bearish = last.close < last.open
+        green_reclaim = bullish and last.close >= max(prev.close, min(s.ema20, s.vwap) * 0.9992)
+        red_rejection = bearish and last.close <= min(prev.close, max(s.ema20, s.vwap) * 1.0008)
+
+        if direction == "LONG":
+            impulse_ok = bullish and last.close >= prev.high * 0.9993
+            wick_ok = s.upper_wick_pct <= 0.55
+            macd_ok = s.macd_hist_slope > 0
+            neutral_push = s.rsi >= 49 and s.rsi_delta > 0
+            reversal_ok = (s.consecutive_down >= 1 or s.rsi <= 45 or s.lower_wick_pct >= 0.30) and green_reclaim and macd_ok
+        else:
+            impulse_ok = bearish and last.close <= prev.low * 1.0007
+            wick_ok = s.lower_wick_pct <= 0.55
+            macd_ok = s.macd_hist_slope < 0
+            neutral_push = s.rsi <= 51 and s.rsi_delta < 0
+            reversal_ok = (s.consecutive_up >= 1 or s.rsi >= 55 or s.upper_wick_pct >= 0.30) and red_rejection and macd_ok
+
+        if reversal_ok:
+            points += 17
+            reasons.append("کندل 5m برگشت بعد از مصرف حرکت قبلی را تأیید می‌کند.")
+            if 0.80 <= s.volume_ratio <= 3.40:
+                points += 3
+            return CandleHunterResult("REVERSAL_BUILDING", min(WEIGHTS.candle_entry, points), tuple(reasons))
+
+        # A huge candle with climax volume is useful information, but not an automatic block.
+        if range_atr > 2.15 and s.body_pct > 0.66 and s.volume_ratio > 3.6:
+            points += 6
+            reasons.append("کندل بسیار بزرگ و ولوم کلایمکس؛ برای ورود مستقیم نیاز به تأیید بعدی دارد.")
+            return CandleHunterResult("EXHAUSTION", min(WEIGHTS.candle_entry, points), tuple(reasons))
+
+        if impulse_ok:
+            points += 8; reasons.append("کندل 5m فشار میکرو در جهت شکار دارد.")
+        if 0.16 <= body_atr <= 1.55 and s.body_pct >= 0.30:
+            points += 5; reasons.append("اندازه کندل برای شروع/ادامه اسکالپ قابل استفاده است.")
         if wick_ok:
             points += 3
         if macd_ok:
+            points += 5; reasons.append("کندل با تقویت MACD همراه است.")
+        if neutral_push:
+            points += 4; reasons.append("RSI از ناحیه خنثی به سمت جهت شکار فشار گرفته است.")
+        if 0.65 <= s.volume_ratio <= 3.20:
             points += 4
-        if rsi_start:
-            points += 3; reasons.append("RSI 5m داخل بازه شروع حرکت است.")
-        if 0.85 <= s.volume_ratio <= 2.6:
-            points += 3
-        elif s.volume_ratio > 3.2:
-            points -= 4; reasons.append("ولوم 5m خیلی زیاد است؛ خطر دیر شدن.")
-        if points >= 16:
+        elif s.volume_ratio > 4.0:
+            points -= 2; reasons.append("ولوم خیلی انفجاری است؛ ریسک کلایمکس لحاظ شد.")
+
+        if points >= 18:
             label: PatternLabel = "IGNITION_START"
             reasons.append("الگوی کندلی شروع حرکت تشخیص داده شد.")
-        elif points >= 9:
+        elif points >= 13:
+            label = "POWER_BUILDING"
+            reasons.append("کندل نشان می‌دهد قدرت جهت در حال ساخته‌شدن است.")
+        elif points >= 8:
             label = "PRE_IGNITION_WATCH"
-            reasons.append("کندل نزدیک شروع است ولی تریگر کامل نیست.")
+            reasons.append("کندل نزدیک شکار است ولی بهتر است در Watch/Ghost پیگیری شود.")
         else:
             label = "NOISE"
             reasons.append("کندل هنوز شکار قطعی نیست.")

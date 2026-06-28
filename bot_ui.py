@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from config import MIN_NET_PROFIT_USDT, OWNER_ID, TELEGRAM_CHAT_ID
+from config import OWNER_ID, TELEGRAM_CHAT_ID
 from scorer import SignalDecision
 from storage import Storage, StoredSignal
 from trade_manager import CreatedSignal, PanelData, TradeManager
@@ -81,9 +81,8 @@ class BotUI:
             f"RSI 5m/15m: {decision.rsi_5m:.1f} / {decision.rsi_15m:.1f}\n"
             f"ADX 15m: {decision.adx_15m:.1f}\n"
             f"Vol 5m/15m: {decision.volume_ratio_5m:.2f}x / {decision.volume_ratio_15m:.2f}x\n"
-            f"Net Edge: {fmt_pct(decision.net_edge)}\n"
-            f"سود خالص تخمینی: {fmt_money(decision.estimated_profit_usdt)}\n"
-            f"حداقل سود خالص ثابت: {MIN_NET_PROFIT_USDT:.2f} USDT\n"
+            f"Net Edge نمایشی: {fmt_pct(decision.net_edge)}\n"
+            f"سود کل تخمینی تا TP: {fmt_money(decision.estimated_profit_usdt)}\n"
             f"RR: {decision.risk_reward:.2f}\n\n"
             f"امتیازها: جهت {decision.breakdown.score_direction} | شروع حرکت {decision.breakdown.score_pre_ignition} | "
             f"ورود {decision.breakdown.score_candle_entry} | AI {decision.breakdown.score_ai_memory} | "
@@ -151,7 +150,7 @@ class BotUI:
             f"دلار هر پوزیشن: {data.margin_usdt:.2f} USDT\n"
             f"لوریج: {data.leverage}x\n"
             f"حداکثر پوزیشن: {data.max_positions}\n"
-            f"حداقل سود خالص ثابت: {MIN_NET_PROFIT_USDT:.2f} USDT\n"
+            "شرط حداقل سود: حذف شده؛ سود فقط برای نمایش و آمار است.\n"
             f"اسلات پر/رزرو: {data.filled_slots}\n"
             f"اسلات خالی: {data.empty_slots}\n"
             f"در انتظار تایید 70 ثانیه‌ای: {data.pending_slots}\n"
@@ -200,7 +199,7 @@ class BotUI:
                 self.storage.set_max_positions(value)
                 await self._send_text(chat_id, f"✅ حداکثر پوزیشن روی {value} تنظیم شد.")
             elif text.startswith("حداقل سود") or text.startswith("درصد سود"):
-                await self._send_text(chat_id, "❌ این نسخه دستور حداقل سود و درصد سود ندارد. حداقل سود خالص ثابت داخل ربات 0.10 USDT است.")
+                await self._send_text(chat_id, "❌ شرط حداقل سود از منطق ورود حذف شده است. سود فقط برای نمایش و آمار ثبت می‌شود.")
             elif text == "حذف آمار":
                 await self._send_text(chat_id, "⚠️ برای صفر کردن آمار بنویس: حذف آمار تایید")
             elif text == "حذف آمار تایید":
@@ -268,7 +267,7 @@ class BotUI:
             "حداکثر پوزیشن 3\n"
             "حذف آمار / حذف آمار تایید\n"
             "ریست یادگیری / ریست یادگیری تایید\n\n"
-            "این نسخه دستور حداقل سود و درصد سود ندارد؛ حداقل سود خالص ثابت 0.10 USDT است."
+            "شرط حداقل سود از ورود حذف شده؛ سود فقط برای نمایش و آمار ثبت می‌شود."
         )
 
     async def _send_text(self, chat_id: int | str, text: str) -> None:

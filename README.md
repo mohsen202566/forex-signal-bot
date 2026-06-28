@@ -1,20 +1,20 @@
 # Forex Scalper AI Helper
 
-> اسم/ID ربات «Forex» است، اما هیچ منطق فارکس واقعی ندارد. بازار واقعی کاملاً Crypto Futures است.
+> اسم/ID ربات «Forex» است، اما منطق واقعی آن Crypto Futures روی Toobit است.
 
 ## قفل‌های اصلی نسخه اسکالپ
 
 - Data Source: OKX
 - Execution: فقط Toobit Futures
-- Strategy: شکار شروع پامپ/دامپ در بازه 5 تا 15 دقیقه
+- Strategy: شکار شروع پامپ/دامپ و برگشت بعد از پامپ/دامپ مصرف‌شده در بازه 5 تا 15 دقیقه
 - تایم‌فریم تصمیم: 15m برای جهت و محدوده، 5m برای نقطه ورود
 - 1H و 4H فقط context هستند و قفل ورود نیستند
-- Score نرم‌تر است: زیر 60 رد، 60 تا 69 Watch/Ghost، 70+ کاندید Real
-- کیفیت ورود مهم‌تر از عدد امتیاز است: `EARLY_IGNITION` یا `GOOD_ENTRY`
-- AI واقعی است و بازه‌های هر ارز/جهت/اندیکاتور/محدوده را یاد می‌گیرد
-- RSI بالا، MACD بالا، ADX بالا یا Volume بالا به‌تنهایی قدرت حساب نمی‌شود؛ AI باید بازه شروع حرکت را یاد بگیرد
-- حداقل سود خالص ثابت: `0.10 USDT`
-- دستورهای «حداقل سود» و «درصد سود» از پنل حذف شده‌اند
+- Score بالانس‌تر است: زیر 45 رد، 45 تا 59 Watch/Ghost، 60+ کاندید Real
+- کیفیت ورود‌های اصلی: `EARLY_IGNITION`، `GOOD_ENTRY`، `POWER_BUILDING`، `REVERSAL_BUILDING`
+- لایه جداگانه زمان‌بندی جداگانه حذف شده است؛ ربات مستقیم شروع قدرت، ضعف حرکت قبلی، برگشت و فیک‌ریسک را تشخیص می‌دهد
+- AI بازه‌های هر ارز/جهت/اندیکاتور/محدوده را یاد می‌گیرد
+- RSI بالا، MACD بالا، ADX بالا یا Volume بالا به‌تنهایی قدرت حساب نمی‌شود؛ ربات باید تغییر شیب و شروع فشار را تشخیص دهد
+- شرط حداقل سود برای ورود حذف شده است؛ سود فقط برای نمایش و آمار ثبت می‌شود
 - حجم پوزیشن با امتیاز تغییر نمی‌کند؛ از تنظیمات پنل می‌آید
 - فیلتر پویای ارز وجود ندارد؛ واچ‌لیست ثابت است
 - TP/SL دو نوع ثبت می‌شود: واقعی Toobit و عادی ربات
@@ -44,36 +44,15 @@ Ai
 راهنما
 ```
 
-## دستورات حذف‌شده
-
-```text
-حداقل سود
-درصد سود
-```
-
-این دو دستور عمداً حذف شده‌اند. حداقل سود خالص داخل کد ثابت است:
-
-```python
-MIN_NET_PROFIT_USDT = 0.10
-```
-
 ## نصب روی VPS
-
-اگر مسیر پروژه قبلی همین بوده:
 
 ```bash
 cd /root/forex-signal-bot
 git pull origin main
-sudo systemctl restart forex-bot.service
-sudo systemctl status forex-bot.service
-journalctl -u forex-bot.service -f
-```
-
-برای تست سینتکس قبل از ری‌استارت:
-
-```bash
-cd /root/forex-signal-bot
 python3 -m py_compile *.py
+sudo systemctl restart forex-bot.service
+sudo systemctl status forex-bot.service --no-pager -l
+journalctl -u forex-bot.service -f
 ```
 
 ## نکته امنیتی

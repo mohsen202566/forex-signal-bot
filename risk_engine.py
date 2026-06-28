@@ -50,7 +50,7 @@ class RiskEngine:
         rr = reward / risk
         risk_pct = risk / entry if entry > 0 else 0.0
         expected_move_pct = reward / entry if entry > 0 else 0.0
-        ok = rr >= MIN_RISK_REWARD and 0.00045 <= risk_pct <= 0.018
+        ok = rr >= MIN_RISK_REWARD and 0.00030 <= risk_pct <= 0.020
         if ok:
             reasons.append("TP/SL اسکالپی با ATR و محدوده تکنیکال قابل قبول است.")
         else:

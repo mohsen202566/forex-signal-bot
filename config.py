@@ -36,13 +36,13 @@ def _env_bool(*names: str, default: bool) -> bool:
 @dataclass(frozen=True)
 class ScoreWeights:
     # Scalping score: quality of start/entry is more important than a high strict score.
-    direction: int = 8          # 15m/5m direction only, not 1H hard filter
+    direction: int = 10         # 15m/5m direction and reversal pressure
     pre_ignition: int = 25      # pump/dump start pressure
-    candle_entry: int = 25      # entry quality and micro ignition
+    candle_entry: int = 27      # entry trigger, power building, reversal building
     ai_memory: int = 20         # real AI pattern/range learning
-    risk_net: int = 0           # net profit is a hard gate, not score
+    risk_net: int = 0           # profit/cost is informational only
     session: int = 3
-    order_block: int = 19       # technical zone / 1H context / OB
+    order_block: int = 15       # technical zone / 1H context / OB
 
 
 DATA_DIR = _env_first("BOT_DATA_DIR", default="data")
@@ -71,8 +71,8 @@ MAX_WATCH_SYMBOLS = _env_int("MAX_WATCH_SYMBOLS", default=6)
 WATCH_EXPIRE_SECONDS = _env_int("WATCH_EXPIRE_SECONDS", default=120)
 READY_ALERT_COOLDOWN_SECONDS = _env_int("READY_ALERT_COOLDOWN_SECONDS", default=45)
 
-SIGNAL_THRESHOLD = _env_int("SIGNAL_THRESHOLD", "ACCEPT_SCORE", default=70)
-WATCH_THRESHOLD = _env_int("WATCH_THRESHOLD", default=60)
+SIGNAL_THRESHOLD = _env_int("SIGNAL_THRESHOLD", "ACCEPT_SCORE", default=60)
+WATCH_THRESHOLD = _env_int("WATCH_THRESHOLD", default=45)
 WEIGHTS = ScoreWeights()
 
 DEFAULT_TRADE_ENABLED = _env_bool("DEFAULT_TRADE_ENABLED", default=False)
@@ -80,8 +80,8 @@ DEFAULT_MARGIN_USDT = _env_float("DEFAULT_MARGIN_USDT", default=10.0)
 DEFAULT_LEVERAGE = _env_int("DEFAULT_LEVERAGE", default=5)
 DEFAULT_MAX_POSITIONS = _env_int("DEFAULT_MAX_POSITIONS", default=3)
 
-# Fixed, not panel-configurable. User requirement: min net profit 0.10 USDT.
-MIN_NET_PROFIT_USDT = _env_float("MIN_NET_PROFIT_USDT", default=0.05)
+# Compatibility only; profit gate is removed and this value is not used to block entries.
+MIN_NET_PROFIT_USDT = _env_float("MIN_NET_PROFIT_USDT", default=0.0)
 ESTIMATED_FIXED_ROUND_FEE_USDT = _env_float("ESTIMATED_FIXED_ROUND_FEE_USDT", default=0.07)
 DEFAULT_MIN_PROFIT_USDT = MIN_NET_PROFIT_USDT
 DEFAULT_MIN_PROFIT_PCT = 0.0
@@ -101,7 +101,7 @@ TOOBIT_TAKER_FEE = _env_float("TOOBIT_TAKER_FEE", "TOBIT_TAKER_FEE", default=0.0
 SPREAD_BUFFER = _env_float("SPREAD_BUFFER", default=0.00025)
 SLIPPAGE_BUFFER = _env_float("SLIPPAGE_BUFFER", default=0.00035)
 MIN_NET_EDGE = _env_float("MIN_NET_EDGE", default=0.00020)
-MIN_RISK_REWARD = _env_float("MIN_RISK_REWARD", default=1.05)
+MIN_RISK_REWARD = _env_float("MIN_RISK_REWARD", default=0.95)
 
 # Scalping data is heavy; raw learning is short, summaries are weekly.
 LEARNING_DAYS = _env_int("LEARNING_DAYS", default=7)

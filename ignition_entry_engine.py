@@ -17,12 +17,17 @@ class IgnitionEntryResult:
 class IgnitionEntryEngine:
     def analyze(self, candle: CandleHunterResult, stage: EntryStageResult) -> IgnitionEntryResult:
         reasons = list(candle.reasons) + list(stage.reasons)
-        if candle.label in {"LATE_CHASE", "MID_MOVE", "EXHAUSTION", "PULLBACK"} or not stage.ok_for_real:
-            return IgnitionEntryResult("LATE", max(0, candle.score + stage.score_bonus), tuple(reasons))
-        if candle.label == "IGNITION_START" and stage.stage_pct <= 18:
-            return IgnitionEntryResult("EARLY_IGNITION", min(25, candle.score + stage.score_bonus), tuple(reasons))
+        base_score = max(0, candle.score + stage.score_bonus)
+        if candle.label == "REVERSAL_BUILDING":
+            return IgnitionEntryResult("REVERSAL_BUILDING", min(25, base_score + 3), tuple(reasons))
+        if candle.label == "IGNITION_START" and stage.stage_pct <= 25:
+            return IgnitionEntryResult("EARLY_IGNITION", min(25, base_score), tuple(reasons))
         if candle.label == "IGNITION_START":
-            return IgnitionEntryResult("GOOD_ENTRY", min(23, candle.score + stage.score_bonus), tuple(reasons))
+            return IgnitionEntryResult("GOOD_ENTRY", min(24, base_score), tuple(reasons))
+        if candle.label == "POWER_BUILDING":
+            return IgnitionEntryResult("POWER_BUILDING", min(22, base_score), tuple(reasons))
+        if candle.label == "EXHAUSTION":
+            return IgnitionEntryResult("EXHAUSTION", min(14, base_score), tuple(reasons))
         if candle.label == "PRE_IGNITION_WATCH":
-            return IgnitionEntryResult("PRE_WATCH", min(16, candle.score + max(0, stage.score_bonus)), tuple(reasons))
+            return IgnitionEntryResult("PRE_WATCH", min(17, base_score), tuple(reasons))
         return IgnitionEntryResult("NO_ENTRY", max(0, candle.score), tuple(reasons))
