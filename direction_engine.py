@@ -20,17 +20,17 @@ class DirectionEngine:
     def analyze_15m_scalp(self, snapshot_15m: IndicatorSnapshot, snapshot_5m: IndicatorSnapshot) -> DirectionResult:
         long_raw, long_reasons = self._scalp_side_strength(snapshot_15m, snapshot_5m, "LONG")
         short_raw, short_reasons = self._scalp_side_strength(snapshot_15m, snapshot_5m, "SHORT")
-        if long_raw >= short_raw + 8 and long_raw >= 18:
-            confidence = min(100, int(long_raw * 2.2))
-            score = min(WEIGHTS.direction, 4 + confidence // 22)
+        if long_raw >= short_raw + 5 and long_raw >= 14:
+            confidence = min(100, int(long_raw * 2.5))
+            score = min(WEIGHTS.direction, 4 + confidence // 18)
             return DirectionResult("LONG", score, confidence, int(long_raw), tuple(long_reasons + ["15m/5m جهت اسکالپ لانگ را می‌دهد."]))
-        if short_raw >= long_raw + 8 and short_raw >= 18:
-            confidence = min(100, int(short_raw * 2.2))
-            score = min(WEIGHTS.direction, 4 + confidence // 22)
+        if short_raw >= long_raw + 5 and short_raw >= 14:
+            confidence = min(100, int(short_raw * 2.5))
+            score = min(WEIGHTS.direction, 4 + confidence // 18)
             return DirectionResult("SHORT", score, confidence, int(-short_raw), tuple(short_reasons + ["15m/5m جهت اسکالپ شورت را می‌دهد."]))
         raw = int(long_raw - short_raw)
-        confidence = min(100, abs(raw) * 2)
-        return DirectionResult("NEUTRAL", min(3, confidence // 15), confidence, raw, ("15m/5m جهت شروع حرکت را واضح نشان نمی‌دهد.",))
+        confidence = min(100, abs(raw) * 3)
+        return DirectionResult("NEUTRAL", min(5, confidence // 12), confidence, raw, ("15m/5m جهت شروع حرکت هنوز کامل نیست؛ برای Real کافی نیست.",))
 
     def analyze_1h_context(self, snapshot: IndicatorSnapshot, direction: Direction) -> DirectionResult:
         raw, reasons = self._raw_strength(snapshot)
@@ -89,59 +89,59 @@ class DirectionEngine:
         points = 0
         reasons: list[str] = []
         if direction == "LONG":
-            if 48 <= s15.rsi <= 59:
+            if 46 <= s15.rsi <= 60:
                 points += 8; reasons.append("RSI 15m در بازه شروع لانگ است، نه ته حرکت.")
-            elif 59 < s15.rsi <= 64:
+            elif 60 < s15.rsi <= 66:
                 points += 2; reasons.append("RSI 15m کمی کشیده است؛ با احتیاط.")
-            elif s15.rsi > 64:
-                points -= 8; reasons.append("RSI 15m بالا است؛ احتمال دیر شدن لانگ.")
-            if 49 <= s5.rsi <= 58:
+            elif s15.rsi > 66:
+                points -= 5; reasons.append("RSI 15m بالا است؛ احتمال دیر شدن لانگ.")
+            if 47 <= s5.rsi <= 60:
                 points += 6; reasons.append("RSI 5m برای شروع پامپ مناسب است.")
-            elif s5.rsi > 62:
-                points -= 7; reasons.append("RSI 5m بالا است؛ قدرت کورکورانه حساب نمی‌شود.")
+            elif s5.rsi > 65:
+                points -= 5; reasons.append("RSI 5m بالا است؛ قدرت کورکورانه حساب نمی‌شود.")
             if s15.macd_hist >= s15.prev_macd_hist:
                 points += 7; reasons.append("MACD 15m در فاز تقویت اولیه لانگ است.")
             if s5.macd_hist >= s5.prev_macd_hist:
                 points += 5
-            if 14 <= s15.adx <= 28 and s15.plus_di >= s15.minus_di:
+            if 12 <= s15.adx <= 30 and s15.plus_di >= s15.minus_di:
                 points += 7; reasons.append("ADX/DI شروع قدرت لانگ را نشان می‌دهد.")
-            elif s15.adx > 34:
-                points -= 5; reasons.append("ADX خیلی بالا؛ ممکن است حرکت مصرف شده باشد.")
+            elif s15.adx > 38:
+                points -= 4; reasons.append("ADX خیلی بالا؛ ممکن است حرکت مصرف شده باشد.")
             if s5.close >= s5.ema20:
                 points += 4
         else:
-            if 41 <= s15.rsi <= 52:
+            if 40 <= s15.rsi <= 54:
                 points += 8; reasons.append("RSI 15m در بازه شروع شورت است.")
-            elif 36 <= s15.rsi < 41:
+            elif 34 <= s15.rsi < 40:
                 points += 2; reasons.append("RSI 15m کمی پایین است؛ با احتیاط.")
-            elif s15.rsi < 36:
-                points -= 8; reasons.append("RSI 15m خیلی پایین است؛ احتمال ته دامپ.")
-            if 42 <= s5.rsi <= 52:
+            elif s15.rsi < 34:
+                points -= 5; reasons.append("RSI 15m خیلی پایین است؛ احتمال ته دامپ.")
+            if 40 <= s5.rsi <= 54:
                 points += 6; reasons.append("RSI 5m برای شروع دامپ مناسب است.")
-            elif s5.rsi < 38:
-                points -= 7; reasons.append("RSI 5m خیلی پایین است؛ احتمال ورود دیر شورت.")
+            elif s5.rsi < 35:
+                points -= 5; reasons.append("RSI 5m خیلی پایین است؛ احتمال ورود دیر شورت.")
             if s15.macd_hist <= s15.prev_macd_hist:
                 points += 7; reasons.append("MACD 15m در فاز تقویت اولیه شورت است.")
             if s5.macd_hist <= s5.prev_macd_hist:
                 points += 5
-            if 14 <= s15.adx <= 28 and s15.minus_di >= s15.plus_di:
+            if 12 <= s15.adx <= 30 and s15.minus_di >= s15.plus_di:
                 points += 7; reasons.append("ADX/DI شروع قدرت شورت را نشان می‌دهد.")
-            elif s15.adx > 34:
-                points -= 5; reasons.append("ADX خیلی بالا؛ ممکن است دامپ مصرف شده باشد.")
+            elif s15.adx > 38:
+                points -= 4; reasons.append("ADX خیلی بالا؛ ممکن است دامپ مصرف شده باشد.")
             if s5.close <= s5.ema20:
                 points += 4
-        if 0.8 <= s15.volume_ratio <= 2.4:
+        if 0.7 <= s15.volume_ratio <= 2.8:
             points += 4; reasons.append("Volume 15m شروع فشار را نشان می‌دهد، نه کلایمکس.")
-        elif s15.volume_ratio > 3.0:
+        elif s15.volume_ratio > 3.5:
             points -= 6; reasons.append("Volume 15m خیلی انفجاری است؛ احتمال کلایمکس.")
-        if 0.8 <= s5.volume_ratio <= 2.6:
+        if 0.7 <= s5.volume_ratio <= 3.0:
             points += 4
-        elif s5.volume_ratio > 3.2:
+        elif s5.volume_ratio > 3.8:
             points -= 6
         atr_ratio = s15.atr / max(s15.prev_atr, s15.close * 0.0001)
-        if 0.92 <= atr_ratio <= 1.45:
+        if 0.85 <= atr_ratio <= 1.60:
             points += 3; reasons.append("ATR در فاز شروع نوسان است.")
-        elif atr_ratio > 1.8:
+        elif atr_ratio > 2.0:
             points -= 4; reasons.append("ATR بیش از حد باز شده؛ خطر ورود دیر.")
         return max(0, points), reasons
 
