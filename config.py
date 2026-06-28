@@ -81,7 +81,7 @@ DEFAULT_LEVERAGE = _env_int("DEFAULT_LEVERAGE", default=5)
 DEFAULT_MAX_POSITIONS = _env_int("DEFAULT_MAX_POSITIONS", default=3)
 
 # Fixed, not panel-configurable. User requirement: min net profit 0.10 USDT.
-MIN_NET_PROFIT_USDT = _env_float("MIN_NET_PROFIT_USDT", default=0.10)
+MIN_NET_PROFIT_USDT = _env_float("MIN_NET_PROFIT_USDT", default=0.08)
 ESTIMATED_FIXED_ROUND_FEE_USDT = _env_float("ESTIMATED_FIXED_ROUND_FEE_USDT", default=0.07)
 DEFAULT_MIN_PROFIT_USDT = MIN_NET_PROFIT_USDT
 DEFAULT_MIN_PROFIT_PCT = 0.0
