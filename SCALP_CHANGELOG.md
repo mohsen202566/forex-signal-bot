@@ -12,3 +12,11 @@
 - امتیازدهی نرم‌تر شد: Real از 60، Watch/Ghost از 45
 - پنل فارسی و پیام سیگنال به‌روز شد
 - مسیر `start_bot.sh` روی `/root/forex-signal-bot` تنظیم شد
+
+## Fix live entry + TP/SL safety
+
+- Entry سیگنال از قیمت لحظه‌ای OKX گرفته می‌شود، نه close کندل بسته‌شده 5m.
+- TP/SL بعد از قیمت لحظه‌ای دوباره ساخته می‌شود.
+- حداقل فاصله امن برای SL و TP اضافه شد تا سیگنال با نویز/اسپرد فوری استاپ نخورد.
+- مقادیر قابل تنظیم در `.env`: `MIN_SCALP_SL_PCT`, `MIN_SCALP_TP_PCT`, `MAX_SCALP_SL_PCT`, `MIN_RISK_REWARD`.
+

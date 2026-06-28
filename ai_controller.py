@@ -30,6 +30,7 @@ class AnalysisInput:
     btc_1h: list[Candle] | None = None
     eth_1h: list[Candle] | None = None
     watch_mode: bool = False
+    live_price: float | None = None
 
 
 class AIController:
@@ -56,7 +57,8 @@ class AIController:
         s1h = snapshots[TIMEFRAME_1H]
         s15 = snapshots[TIMEFRAME_15M]
         s5 = snapshots[TIMEFRAME_5M]
-        entry = s5.close
+        # Indicators are calculated from completed candles, but execution/scalp TP-SL must use live price.
+        entry = float(data.live_price) if data.live_price and data.live_price > 0 else s5.close
 
         dir15 = self.direction_engine.analyze_15m_scalp(s15, s5)
         if dir15.state not in ("LONG", "SHORT"):

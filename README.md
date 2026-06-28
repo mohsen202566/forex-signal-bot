@@ -58,3 +58,11 @@ journalctl -u forex-bot.service -f
 ## نکته امنیتی
 
 `.env` را عمومی نکن. توکن تلگرام و کلیدهای Toobit نباید داخل گیت یا فایل ارسالی قرار بگیرند.
+
+## Fix live entry + TP/SL safety
+
+- Entry سیگنال از قیمت لحظه‌ای OKX گرفته می‌شود، نه close کندل بسته‌شده 5m.
+- TP/SL بعد از قیمت لحظه‌ای دوباره ساخته می‌شود.
+- حداقل فاصله امن برای SL و TP اضافه شد تا سیگنال با نویز/اسپرد فوری استاپ نخورد.
+- مقادیر قابل تنظیم در `.env`: `MIN_SCALP_SL_PCT`, `MIN_SCALP_TP_PCT`, `MAX_SCALP_SL_PCT`, `MIN_RISK_REWARD`.
+

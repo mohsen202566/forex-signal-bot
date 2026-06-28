@@ -33,8 +33,19 @@ async def load_market_cache(okx: OkxDataClient) -> dict[str, list]:
 
 
 async def analyze_symbol(okx: OkxDataClient, controller: AIController, symbol: MarketSymbol, market_cache: dict[str, list], watch_mode: bool = False):
-    candles_by_tf = await asyncio.to_thread(okx.get_multi_timeframe, symbol.okx_inst_id, TIMEFRAMES)
-    return controller.analyze(AnalysisInput(symbol_name=symbol.name, candles_by_tf=candles_by_tf, btc_1h=market_cache.get(MARKET_CONTEXT_SYMBOLS[0]), eth_1h=market_cache.get(MARKET_CONTEXT_SYMBOLS[1]), watch_mode=watch_mode))
+    # Use completed candles for indicators, but use the live ticker price for entry and TP/SL.
+    # This prevents immediate TP/SL hits caused by using an old 5m candle close as entry.
+    candles_task = asyncio.to_thread(okx.get_multi_timeframe, symbol.okx_inst_id, TIMEFRAMES)
+    price_task = asyncio.to_thread(okx.get_last_price, symbol.okx_inst_id)
+    candles_by_tf, live_price = await asyncio.gather(candles_task, price_task)
+    return controller.analyze(AnalysisInput(
+        symbol_name=symbol.name,
+        candles_by_tf=candles_by_tf,
+        btc_1h=market_cache.get(MARKET_CONTEXT_SYMBOLS[0]),
+        eth_1h=market_cache.get(MARKET_CONTEXT_SYMBOLS[1]),
+        watch_mode=watch_mode,
+        live_price=live_price,
+    ))
 
 
 async def scanner_loop(okx: OkxDataClient, controller: AIController, trade_manager: TradeManager, watch_engine: WatchEngine, health: SymbolHealth, ui: BotUI) -> None:

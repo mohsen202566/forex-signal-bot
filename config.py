@@ -101,7 +101,12 @@ TOOBIT_TAKER_FEE = _env_float("TOOBIT_TAKER_FEE", "TOBIT_TAKER_FEE", default=0.0
 SPREAD_BUFFER = _env_float("SPREAD_BUFFER", default=0.00025)
 SLIPPAGE_BUFFER = _env_float("SLIPPAGE_BUFFER", default=0.00035)
 MIN_NET_EDGE = _env_float("MIN_NET_EDGE", default=0.00020)
-MIN_RISK_REWARD = _env_float("MIN_RISK_REWARD", default=0.95)
+MIN_RISK_REWARD = _env_float("MIN_RISK_REWARD", default=1.10)
+
+# TP/SL safety for live 5m-15m scalping. Values are price-move percentages, not account PnL.
+MIN_SCALP_SL_PCT = _env_float("MIN_SCALP_SL_PCT", default=0.0012)    # 0.12% minimum SL distance
+MIN_SCALP_TP_PCT = _env_float("MIN_SCALP_TP_PCT", default=0.0018)    # 0.18% minimum TP distance
+MAX_SCALP_SL_PCT = _env_float("MAX_SCALP_SL_PCT", default=0.0200)    # 2.00% maximum SL distance
 
 # Scalping data is heavy; raw learning is short, summaries are weekly.
 LEARNING_DAYS = _env_int("LEARNING_DAYS", default=7)
