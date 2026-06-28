@@ -1,19 +1,73 @@
-venv/
-.env
+# =========================
+# Python
+# =========================
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
+*.so
+.Python
+
+# =========================
+# Virtual environment
+# =========================
+venv/
+.env/
+env/
+ENV/
+
+# =========================
+# Secrets
+# =========================
+.env
+.env.local
+.env.production
+.env.*
+
+# Keep example env file
+!.env.example
+
+# =========================
+# Logs
+# =========================
 *.log
 logs/
+log/
 
-.idea/
-.vscode/
-
+# =========================
+# Runtime state / local data
+# =========================
 runtime_state.json
 signals.json
 trades.json
 learning_memory.json
 users.json
 
+# =========================
+# Database files
+# =========================
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# =========================
+# Backups / archives
+# =========================
 *.zip
+*.tar
+*.tar.gz
+*.bak
+*.backup
+
+# =========================
+# IDE / editor
+# =========================
+.idea/
+.vscode/
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
