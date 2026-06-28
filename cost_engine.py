@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from config import ESTIMATED_FIXED_ROUND_FEE_USDT, MIN_NET_EDGE, MIN_NET_PROFIT_USDT, SLIPPAGE_BUFFER, SPREAD_BUFFER, TOOBIT_TAKER_FEE
+from config import ESTIMATED_FIXED_ROUND_FEE_USDT, SLIPPAGE_BUFFER, SPREAD_BUFFER, TOOBIT_TAKER_FEE
 from scorer import Direction
 
 
@@ -27,18 +27,16 @@ class CostEngine:
         fixed_fee = ESTIMATED_FIXED_ROUND_FEE_USDT
         gross_profit_usdt = margin_usdt * max(1, leverage) * gross_move
         net_profit_usdt = gross_profit_usdt - variable_cost_usdt - fixed_fee
-        net_edge = net_profit_usdt / max(margin_usdt * max(1, leverage), 1e-9)
+        notional_usdt = margin_usdt * max(1, leverage)
+        net_edge = net_profit_usdt / max(notional_usdt, 1e-9)
         estimated_cost_pct = percent_cost
-        profit_pct = net_edge * 100.0
+        gross_profit_pct = gross_move * 100.0
+
+        # Profit/cost is informational only. It must not block scalper signals.
         reasons = [
-            f"سود خالص تخمینی={net_profit_usdt:.2f} USDT بعد از fee/slippage.",
-            f"حداقل سود خالص ثابت={MIN_NET_PROFIT_USDT:.2f} USDT.",
+            f"سود کل تخمینی={gross_profit_usdt:.2f} USDT.",
+            f"سود خالص نمایشی بعد از fee/slippage={net_profit_usdt:.2f} USDT.",
+            "شرط حداقل سود برای ورود حذف شده است؛ این بخش فقط برای نمایش و آمار است.",
         ]
-        ok = True
-        if net_edge < MIN_NET_EDGE:
-            reasons.append("Net Edge پایه کافی نیست.")
-            ok = False
-        if net_profit_usdt < MIN_NET_PROFIT_USDT:
-            reasons.append("سود خالص کمتر از 0.10 دلار است؛ رد کامل.")
-            ok = False
-        return CostResult(ok, net_edge, estimated_cost_pct, net_profit_usdt, profit_pct, 0, tuple(reasons))
+
+        return CostResult(True, net_edge, estimated_cost_pct, gross_profit_usdt, gross_profit_pct, 0, tuple(reasons))
