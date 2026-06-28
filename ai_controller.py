@@ -59,11 +59,18 @@ class AIController:
         entry = s5.close
 
         dir15 = self.direction_engine.analyze_15m_scalp(s15, s5)
-        if dir15.state not in ("LONG", "SHORT"):
+        soft_direction_watch = False
+        if dir15.state in ("LONG", "SHORT"):
+            direction: Direction = "LONG" if dir15.state == "LONG" else "SHORT"
+        elif abs(dir15.raw_strength) >= 4:
+            # جهت هنوز برای Real کامل نیست، اما برای Watch/Ghost ارزش یادگیری دارد.
+            direction = "LONG" if dir15.raw_strength > 0 else "SHORT"
+            soft_direction_watch = True
+        else:
             return self._reject(
                 entry=entry,
                 breakdown=ScoreBreakdown(score_direction=dir15.score),
-                reason="15m/5m شروع حرکت را واضح نشان نمی‌دهد؛ سیگنال رد شد.",
+                reason="15m/5m هنوز حتی جهت اولیه قابل یادگیری هم نداده؛ رد کامل.",
                 code="SCALP_DIRECTION_NEUTRAL",
                 setup_15m=dir15.state,
                 notes=dir15.reasons,
@@ -76,7 +83,6 @@ class AIController:
                 volume_ratio_5m=s5.volume_ratio,
                 volume_ratio_15m=s15.volume_ratio,
             )
-        direction: Direction = "LONG" if dir15.state == "LONG" else "SHORT"
         context1h = self.direction_engine.analyze_1h_context(s1h, direction)
         bias4h = self.direction_engine.analyze_4h_bias(s4h, direction)
         pre = self.pre_ignition.analyze(s15, s5, direction)
@@ -152,8 +158,6 @@ class AIController:
             notes=notes,
         )
 
-        if entry_quality.quality in {"LATE_ENTRY", "FAKE_MOVE_RISK"}:
-            return self._reject(entry=entry, tp=risk.tp, sl=risk.sl, breakdown=breakdown, reason="کیفیت نقطه ورود دیر/فیک تشخیص داده شد؛ Real ممنوع.", code="ENTRY_QUALITY_REJECT", hard=True, **common)
         if not risk.ok:
             return self._reject(entry=entry, tp=risk.tp, sl=risk.sl, breakdown=breakdown, reason="TP/SL اسکالپی برای این ورود قابل قبول نیست.", code="SCALP_RISK_REJECT", hard=True, **common)
         if not cost.ok:
@@ -161,11 +165,49 @@ class AIController:
         if indicator_ai.verdict == "NEGATIVE" and indicator_ai.experience >= 12:
             return SignalDecision(action="WATCH", accepted=False, direction=direction, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason="AI این بازه ارز/جهت/اندیکاتور را برای Real منفی می‌داند؛ فقط Ghost/Watch.", ready_alert=False, hunter=True, signal_label="هوش مصنوعی منفی - فقط واچ", **common)
 
+        if entry_quality.quality in {"LATE_ENTRY", "FAKE_MOVE_RISK"}:
+            if total >= WATCH_THRESHOLD:
+                return SignalDecision(
+                    action="WATCH",
+                    accepted=False,
+                    direction=direction,
+                    entry=entry,
+                    tp=risk.tp,
+                    sl=risk.sl,
+                    score=total,
+                    threshold=SIGNAL_THRESHOLD,
+                    breakdown=breakdown,
+                    reason="کیفیت نقطه ورود برای Real دیر/فیک است؛ برای Ghost/Watch ثبت شد تا AI یاد بگیرد.",
+                    ready_alert=False,
+                    hunter=True,
+                    signal_label="فقط Ghost/Watch - ورود دیر یا فیک",
+                    **common,
+                )
+            return self._reject(entry=entry, tp=risk.tp, sl=risk.sl, breakdown=breakdown, reason="کیفیت نقطه ورود دیر/فیک تشخیص داده شد و امتیاز برای Watch هم کافی نیست.", code="ENTRY_QUALITY_REJECT", hard=False, **common)
+
+        if soft_direction_watch and total >= WATCH_THRESHOLD:
+            return SignalDecision(
+                action="WATCH",
+                accepted=False,
+                direction=direction,
+                entry=entry,
+                tp=risk.tp,
+                sl=risk.sl,
+                score=total,
+                threshold=SIGNAL_THRESHOLD,
+                breakdown=breakdown,
+                reason="جهت 15m/5m هنوز برای Real کامل نیست؛ ولی جهت اولیه دارد و برای Ghost/Watch ثبت شد.",
+                ready_alert=True,
+                hunter=True,
+                signal_label="واچ جهت اولیه اسکالپ",
+                **common,
+            )
+
         ready_alert = total >= WATCH_THRESHOLD and entry_quality.quality in {"WEAK_ENTRY", "NO_ENTRY"}
         if total >= WATCH_THRESHOLD and (entry_quality.quality in {"WEAK_ENTRY", "NO_ENTRY"} or ignition.state == "PRE_WATCH"):
             return SignalDecision(action="WATCH", accepted=False, direction=direction, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason="شکارگاه اسکالپ آماده است ولی نقطه ورود هنوز برای Real کامل نیست.", ready_alert=ready_alert, hunter=True, signal_label="اسکالپ واچ", **common)
 
-        accepted = total >= SIGNAL_THRESHOLD and entry_quality.quality in {"EARLY_IGNITION", "GOOD_ENTRY"}
+        accepted = (not soft_direction_watch) and total >= SIGNAL_THRESHOLD and entry_quality.quality in {"EARLY_IGNITION", "GOOD_ENTRY"}
         return SignalDecision(
             action="SIGNAL" if accepted else "REJECT",
             accepted=accepted,
