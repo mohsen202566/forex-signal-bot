@@ -53,12 +53,10 @@ class BotUI:
         return str(chat_id) in allowed
 
     async def send_ready_alert(self, *, symbol_name: str, direction: str) -> int | None:
-        if self.app is None:
-            return None
-        direction_fa = "لانگ" if direction == "LONG" else "شورت"
-        text = f"🟡 آماده شکار\n{symbol_name} {direction_fa}\nAI هنوز منتظر ورود دقیق است."
-        msg = await self.app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
-        return int(msg.message_id)
+        # Watch/ready alerts are internal only.
+        # Telegram must receive only final signals, TP/SL results,
+        # and panel/stat/AI reports requested by command.
+        return None
 
     async def send_signal(self, *, symbol_name: str, decision: SignalDecision, created: CreatedSignal) -> int | None:
         if self.app is None or decision.direction is None:
