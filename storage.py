@@ -494,6 +494,98 @@ class Storage:
             })
         return result
 
+    def adaptive_context_stats(self, *, symbol_name: str, direction: str, entry_quality: str, candle_pattern: str, pattern_id: str, market_mode: str, session_state: str, score: int) -> tuple[dict[str, Any], ...]:
+        """Return learned outcome stats from broad-to-specific soft AI contexts.
+
+        These stats let the meta-brain learn whether a state such as PRECISION_WAIT,
+        weak movement, a pattern, a score bucket, or a market mode should become
+        softer, stricter, Normal-only, or Real-eligible for this exact symbol+direction.
+        """
+        start = datetime.now(timezone.utc) - timedelta(days=LEARNING_DAYS)
+        score_bucket_low = int(float(score or 0) // 5) * 5
+        contexts: list[tuple[str, str, tuple[Any, ...]]] = [
+            (
+                "entry_quality",
+                "entry_quality=?",
+                (entry_quality,),
+            ),
+            (
+                "quality+market",
+                "entry_quality=? AND market_mode=?",
+                (entry_quality, market_mode),
+            ),
+            (
+                "quality+candle",
+                "entry_quality=? AND candle_pattern=?",
+                (entry_quality, candle_pattern),
+            ),
+            (
+                "score_bucket",
+                "score BETWEEN ? AND ?",
+                (score_bucket_low, score_bucket_low + 4),
+            ),
+            (
+                "quality+score_bucket",
+                "entry_quality=? AND score BETWEEN ? AND ?",
+                (entry_quality, score_bucket_low, score_bucket_low + 4),
+            ),
+            (
+                "session+quality",
+                "session_state=? AND entry_quality=?",
+                (session_state, entry_quality),
+            ),
+        ]
+        if pattern_id:
+            contexts.append(("pattern_id", "pattern_id=?", (pattern_id,)))
+            contexts.append(("pattern+quality", "pattern_id=? AND entry_quality=?", (pattern_id, entry_quality)))
+        result: list[dict[str, Any]] = []
+        with self._connect() as conn:
+            for label, extra_where, params in contexts:
+                rows = conn.execute(
+                    f"""
+                    SELECT status, mfe_pct, mae_pct, signal_type, real_status
+                    FROM signals
+                    WHERE created_at>=?
+                      AND symbol_name=?
+                      AND direction=?
+                      AND status IN ('TP','SL')
+                      AND {extra_where}
+                    """,
+                    (start.isoformat(), symbol_name, direction, *params),
+                ).fetchall()
+                samples = len(rows)
+                if samples <= 0:
+                    continue
+                tp = sum(1 for r in rows if r["status"] == "TP")
+                sl = sum(1 for r in rows if r["status"] == "SL")
+                real_rows = [r for r in rows if str(r["signal_type"] or "") == "real" or str(r["real_status"] or "") in {"opened", "closed"}]
+                real_tp = sum(1 for r in real_rows if r["status"] == "TP")
+                real_sl = sum(1 for r in real_rows if r["status"] == "SL")
+                result.append({
+                    "label": label,
+                    "samples": samples,
+                    "tp": tp,
+                    "sl": sl,
+                    "win_rate": (tp / max(1, tp + sl) * 100.0) if tp + sl else 0.0,
+                    "avg_mfe": sum(float(r["mfe_pct"] or 0.0) for r in rows) / max(1, samples),
+                    "avg_mae": sum(float(r["mae_pct"] or 0.0) for r in rows) / max(1, samples),
+                    "real_samples": len(real_rows),
+                    "real_win_rate": (real_tp / max(1, real_tp + real_sl) * 100.0) if real_tp + real_sl else 0.0,
+                })
+        # Prefer specific contexts first when meta-brain applies effects.
+        priority = {
+            "pattern+quality": 0,
+            "quality+score_bucket": 1,
+            "quality+market": 2,
+            "quality+candle": 3,
+            "session+quality": 4,
+            "pattern_id": 5,
+            "score_bucket": 6,
+            "entry_quality": 7,
+        }
+        result.sort(key=lambda x: (priority.get(str(x.get("label")), 99), -int(x.get("samples", 0))))
+        return tuple(result)
+
     def store_profile_thresholds(self, *, symbol_name: str, direction: str, signal_threshold: int, real_threshold: int, source: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:

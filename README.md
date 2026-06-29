@@ -1,62 +1,65 @@
 # Forex Scalper AI Helper
 
-اسم/ID ربات «Forex» است، اما منطق واقعی آن Crypto Futures روی Toobit است.
+ربات Toobit Crypto Futures scalper با تحلیل OKX و اجرای واقعی فقط روی Toobit.
 
-## قفل‌های اصلی
+## قفل معماری این نسخه
 
-- Data Source: OKX
-- Execution: فقط Toobit Futures
-- Strategy: شکار شروع حرکت پامپ/دامپ و برگشت مصرف‌شده در بازه 5 تا 15 دقیقه
-- 1H و 4H فقط context هستند و قفل ورود نیستند
-- سنسورها نرم هستند؛ هیچ سنسور تحلیلی به‌تنهایی ورود را ممنوع نمی‌کند
-- Entry فقط زیر نظر AI است؛ اگر ورود دقیق تایید نشود، سیگنال صادر نمی‌شود
-- AI مسئول کامل Entry است: یا ورود دقیق می‌زند، یا سیگنال نمی‌دهد و فقط یاد می‌گیرد
-- امتیاز 100تایی نرم است؛ Real فقط وقتی کیفیت، اسلات، Toobit، قیمت و سود خالص تأیید شوند
-- حداقل سود خالص برای Real: 0.01 USDT بعد از fee/slippage
-- حجم پوزیشن با امتیاز تغییر نمی‌کند؛ فقط از تنظیمات کاربر می‌آید
-- TP/SL هوشمند، قابل یادگیری و جدا برای هر ارز/جهت است
-- نتیجه TP/SL دو نوع دارد: واقعی Toobit و عادی ربات
-- نتیجه‌ها روی پیام سیگنال اصلی reply می‌شوند
-- AI از Pattern Memory، Range Memory، Judge، Shadow Test، Market Mode، Sensitivity و Meta Brain تشکیل شده است
+این نسخه کلاسیک و خشک نیست. بجز کنترل‌های پنل ترید، همه تصمیم‌های تحلیلی نرم و زیر کنترل AI هستند:
 
-## ارزها
+- `Trade ON/OFF`
+- `Margin / Dollar per trade`
+- `Leverage`
+- `Max positions / Slots`
 
-اصلی: SOL, XRP, DOGE, AVAX, LINK
+فقط این موارد دست کاربر می‌مانند. بقیه چیزها AI-managed هستند.
 
-جایگزین برای پیشنهاد/فعال‌سازی بعد از یادگیری کافی: SUI, ADA, LTC, NEAR
+## تصمیم نرم AI
 
-## دستورات فارسی
+AI برای هر ارز + جهت + الگو + entry quality + score bucket + market mode + session جدا یاد می‌گیرد و تصمیم می‌گیرد:
 
-```text
-پنل
-وضعیت
-آمار
-آمار 7
-هوش
-یادگیری
-پیشنهاد
-ارزها
-ترید فعال
-ترید خاموش
-ترید دلار 20
-ترید لوریج 10
-حداکثر پوزیشن 3
-حذف آمار
-حذف آمار تایید
-ریست یادگیری
-ریست یادگیری تایید
-راهنما
+- فقط Watch بماند
+- Normal Signal بدهد
+- Real Toobit مجاز باشد
+- Real بلاک شود ولی Normal/learning ادامه پیدا کند
+- threshold نرم‌تر یا سخت‌تر شود
+
+هیچ مورد تحلیلی مثل `PRECISION_WAIT`، ضعف حرکت، نویز، ریسک خستگی، pattern منفی یا range منفی قفل دائمی نیست. این‌ها فقط threshold و اجازه Real/Normal را تغییر می‌دهند.
+
+## Threshold شروع
+
+```env
+BASE_SIGNAL_THRESHOLD=70
+BASE_REAL_THRESHOLD=78
 ```
 
-## نصب روی VPS
+این‌ها فقط مقدار شروع هستند. AI بعد از نتیجه‌ها برای هر symbol/direction و context آن‌ها را تغییر می‌دهد.
+
+## PRECISION_WAIT
+
+`PRECISION_WAIT` دیگر جلوی Normal Signal را کامل نمی‌گیرد.
+
+- برای شروع: Normal می‌تواند مجاز باشد.
+- برای Real: سخت‌تر و محافظه‌کارانه‌تر است.
+- بعد از یادگیری: اگر برای یک ارز/جهت/الگو خوب جواب بدهد، AI نرم‌ترش می‌کند؛ اگر بد جواب بدهد، سخت‌ترش می‌کند.
+
+## Hard Safety
+
+فقط safety اجرایی hard می‌ماند:
+
+- API failure
+- Symbol mismatch
+- duplicate open signal/symbol
+- max real slots
+- Toobit execution/order/close safety
+- OKX-Toobit sync
+- net profit protection for Real
+
+حتی این‌ها هم تحلیل را نابود نمی‌کنند؛ فقط اجرای واقعی را محافظت می‌کنند و Normal/learning می‌تواند ادامه پیدا کند.
+
+## اجرا
 
 ```bash
-cd /root/forex-signal-bot
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
 python3 -m py_compile *.py
-./start_bot.sh
+sudo systemctl restart forex-bot.service
+journalctl -u forex-bot.service -f
 ```
-
-`.env` را عمومی نکن. توکن تلگرام و کلیدهای Toobit نباید داخل گیت یا فایل ارسالی باشند.
