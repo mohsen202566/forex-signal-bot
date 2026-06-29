@@ -3,15 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from adaptive_tp_sl_engine import AdaptiveTpSlEngine
+from ai_market_mode import MarketModeBrain
+from ai_meta_brain import AIMetaBrain
+from ai_sensitivity_engine import AISensitivityEngine
 from candle_hunter_engine import CandleHunterEngine
-from config import SIGNAL_THRESHOLD, TIMEFRAME_15M, TIMEFRAME_1H, TIMEFRAME_4H, TIMEFRAME_5M, WATCH_THRESHOLD, WEIGHTS
+from config import SIGNAL_THRESHOLD, TIMEFRAME_15M, TIMEFRAME_1H, TIMEFRAME_4H, TIMEFRAME_5M, WEIGHTS
 from cost_engine import CostEngine
 from direction_engine import DirectionEngine
+from entry_precision_engine import EntryPrecisionEngine
 from entry_quality import EntryQualityEngine
-from entry_stage_engine import EntryStageEngine
-from indicators import IndicatorSnapshot, calculate_indicators
 from ignition_entry_engine import IgnitionEntryEngine
-from indicator_range_ai import IndicatorRangeAI
+from indicators import IndicatorSnapshot, calculate_indicators
 from learning_engine import LearningEngine
 from levels_engine import LevelsEngine
 from market_context import MarketContextEngine
@@ -39,17 +41,19 @@ class AIController:
         self.direction_engine = DirectionEngine()
         self.pre_ignition = PreIgnitionEngine()
         self.candle_hunter = CandleHunterEngine()
-        self.entry_stage = EntryStageEngine()
-        self.entry_quality_engine = EntryQualityEngine()
+        self.entry_precision = EntryPrecisionEngine()
         self.ignition = IgnitionEntryEngine()
+        self.entry_quality_engine = EntryQualityEngine()
         self.levels_engine = LevelsEngine()
         self.tp_sl = AdaptiveTpSlEngine()
         self.cost_engine = CostEngine()
-        self.market_engine = MarketContextEngine()
+        self.market_context = MarketContextEngine()
+        self.market_mode = MarketModeBrain()
         self.order_block_engine = OrderBlockEngine()
         self.session_engine = SessionEngine()
-        self.learning_engine = LearningEngine()
-        self.indicator_ai = IndicatorRangeAI()
+        self.learning = LearningEngine()
+        self.sensitivity = AISensitivityEngine()
+        self.meta = AIMetaBrain()
 
     def analyze(self, data: AnalysisInput) -> SignalDecision:
         snapshots = {tf: calculate_indicators(candles) for tf, candles in data.candles_by_tf.items()}
@@ -57,133 +61,54 @@ class AIController:
         s1h = snapshots[TIMEFRAME_1H]
         s15 = snapshots[TIMEFRAME_15M]
         s5 = snapshots[TIMEFRAME_5M]
-        # Indicators are calculated from completed candles, but execution/scalp TP-SL must use live price.
         entry = float(data.live_price) if data.live_price and data.live_price > 0 else s5.close
 
         dir15 = self.direction_engine.analyze_15m_scalp(s15, s5)
         if dir15.state not in ("LONG", "SHORT"):
-            return self._reject(
-                entry=entry,
-                breakdown=ScoreBreakdown(score_direction=dir15.score),
-                reason="15m/5m شروع حرکت را واضح نشان نمی‌دهد؛ سیگنال رد شد.",
-                code="SCALP_DIRECTION_NEUTRAL",
-                setup_15m=dir15.state,
-                notes=dir15.reasons,
-                rsi_5m=s5.rsi,
-                rsi_15m=s15.rsi,
-                macd_hist_5m=s5.macd_hist,
-                macd_hist_15m=s15.macd_hist,
-                adx_15m=s15.adx,
-                atr_pct_15m=s15.atr_pct,
-                volume_ratio_5m=s5.volume_ratio,
-                volume_ratio_15m=s15.volume_ratio,
-            )
+            return self._reject(entry=entry, breakdown=ScoreBreakdown(score_direction=dir15.score), reason="AI هنوز جهت تمیز برای شکار ندیده است.", code="DIRECTION_NOT_READY", setup_15m=dir15.state, notes=dir15.reasons, rsi_5m=s5.rsi, rsi_15m=s15.rsi, macd_hist_5m=s5.macd_hist, macd_hist_15m=s15.macd_hist, adx_15m=s15.adx, atr_pct_15m=s15.atr_pct, volume_ratio_5m=s5.volume_ratio, volume_ratio_15m=s15.volume_ratio)
         direction: Direction = "LONG" if dir15.state == "LONG" else "SHORT"
         context1h = self.direction_engine.analyze_1h_context(s1h, direction)
         bias4h = self.direction_engine.analyze_4h_bias(s4h, direction)
         pre = self.pre_ignition.analyze(s15, s5, direction)
         candle = self.candle_hunter.analyze(data.candles_by_tf[TIMEFRAME_5M], direction)
-        stage = self.entry_stage.analyze(s5, direction)
-        ignition = self.ignition.analyze(candle, stage)
-        entry_quality = self.entry_quality_engine.analyze(direction=direction, snapshot_5m=s5, snapshot_15m=s15, candle=candle, stage=stage)
+        precision = self.entry_precision.analyze(s5, direction)
+        ignition = self.ignition.analyze(candle, precision)
+        entry_quality = self.entry_quality_engine.analyze(direction=direction, snapshot_5m=s5, snapshot_15m=s15, candle=candle, precision=precision)
         levels = self.levels_engine.detect(data.candles_by_tf[TIMEFRAME_15M], entry)
-        memory = self.learning_engine.analyze(self.storage, data.symbol_name, direction, candle.label, s5.rsi, s15.adx, s15.volume_ratio)
-        indicator_ai = self.indicator_ai.analyze(self.storage, symbol_name=data.symbol_name, direction=direction, snapshot_5m=s5, snapshot_15m=s15, entry_quality=entry_quality.quality, candle_pattern=candle.label)
-        learned_expected_pct = indicator_ai.expected_move_pct or memory.expected_move_pct
-        risk = self.tp_sl.build(direction=direction, entry=entry, snapshot_15m=s15, levels=levels, learned_expected_pct=learned_expected_pct)
+        mode = self.market_mode.analyze(s5, s15)
+        pattern = self.learning.analyze_pattern(self.storage, symbol_name=data.symbol_name, direction=direction, entry_quality=entry_quality.quality, candle_pattern=candle.label, market_mode=mode.mode, precision_pct=precision.precision_pct)
+        range_ai = self.learning.analyze_range(self.storage, symbol_name=data.symbol_name, direction=direction, snapshot_5m=s5, snapshot_15m=s15, entry_quality=entry_quality.quality, candle_pattern=candle.label)
+        learned_expected_pct = range_ai.expected_move_pct or pattern.expected_move_pct
+        learned_mae_pct = range_ai.expected_mae_pct or pattern.expected_mae_pct
+        risk = self.tp_sl.build(direction=direction, entry=entry, snapshot_15m=s15, levels=levels, learned_expected_pct=learned_expected_pct, learned_mae_pct=learned_mae_pct)
         cost = self.cost_engine.evaluate(direction=direction, entry=entry, tp=risk.tp, margin_usdt=self.storage.margin_usdt(), leverage=self.storage.leverage())
         btc_snapshot = self._safe_snapshot(data.btc_1h)
         eth_snapshot = self._safe_snapshot(data.eth_1h)
-        market = self.market_engine.analyze(btc_snapshot, eth_snapshot, direction)
+        market = self.market_context.analyze(btc_snapshot, eth_snapshot, direction)
         ob = self.order_block_engine.analyze(data.candles_by_tf[TIMEFRAME_15M], direction, entry, s15.atr)
         session = self.session_engine.analyze(self.storage, data.symbol_name, direction)
+        sensitivity = self.sensitivity.analyze(self.storage, data.symbol_name, direction)
 
         score_direction = min(WEIGHTS.direction, dir15.score)
         score_pre = min(WEIGHTS.pre_ignition, pre.score)
-        score_entry = max(0, min(WEIGHTS.candle_entry, ignition.score + entry_quality.score_bonus))
-        score_ai = max(0, min(WEIGHTS.ai_memory, max(memory.score, indicator_ai.score)))
+        score_candle = max(0, min(WEIGHTS.candle_entry, ignition.score + entry_quality.score_bonus))
+        score_precision = max(0, min(WEIGHTS.entry_precision, precision.score))
+        score_ai = max(0, min(WEIGHTS.ai_memory, max(pattern.score, range_ai.score) + sensitivity.score_adjustment))
+        score_tp_sl = max(0, min(WEIGHTS.tp_sl, risk.score))
+        score_market = max(0, min(WEIGHTS.market_mode, mode.score + market.score + ob.score - 2))
         score_session = min(WEIGHTS.session, session.score)
-        score_zone = max(0, min(WEIGHTS.order_block, context1h.score + bias4h.score + market.score + ob.score))
-        breakdown = ScoreBreakdown(
-            score_direction=score_direction,
-            score_pre_ignition=score_pre,
-            score_candle_entry=score_entry,
-            score_ai_memory=score_ai,
-            score_risk_net=0,
-            score_session=score_session,
-            score_order_block=score_zone,
-        )
+        score_net = min(WEIGHTS.net_sync, cost.score)
+        breakdown = ScoreBreakdown(score_direction=score_direction, score_pre_ignition=score_pre, score_candle_entry=score_candle, score_entry_precision=score_precision, score_ai_memory=score_ai, score_tp_sl=score_tp_sl, score_market_mode=score_market, score_session=score_session, score_net_sync=score_net)
         total = max(0, min(100, breakdown.total))
-        notes = (
-            dir15.reasons + context1h.reasons + bias4h.reasons + pre.reasons + candle.reasons + stage.reasons +
-            ignition.reasons + entry_quality.reasons + risk.reasons + cost.reasons + market.reasons + ob.reasons +
-            session.reasons + memory.reasons + indicator_ai.reasons
-        )
-        common = dict(
-            direction=direction,
-            direction_state_1h=context1h.state,
-            direction_confidence_1h=context1h.confidence,
-            bias_4h=bias4h.state,
-            setup_15m=dir15.state,
-            entry_5m=ignition.state,
-            candle_pattern=candle.label,
-            entry_stage_pct=stage.stage_pct,
-            entry_quality=entry_quality.quality,
-            technical_zone=ob.state,
-            indicator_profile=indicator_ai.profile,
-            ai_confidence=max(memory.confidence, indicator_ai.confidence),
-            ai_experience=max(memory.experience, indicator_ai.experience),
-            ai_adjustment=memory.adjustment + indicator_ai.adjustment,
-            ai_effect=indicator_ai.verdict,
-            net_edge=cost.net_edge,
-            estimated_profit_usdt=cost.estimated_profit_usdt,
-            estimated_profit_pct=cost.estimated_profit_pct,
-            risk_reward=risk.risk_reward,
-            estimated_cost_pct=cost.estimated_cost_pct,
-            market_bias=market.bias,
-            session_state=session.state,
-            order_block_state=ob.state,
-            rsi_5m=s5.rsi,
-            rsi_15m=s15.rsi,
-            macd_hist_5m=s5.macd_hist,
-            macd_hist_15m=s15.macd_hist,
-            adx_15m=s15.adx,
-            atr_pct_15m=s15.atr_pct,
-            volume_ratio_5m=s5.volume_ratio,
-            volume_ratio_15m=s15.volume_ratio,
-            notes=notes,
-        )
-
-        if entry_quality.quality == "FAKE_MOVE_RISK":
-            return SignalDecision(action="WATCH", accepted=False, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason="حرکت کلایمکس/فیک تشخیص داده شد؛ فقط Watch/Ghost برای یادگیری.", ready_alert=False, hunter=False, signal_label="فیک‌ریسک - فقط واچ", **common)
-        if not risk.ok:
-            return self._reject(entry=entry, tp=risk.tp, sl=risk.sl, breakdown=breakdown, reason="TP/SL اسکالپی برای این ورود قابل قبول نیست.", code="SCALP_RISK_REJECT", hard=True, **common)
-        # Profit/cost is logged for panel/statistics only; it no longer blocks signals.
-        if indicator_ai.verdict == "NEGATIVE" and indicator_ai.experience >= 20:
-            return SignalDecision(action="WATCH", accepted=False, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason="AI این بازه ارز/جهت/اندیکاتور را برای Real منفی می‌داند؛ فقط Ghost/Watch.", ready_alert=False, hunter=True, signal_label="هوش مصنوعی منفی - فقط واچ", **common)
-
-        real_qualities = {"EARLY_IGNITION", "GOOD_ENTRY", "POWER_BUILDING", "REVERSAL_BUILDING"}
-        watch_qualities = {"WEAK_ENTRY", "NO_ENTRY"}
-        accepted = total >= SIGNAL_THRESHOLD and entry_quality.quality in real_qualities
-        ready_alert = total >= WATCH_THRESHOLD and entry_quality.quality in (watch_qualities | real_qualities)
-        if not accepted and total >= WATCH_THRESHOLD:
-            return SignalDecision(action="WATCH", accepted=False, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason="شکارگاه اسکالپ فعال است؛ برای تایید نهایی یا یادگیری Ghost زیر نظر گرفته شد.", ready_alert=ready_alert, hunter=True, signal_label="اسکالپ واچ", **common)
-
-        return SignalDecision(
-            action="SIGNAL" if accepted else "REJECT",
-            accepted=accepted,
-            entry=entry,
-            tp=risk.tp,
-            sl=risk.sl,
-            score=total,
-            threshold=SIGNAL_THRESHOLD,
-            breakdown=breakdown,
-            reason="سیگنال اسکالپ معتبر است؛ شروع قدرت یا برگشت شکار تایید شد." if accepted else "امتیاز یا تریگر ورود هنوز به حد نهایی نرسید.",
-            reject_code=None if accepted else "LOW_SCORE_OR_TRIGGER_NOT_READY",
-            hunter=entry_quality.quality in real_qualities,
-            signal_label="شکار اسکالپ" if accepted else "رد اسکالپ",
-            **common,
-        )
+        verdicts = {pattern.verdict, range_ai.verdict}
+        negative = "NEGATIVE" if "NEGATIVE" in verdicts else "NEUTRAL"
+        positive = "POSITIVE" if "POSITIVE" in verdicts and negative != "NEGATIVE" else negative
+        meta = self.meta.decide(total_score=total, entry_quality=entry_quality.quality, risk_ok=risk.ok, net_profit_ok=cost.ok, range_verdict=range_ai.verdict, pattern_verdict=pattern.verdict, session_state=session.state, market_mode=mode.mode)
+        ai_confidence = max(0, min(99, max(pattern.confidence, range_ai.confidence, entry_quality.confidence) + sensitivity.confidence_adjustment))
+        ai_experience = max(pattern.experience, range_ai.experience)
+        notes = dir15.reasons + context1h.reasons + bias4h.reasons + pre.reasons + candle.reasons + precision.reasons + ignition.reasons + entry_quality.reasons + risk.reasons + cost.reasons + market.reasons + mode.reasons + ob.reasons + session.reasons + pattern.reasons + range_ai.reasons + sensitivity.reasons
+        common = dict(direction=direction, direction_state_1h=context1h.state, direction_confidence_1h=context1h.confidence, bias_4h=bias4h.state, setup_15m=dir15.state, entry_5m=ignition.state, candle_pattern=candle.label, entry_precision_pct=precision.precision_pct, entry_quality=entry_quality.quality, technical_zone=ob.state, indicator_profile=range_ai.profile, pattern_id=pattern.pattern_id, ai_confidence=ai_confidence, ai_experience=ai_experience, ai_adjustment=pattern.adjustment + range_ai.adjustment + sensitivity.score_adjustment, ai_effect=positive, net_edge=cost.net_edge, estimated_profit_usdt=cost.estimated_profit_usdt, estimated_net_profit_usdt=cost.estimated_net_profit_usdt, estimated_profit_pct=cost.estimated_profit_pct, risk_reward=risk.risk_reward, estimated_cost_pct=cost.estimated_cost_pct, market_bias=market.bias, market_mode=mode.mode, session_state=session.state, order_block_state=ob.state, rsi_5m=s5.rsi, rsi_15m=s15.rsi, macd_hist_5m=s5.macd_hist, macd_hist_15m=s15.macd_hist, adx_15m=s15.adx, atr_pct_15m=s15.atr_pct, volume_ratio_5m=s5.volume_ratio, volume_ratio_15m=s15.volume_ratio, notes=notes)
+        return SignalDecision(action=meta.action, accepted=meta.accepted, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason=meta.reason, reject_code=None if meta.accepted else meta.real_block_reason or "NOT_READY", ready_alert=meta.ready_alert, hunter=entry_quality.quality in {"EARLY_IGNITION", "GOOD_ENTRY", "POWER_BUILDING", "REVERSAL_BUILDING"}, signal_label=meta.signal_label, real_allowed=meta.real_allowed, real_block_reason=meta.real_block_reason, **common)
 
     def _safe_snapshot(self, candles: list[Candle] | None) -> IndicatorSnapshot | None:
         if not candles:
@@ -193,5 +118,5 @@ class AIController:
         except Exception:
             return None
 
-    def _reject(self, *, entry: float, breakdown: ScoreBreakdown, reason: str, code: str, direction: Direction | None = None, tp: float = 0.0, sl: float = 0.0, hard: bool = False, direction_state_1h="NEUTRAL", direction_confidence_1h: int = 0, bias_4h="NEUTRAL", setup_15m="NEUTRAL", entry_5m="NO_ENTRY", candle_pattern="NOISE", entry_stage_pct: float = 100.0, entry_quality: str = "NO_ENTRY", technical_zone: str = "NEUTRAL", indicator_profile: str = "", ai_confidence: int = 0, ai_experience: int = 0, ai_adjustment: int = 0, ai_effect: str = "neutral", net_edge: float = 0.0, estimated_profit_usdt: float = 0.0, estimated_profit_pct: float = 0.0, risk_reward: float = 0.0, estimated_cost_pct: float = 0.0, market_bias="NEUTRAL", session_state="NORMAL", order_block_state="NEUTRAL", rsi_5m: float = 0.0, rsi_15m: float = 0.0, macd_hist_5m: float = 0.0, macd_hist_15m: float = 0.0, adx_15m: float = 0.0, atr_pct_15m: float = 0.0, volume_ratio_5m: float = 0.0, volume_ratio_15m: float = 0.0, notes: tuple[str, ...] = ()) -> SignalDecision:
-        return SignalDecision(action="REJECT", accepted=False, direction=direction, entry=entry, tp=tp, sl=sl, score=max(0, min(100, breakdown.total)), threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason=reason, hard_reject=hard, reject_code=code, direction_state_1h=direction_state_1h, direction_confidence_1h=direction_confidence_1h, bias_4h=bias_4h, setup_15m=setup_15m, entry_5m=entry_5m, candle_pattern=candle_pattern, entry_stage_pct=entry_stage_pct, entry_quality=entry_quality, technical_zone=technical_zone, indicator_profile=indicator_profile, ai_confidence=ai_confidence, ai_experience=ai_experience, ai_adjustment=ai_adjustment, ai_effect=ai_effect, net_edge=net_edge, estimated_profit_usdt=estimated_profit_usdt, estimated_profit_pct=estimated_profit_pct, risk_reward=risk_reward, estimated_cost_pct=estimated_cost_pct, market_bias=market_bias, session_state=session_state, order_block_state=order_block_state, rsi_5m=rsi_5m, rsi_15m=rsi_15m, macd_hist_5m=macd_hist_5m, macd_hist_15m=macd_hist_15m, adx_15m=adx_15m, atr_pct_15m=atr_pct_15m, volume_ratio_5m=volume_ratio_5m, volume_ratio_15m=volume_ratio_15m, notes=notes)
+    def _reject(self, *, entry: float, breakdown: ScoreBreakdown, reason: str, code: str, hard: bool = False, **extra) -> SignalDecision:
+        return SignalDecision(action="REJECT", accepted=False, direction=extra.pop("direction", None), entry=entry, tp=extra.pop("tp", entry), sl=extra.pop("sl", entry), score=max(0, min(100, breakdown.total)), threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason=reason, hard_reject=hard, reject_code=code, **extra)

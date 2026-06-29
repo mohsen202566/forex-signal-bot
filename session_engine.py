@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from config import WEIGHTS
 from scorer import Direction, SessionState
 
 
@@ -24,7 +25,7 @@ class SessionEngine:
         sl = int(stats.get("sl", 0))
         tp = int(stats.get("tp", 0))
         if samples >= 20 and sl > tp * 1.4 and wr < 42:
-            return SessionResult("BAD_REAL_ONLY_NORMAL", 0, samples, (f"ساعت {bucket} برای این الگو SL بالا داشته؛ فقط عادی.",))
+            return SessionResult("BAD_REAL_ONLY_NORMAL", 0, samples, (f"ساعت {bucket} برای Real ضعیف بوده؛ فقط عادی.",))
         if samples >= 12 and wr >= 62:
-            return SessionResult("GOOD", 5, samples, (f"ساعت {bucket} در نمونه‌های اخیر خوب بوده است.",))
-        return SessionResult("NORMAL", 3, samples, (f"ساعت {bucket} عادی است.",))
+            return SessionResult("GOOD", WEIGHTS.session, samples, (f"ساعت {bucket} در نمونه‌های اخیر خوب بوده است.",))
+        return SessionResult("NORMAL", max(1, WEIGHTS.session - 1), samples, (f"ساعت {bucket} عادی است.",))

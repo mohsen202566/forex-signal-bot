@@ -28,14 +28,7 @@ class SymbolHealth:
             row = conn.execute("SELECT okx_error_count FROM symbol_health WHERE symbol_name=?", (symbol_name,)).fetchone()
             count = int(row["okx_error_count"] or 0) + 1 if row else 1
             disabled = now + timedelta(minutes=OKX_DISABLE_MINUTES) if count >= SYMBOL_ERROR_DISABLE_AFTER else None
-            conn.execute(
-                """
-                INSERT INTO symbol_health(symbol_name, okx_error_count, last_okx_error, okx_disabled_until, updated_at)
-                VALUES(?, ?, ?, ?, ?)
-                ON CONFLICT(symbol_name) DO UPDATE SET okx_error_count=excluded.okx_error_count, last_okx_error=excluded.last_okx_error, okx_disabled_until=excluded.okx_disabled_until, updated_at=excluded.updated_at
-                """,
-                (symbol_name, count, error[:300], disabled.isoformat() if disabled else None, now.isoformat()),
-            )
+            conn.execute("INSERT INTO symbol_health(symbol_name, okx_error_count, last_okx_error, okx_disabled_until, updated_at) VALUES(?, ?, ?, ?, ?) ON CONFLICT(symbol_name) DO UPDATE SET okx_error_count=excluded.okx_error_count, last_okx_error=excluded.last_okx_error, okx_disabled_until=excluded.okx_disabled_until, updated_at=excluded.updated_at", (symbol_name, count, error[:300], disabled.isoformat() if disabled else None, now.isoformat()))
 
     def record_toobit_error(self, symbol_name: str, error: str) -> None:
         now = datetime.now(timezone.utc)
@@ -43,14 +36,7 @@ class SymbolHealth:
         with self.storage._connect() as conn:
             row = conn.execute("SELECT toobit_error_count FROM symbol_health WHERE symbol_name=?", (symbol_name,)).fetchone()
             count = int(row["toobit_error_count"] or 0) + 1 if row else 1
-            conn.execute(
-                """
-                INSERT INTO symbol_health(symbol_name, toobit_error_count, last_toobit_error, toobit_real_disabled_until, updated_at)
-                VALUES(?, ?, ?, ?, ?)
-                ON CONFLICT(symbol_name) DO UPDATE SET toobit_error_count=excluded.toobit_error_count, last_toobit_error=excluded.last_toobit_error, toobit_real_disabled_until=excluded.toobit_real_disabled_until, updated_at=excluded.updated_at
-                """,
-                (symbol_name, count, error[:300], disabled.isoformat(), now.isoformat()),
-            )
+            conn.execute("INSERT INTO symbol_health(symbol_name, toobit_error_count, last_toobit_error, toobit_real_disabled_until, updated_at) VALUES(?, ?, ?, ?, ?) ON CONFLICT(symbol_name) DO UPDATE SET toobit_error_count=excluded.toobit_error_count, last_toobit_error=excluded.last_toobit_error, toobit_real_disabled_until=excluded.toobit_real_disabled_until, updated_at=excluded.updated_at", (symbol_name, count, error[:300], disabled.isoformat(), now.isoformat()))
 
     def panel_summary(self) -> dict[str, int]:
         now = datetime.now(timezone.utc)
@@ -76,9 +62,10 @@ class SymbolHealth:
         except ValueError:
             return True
 
-    def _upsert(self, symbol_name: str, **values) -> None:
+    def _upsert(self, symbol_name: str, **fields) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.storage._connect() as conn:
             conn.execute("INSERT OR IGNORE INTO symbol_health(symbol_name, updated_at) VALUES(?, ?)", (symbol_name, now))
-            for key, value in values.items():
-                conn.execute(f"UPDATE symbol_health SET {key}=?, updated_at=? WHERE symbol_name=?", (value, now, symbol_name))
+            assignments = ", ".join(f"{name}=?" for name in fields) + ", updated_at=?"
+            values = [value for value in fields.values()] + [now, symbol_name]
+            conn.execute(f"UPDATE symbol_health SET {assignments} WHERE symbol_name=?", values)

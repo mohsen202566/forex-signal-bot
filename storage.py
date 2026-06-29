@@ -7,20 +7,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import (
-    DB_PATH,
-    DEFAULT_LEVERAGE,
-    DEFAULT_MARGIN_USDT,
-    DEFAULT_MAX_POSITIONS,
-    DEFAULT_MIN_PROFIT_PCT,
-    DEFAULT_MIN_PROFIT_USDT,
-    DEFAULT_TRADE_ENABLED,
-    LEARNING_DAYS,
-    LEVERAGE_MAX,
-    LEVERAGE_MIN,
-    MARGIN_MAX_USDT,
-    MARGIN_MIN_USDT,
-    MAX_POSITIONS_MAX,
-    MAX_POSITIONS_MIN,
+    DB_PATH, DEFAULT_LEVERAGE, DEFAULT_MARGIN_USDT, DEFAULT_MAX_POSITIONS, DEFAULT_MIN_PROFIT_PCT,
+    DEFAULT_MIN_PROFIT_USDT, DEFAULT_TRADE_ENABLED, LEARNING_DAYS, LEVERAGE_MAX, LEVERAGE_MIN,
+    MARGIN_MAX_USDT, MARGIN_MIN_USDT, MAX_POSITIONS_MAX, MAX_POSITIONS_MIN,
 )
 from scorer import SignalDecision
 
@@ -52,12 +41,15 @@ class StoredSignal:
     leverage: int
     net_edge: float
     estimated_profit_usdt: float
+    estimated_net_profit_usdt: float
     estimated_profit_pct: float
     risk_reward: float
     reason: str | None
     result_source: str | None = None
     entry_quality: str | None = None
     indicator_profile: str | None = None
+    mfe_pct: float = 0.0
+    mae_pct: float = 0.0
 
 
 class Storage:
@@ -85,22 +77,24 @@ class Storage:
                     created_at TEXT NOT NULL,
                     okx_symbol TEXT NOT NULL,
                     toobit_symbol TEXT NOT NULL,
-                    symbol_name TEXT NOT NULL DEFAULT '',
+                    symbol_name TEXT NOT NULL,
                     direction TEXT NOT NULL,
                     entry REAL NOT NULL,
                     tp REAL NOT NULL,
                     sl REAL NOT NULL,
                     score INTEGER NOT NULL,
-                    threshold INTEGER DEFAULT 70,
+                    threshold INTEGER NOT NULL,
                     ai_confidence INTEGER DEFAULT 0,
                     ai_experience INTEGER DEFAULT 0,
                     ai_adjustment INTEGER DEFAULT 0,
-                    ai_effect TEXT DEFAULT 'neutral',
+                    ai_effect TEXT DEFAULT 'NEUTRAL',
                     signal_type TEXT NOT NULL,
                     hunter_type TEXT NOT NULL DEFAULT 'ordinary',
                     signal_label TEXT NOT NULL DEFAULT 'عادی',
                     status TEXT NOT NULL DEFAULT 'OPEN',
                     real_status TEXT NOT NULL DEFAULT 'none',
+                    real_allowed INTEGER DEFAULT 0,
+                    real_block_reason TEXT,
                     message_id INTEGER,
                     result_message_id INTEGER,
                     real_opened INTEGER NOT NULL DEFAULT 0,
@@ -114,26 +108,31 @@ class Storage:
                     score_direction INTEGER DEFAULT 0,
                     score_pre_ignition INTEGER DEFAULT 0,
                     score_candle_entry INTEGER DEFAULT 0,
+                    score_entry_precision INTEGER DEFAULT 0,
                     score_ai_memory INTEGER DEFAULT 0,
-                    score_risk_net INTEGER DEFAULT 0,
+                    score_tp_sl INTEGER DEFAULT 0,
+                    score_market_mode INTEGER DEFAULT 0,
                     score_session INTEGER DEFAULT 0,
-                    score_order_block INTEGER DEFAULT 0,
+                    score_net_sync INTEGER DEFAULT 0,
                     direction_state_1h TEXT,
                     direction_confidence_1h INTEGER DEFAULT 0,
                     bias_4h TEXT,
                     setup_15m TEXT,
                     entry_5m TEXT,
                     entry_quality TEXT,
+                    entry_precision_pct REAL DEFAULT 0,
                     technical_zone TEXT,
                     indicator_profile TEXT,
+                    pattern_id TEXT,
                     candle_pattern TEXT,
-                    entry_stage_pct REAL DEFAULT 100,
                     net_edge REAL DEFAULT 0,
                     estimated_profit_usdt REAL DEFAULT 0,
+                    estimated_net_profit_usdt REAL DEFAULT 0,
                     estimated_profit_pct REAL DEFAULT 0,
                     risk_reward REAL DEFAULT 0,
                     estimated_cost_pct REAL DEFAULT 0,
                     market_bias TEXT,
+                    market_mode TEXT,
                     session_state TEXT,
                     order_block_state TEXT,
                     session_bucket TEXT,
@@ -144,6 +143,8 @@ class Storage:
                     quantity REAL,
                     mfe_pct REAL DEFAULT 0,
                     mae_pct REAL DEFAULT 0,
+                    best_price REAL,
+                    worst_price REAL,
                     rsi_5m REAL DEFAULT 0,
                     rsi_15m REAL DEFAULT 0,
                     macd_hist_5m REAL DEFAULT 0,
@@ -190,69 +191,30 @@ class Storage:
                 )
                 """
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS rejection_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    symbol_name TEXT NOT NULL,
-                    direction TEXT,
-                    code TEXT,
-                    reason TEXT,
-                    score INTEGER DEFAULT 0
-                )
-                """
-            )
+            conn.execute("CREATE TABLE IF NOT EXISTS rejection_log (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, symbol_name TEXT NOT NULL, direction TEXT, code TEXT, reason TEXT, score INTEGER DEFAULT 0)")
+            conn.execute("CREATE TABLE IF NOT EXISTS ai_symbol_direction_profiles (symbol_name TEXT NOT NULL, direction TEXT NOT NULL, total_signals INTEGER DEFAULT 0, tp INTEGER DEFAULT 0, sl INTEGER DEFAULT 0, exit_count INTEGER DEFAULT 0, win_rate REAL DEFAULT 0, net_profit REAL DEFAULT 0, avg_mfe REAL DEFAULT 0, avg_mae REAL DEFAULT 0, best_tp_range REAL DEFAULT 0, best_sl_range REAL DEFAULT 0, noise_level REAL DEFAULT 0, early_entry_success INTEGER DEFAULT 0, reversal_after_entry INTEGER DEFAULT 0, consecutive_sl INTEGER DEFAULT 0, sensor_weights TEXT, risk_level TEXT DEFAULT 'normal', learning_confidence INTEGER DEFAULT 0, last_updated TEXT, PRIMARY KEY(symbol_name, direction))")
+            conn.execute("CREATE TABLE IF NOT EXISTS ai_patterns (symbol_name TEXT NOT NULL, direction TEXT NOT NULL, pattern_id TEXT NOT NULL, total INTEGER DEFAULT 0, tp INTEGER DEFAULT 0, sl INTEGER DEFAULT 0, win_rate REAL DEFAULT 0, avg_mfe REAL DEFAULT 0, avg_mae REAL DEFAULT 0, weight REAL DEFAULT 1, verdict TEXT DEFAULT 'NEUTRAL', last_updated TEXT, PRIMARY KEY(symbol_name, direction, pattern_id))")
+            conn.execute("CREATE TABLE IF NOT EXISTS ai_pattern_results (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER, symbol_name TEXT, direction TEXT, pattern_id TEXT, status TEXT, mfe_pct REAL, mae_pct REAL, created_at TEXT)")
+            conn.execute("CREATE TABLE IF NOT EXISTS ai_sensor_weights (symbol_name TEXT NOT NULL, direction TEXT NOT NULL, sensor TEXT NOT NULL, weight REAL DEFAULT 1, updated_at TEXT, PRIMARY KEY(symbol_name, direction, sensor))")
+            conn.execute("CREATE TABLE IF NOT EXISTS ai_shadow_tests (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER NOT NULL, plan_name TEXT NOT NULL, tp REAL NOT NULL, sl REAL NOT NULL, result TEXT DEFAULT 'pending', created_at TEXT NOT NULL, updated_at TEXT)")
+            conn.execute("CREATE TABLE IF NOT EXISTS ai_judgements (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER NOT NULL, entry_quality TEXT, tp_quality TEXT, sl_quality TEXT, failure_reason TEXT, score_delta INTEGER, reasons TEXT, created_at TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS ai_second_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER NOT NULL, created_at TEXT NOT NULL, price REAL NOT NULL, mfe_pct REAL DEFAULT 0, mae_pct REAL DEFAULT 0)")
+            conn.execute("CREATE TABLE IF NOT EXISTS ai_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, level TEXT, message TEXT, status TEXT DEFAULT 'open')")
+            conn.execute("CREATE TABLE IF NOT EXISTS toobit_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER, symbol TEXT, action TEXT, order_id TEXT, status TEXT, reason TEXT, created_at TEXT)")
             self._migrate_columns(conn)
             self._set_default(conn, "trade_enabled", "1" if DEFAULT_TRADE_ENABLED else "0")
             self._set_default(conn, "margin_usdt", str(DEFAULT_MARGIN_USDT))
             self._set_default(conn, "leverage", str(DEFAULT_LEVERAGE))
             self._set_default(conn, "max_positions", str(DEFAULT_MAX_POSITIONS))
-            # Kept for DB compatibility only; panel/commands do not expose these anymore.
             self._set_default(conn, "min_profit_usdt", str(DEFAULT_MIN_PROFIT_USDT))
             self._set_default(conn, "min_profit_pct", str(DEFAULT_MIN_PROFIT_PCT))
 
     def _migrate_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
         columns = {
-            "threshold": "INTEGER DEFAULT 70",
-            "ai_confidence": "INTEGER DEFAULT 0",
-            "ai_experience": "INTEGER DEFAULT 0",
-            "ai_adjustment": "INTEGER DEFAULT 0",
-            "ai_effect": "TEXT DEFAULT 'neutral'",
-            "hunter_type": "TEXT NOT NULL DEFAULT 'ordinary'",
-            "signal_label": "TEXT NOT NULL DEFAULT 'عادی'",
-            "result_source": "TEXT",
-            "score_direction": "INTEGER DEFAULT 0",
-            "score_pre_ignition": "INTEGER DEFAULT 0",
-            "score_candle_entry": "INTEGER DEFAULT 0",
-            "score_ai_memory": "INTEGER DEFAULT 0",
-            "score_risk_net": "INTEGER DEFAULT 0",
-            "score_session": "INTEGER DEFAULT 0",
-            "score_order_block": "INTEGER DEFAULT 0",
-            "entry_quality": "TEXT",
-            "technical_zone": "TEXT",
-            "indicator_profile": "TEXT",
-            "candle_pattern": "TEXT",
-            "entry_stage_pct": "REAL DEFAULT 100",
-            "estimated_profit_usdt": "REAL DEFAULT 0",
-            "estimated_profit_pct": "REAL DEFAULT 0",
-            "session_state": "TEXT",
-            "order_block_state": "TEXT",
-            "session_bucket": "TEXT",
-            "mfe_pct": "REAL DEFAULT 0",
-            "mae_pct": "REAL DEFAULT 0",
-            "rsi_5m": "REAL DEFAULT 0",
-            "rsi_15m": "REAL DEFAULT 0",
-            "macd_hist_5m": "REAL DEFAULT 0",
-            "macd_hist_15m": "REAL DEFAULT 0",
-            "adx_15m": "REAL DEFAULT 0",
-            "atr_pct_15m": "REAL DEFAULT 0",
-            "volume_ratio_5m": "REAL DEFAULT 0",
-            "volume_ratio_15m": "REAL DEFAULT 0",
-            "result_5m": "TEXT",
-            "result_10m": "TEXT",
-            "result_15m": "TEXT",
+            "real_allowed": "INTEGER DEFAULT 0", "real_block_reason": "TEXT", "score_entry_precision": "INTEGER DEFAULT 0", "score_tp_sl": "INTEGER DEFAULT 0",
+            "score_market_mode": "INTEGER DEFAULT 0", "score_net_sync": "INTEGER DEFAULT 0", "entry_precision_pct": "REAL DEFAULT 0", "pattern_id": "TEXT",
+            "estimated_net_profit_usdt": "REAL DEFAULT 0", "market_mode": "TEXT", "best_price": "REAL", "worst_price": "REAL",
         }
         for name, spec in columns.items():
             if name not in existing:
@@ -300,54 +262,44 @@ class Storage:
             raise ValueError("حداکثر پوزیشن باید بین 1 تا 100 باشد.")
         self._set_setting("max_positions", str(int(value)))
 
-    # Compatibility only: no panel/command exposes these in scalper version.
-    def min_profit_usdt(self) -> float:
-        return float(self._get_setting("min_profit_usdt", str(DEFAULT_MIN_PROFIT_USDT)))
-
-    def set_min_profit_usdt(self, value: float) -> None:
-        self._set_setting("min_profit_usdt", str(float(value)))
-
-    def min_profit_pct(self) -> float:
-        return float(self._get_setting("min_profit_pct", str(DEFAULT_MIN_PROFIT_PCT)))
-
-    def set_min_profit_pct(self, value: float) -> None:
-        self._set_setting("min_profit_pct", str(float(value)))
-
     def add_signal(self, *, okx_symbol: str, toobit_symbol: str, symbol_name: str, decision: SignalDecision, signal_type: str, real_status: str = "none", signal_label: str | None = None) -> int:
         if decision.direction is None:
             raise ValueError("جهت سیگنال مشخص نیست.")
         now = datetime.now(timezone.utc)
         bucket = f"{now.hour:02d}:{0 if now.minute < 30 else 30:02d}"
-        notes = " | ".join(decision.notes[:28])
+        notes = " | ".join(decision.notes[:32])
         label = signal_label or decision.signal_label
         hunter_type = "hunter" if decision.hunter else "ordinary"
         with self._connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO signals(
-                    created_at, okx_symbol, toobit_symbol, symbol_name, direction, entry, tp, sl,
-                    score, threshold, ai_confidence, ai_experience, ai_adjustment, ai_effect, signal_type, hunter_type, signal_label,
-                    status, real_status, margin_usdt, leverage, score_direction, score_pre_ignition, score_candle_entry,
-                    score_ai_memory, score_risk_net, score_session, score_order_block, direction_state_1h,
-                    direction_confidence_1h, bias_4h, setup_15m, entry_5m, entry_quality, technical_zone, indicator_profile,
-                    candle_pattern, entry_stage_pct, net_edge, estimated_profit_usdt, estimated_profit_pct, risk_reward,
-                    estimated_cost_pct, market_bias, session_state, order_block_state, session_bucket, reason, notes,
-                    rsi_5m, rsi_15m, macd_hist_5m, macd_hist_15m, adx_15m, atr_pct_15m, volume_ratio_5m, volume_ratio_15m
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, okx_symbol, toobit_symbol, symbol_name, direction, entry, tp, sl, score, threshold,
+                    ai_confidence, ai_experience, ai_adjustment, ai_effect, signal_type, hunter_type, signal_label,
+                    status, real_status, real_allowed, real_block_reason, margin_usdt, leverage,
+                    score_direction, score_pre_ignition, score_candle_entry, score_entry_precision, score_ai_memory,
+                    score_tp_sl, score_market_mode, score_session, score_net_sync, direction_state_1h, direction_confidence_1h,
+                    bias_4h, setup_15m, entry_5m, entry_quality, entry_precision_pct, technical_zone, indicator_profile,
+                    pattern_id, candle_pattern, net_edge, estimated_profit_usdt, estimated_net_profit_usdt, estimated_profit_pct,
+                    risk_reward, estimated_cost_pct, market_bias, market_mode, session_state, order_block_state, session_bucket,
+                    reason, notes, best_price, worst_price, rsi_5m, rsi_15m, macd_hist_5m, macd_hist_15m, adx_15m,
+                    atr_pct_15m, volume_ratio_5m, volume_ratio_15m
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now.isoformat(), okx_symbol, toobit_symbol, symbol_name, decision.direction, decision.entry, decision.tp, decision.sl,
                     decision.score, decision.threshold, decision.ai_confidence, decision.ai_experience, decision.ai_adjustment, decision.ai_effect,
-                    signal_type, hunter_type, label, real_status, self.margin_usdt(), self.leverage(),
-                    decision.breakdown.score_direction, decision.breakdown.score_pre_ignition, decision.breakdown.score_candle_entry,
-                    decision.breakdown.score_ai_memory, decision.breakdown.score_risk_net, decision.breakdown.score_session,
-                    decision.breakdown.score_order_block, decision.direction_state_1h, decision.direction_confidence_1h,
-                    decision.bias_4h, decision.setup_15m, decision.entry_5m, decision.entry_quality, decision.technical_zone,
-                    decision.indicator_profile, decision.candle_pattern, decision.entry_stage_pct, decision.net_edge,
-                    decision.estimated_profit_usdt, decision.estimated_profit_pct, decision.risk_reward, decision.estimated_cost_pct,
-                    decision.market_bias, decision.session_state, decision.order_block_state, bucket, decision.reason, notes,
-                    decision.rsi_5m, decision.rsi_15m, decision.macd_hist_5m, decision.macd_hist_15m, decision.adx_15m,
-                    decision.atr_pct_15m, decision.volume_ratio_5m, decision.volume_ratio_15m,
+                    signal_type, hunter_type, label, real_status, 1 if decision.real_allowed else 0, decision.real_block_reason,
+                    self.margin_usdt(), self.leverage(), decision.breakdown.score_direction, decision.breakdown.score_pre_ignition,
+                    decision.breakdown.score_candle_entry, decision.breakdown.score_entry_precision, decision.breakdown.score_ai_memory,
+                    decision.breakdown.score_tp_sl, decision.breakdown.score_market_mode, decision.breakdown.score_session, decision.breakdown.score_net_sync,
+                    decision.direction_state_1h, decision.direction_confidence_1h, decision.bias_4h, decision.setup_15m, decision.entry_5m,
+                    decision.entry_quality, decision.entry_precision_pct, decision.technical_zone, decision.indicator_profile, decision.pattern_id,
+                    decision.candle_pattern, decision.net_edge, decision.estimated_profit_usdt, decision.estimated_net_profit_usdt,
+                    decision.estimated_profit_pct, decision.risk_reward, decision.estimated_cost_pct, decision.market_bias, decision.market_mode,
+                    decision.session_state, decision.order_block_state, bucket, decision.reason, notes, decision.entry, decision.entry,
+                    decision.rsi_5m, decision.rsi_15m, decision.macd_hist_5m, decision.macd_hist_15m, decision.adx_15m, decision.atr_pct_15m,
+                    decision.volume_ratio_5m, decision.volume_ratio_15m,
                 ),
             )
             return int(cur.lastrowid)
@@ -366,21 +318,52 @@ class Storage:
         with self._connect() as conn:
             if opened:
                 conn.execute("UPDATE signals SET real_status='opened', real_opened=1, order_id=?, real_open_reason=?, actual_margin_usdt=?, quantity=? WHERE id=? AND status='OPEN'", (order_id, reason, actual_margin_usdt, quantity, signal_id))
+                conn.execute("INSERT INTO toobit_orders(signal_id, symbol, action, order_id, status, reason, created_at) SELECT id, toobit_symbol, 'open', ?, 'opened', ?, ? FROM signals WHERE id=?", (order_id, reason, datetime.now(timezone.utc).isoformat(), signal_id))
             else:
                 conn.execute("UPDATE signals SET signal_type='real_failed', status='FAILED', real_status='failed', real_opened=0, order_id=NULL, real_open_reason=?, result_at=? WHERE id=? AND status='OPEN'", (reason, datetime.now(timezone.utc).isoformat(), signal_id))
 
-    def finish_signal(self, signal_id: int, *, status: str, approx_pnl: float, real_pnl: float | None, result_message_id: int | None, mfe_pct: float = 0.0, mae_pct: float = 0.0, result_source: str | None = None) -> None:
-        now = datetime.now(timezone.utc).isoformat()
-        result_5m = status
-        result_10m = status
-        result_15m = status
+    def mark_real_close(self, signal_id: int, *, order_id: str | None, reason: str) -> None:
         with self._connect() as conn:
-            conn.execute("UPDATE signals SET status=?, approx_pnl=?, real_pnl=?, result_message_id=?, result_at=?, mfe_pct=?, mae_pct=?, result_source=?, result_5m=?, result_10m=?, result_15m=? WHERE id=? AND status='OPEN'", (status, approx_pnl, real_pnl, result_message_id, now, mfe_pct, mae_pct, result_source, result_5m, result_10m, result_15m, signal_id))
+            conn.execute("INSERT INTO toobit_orders(signal_id, symbol, action, order_id, status, reason, created_at) SELECT id, toobit_symbol, 'close', ?, 'sent', ?, ? FROM signals WHERE id=?", (order_id, reason, datetime.now(timezone.utc).isoformat(), signal_id))
+
+    def update_signal_excursions(self, signal_id: int, price: float) -> tuple[float, float]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
+            if not row:
+                return 0.0, 0.0
+            entry = float(row["entry"])
+            best = float(row["best_price"] or entry)
+            worst = float(row["worst_price"] or entry)
+            direction = str(row["direction"])
+            if direction == "LONG":
+                best = max(best, price)
+                worst = min(worst, price)
+                mfe = max(0.0, (best - entry) / entry)
+                mae = max(0.0, (entry - worst) / entry)
+            else:
+                best = min(best, price)
+                worst = max(worst, price)
+                mfe = max(0.0, (entry - best) / entry)
+                mae = max(0.0, (worst - entry) / entry)
+            conn.execute("UPDATE signals SET best_price=?, worst_price=?, mfe_pct=?, mae_pct=? WHERE id=?", (best, worst, mfe, mae, signal_id))
+            conn.execute("INSERT INTO ai_second_snapshots(signal_id, created_at, price, mfe_pct, mae_pct) VALUES(?, ?, ?, ?, ?)", (signal_id, datetime.now(timezone.utc).isoformat(), price, mfe, mae))
+            return mfe, mae
+
+    def finish_signal(self, signal_id: int, *, status: str, approx_pnl: float, real_pnl: float | None, result_message_id: int | None, mfe_pct: float, mae_pct: float, result_source: str | None = None) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute("UPDATE signals SET status=?, approx_pnl=?, real_pnl=?, result_message_id=?, result_at=?, mfe_pct=?, mae_pct=?, result_source=?, result_5m=?, result_10m=?, result_15m=? WHERE id=? AND status='OPEN'", (status, approx_pnl, real_pnl, result_message_id, now, mfe_pct, mae_pct, result_source, status, status, status, signal_id))
+            return cur.rowcount > 0
 
     def open_signals(self) -> list[StoredSignal]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM signals WHERE status='OPEN' ORDER BY id ASC").fetchall()
             return [self._row_to_signal(row) for row in rows]
+
+    def signal_dict(self, signal_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
+            return dict(row) if row else None
 
     def active_symbol_exists(self, toobit_symbol: str) -> bool:
         with self._connect() as conn:
@@ -406,14 +389,7 @@ class Storage:
         now = datetime.now(timezone.utc)
         expires = now + timedelta(seconds=expire_seconds)
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO watchlist(symbol_name, okx_symbol, toobit_symbol, direction, score, ai_confidence, created_at, updated_at, expires_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol_name, direction) DO UPDATE SET score=excluded.score, ai_confidence=excluded.ai_confidence, updated_at=excluded.updated_at, expires_at=excluded.expires_at
-                """,
-                (symbol_name, okx_symbol, toobit_symbol, direction, score, ai_confidence, now.isoformat(), now.isoformat(), expires.isoformat()),
-            )
+            conn.execute("INSERT INTO watchlist(symbol_name, okx_symbol, toobit_symbol, direction, score, ai_confidence, created_at, updated_at, expires_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(symbol_name, direction) DO UPDATE SET score=excluded.score, ai_confidence=excluded.ai_confidence, updated_at=excluded.updated_at, expires_at=excluded.expires_at", (symbol_name, okx_symbol, toobit_symbol, direction, score, ai_confidence, now.isoformat(), now.isoformat(), expires.isoformat()))
 
     def active_watches(self) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc).isoformat()
@@ -453,28 +429,16 @@ class Storage:
         with self._connect() as conn:
             conn.execute("INSERT INTO rejection_log(created_at, symbol_name, direction, code, reason, score) VALUES(?, ?, ?, ?, ?, ?)", (datetime.now(timezone.utc).isoformat(), symbol_name, direction, code, reason, score))
 
-    def pattern_stats(self, symbol_name: str, direction: str, pattern: str, rsi: float, adx: float, volume_ratio: float) -> dict[str, Any]:
+    def ai_pattern_stats(self, symbol_name: str, direction: str, pattern_id: str) -> dict[str, Any]:
         start = datetime.now(timezone.utc) - timedelta(days=LEARNING_DAYS)
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND candle_pattern=? AND status IN ('TP','SL')", (start.isoformat(), symbol_name, direction, pattern)).fetchall()
+            rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND pattern_id=? AND status IN ('TP','SL')", (start.isoformat(), symbol_name, direction, pattern_id)).fetchall()
         return self._learning_summary(rows)
 
     def indicator_range_stats(self, *, symbol_name: str, direction: str, entry_quality: str, rsi_5m: float, rsi_15m: float, adx_15m: float, volume_ratio_5m: float, volume_ratio_15m: float) -> dict[str, Any]:
         start = datetime.now(timezone.utc) - timedelta(days=LEARNING_DAYS)
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM signals
-                WHERE created_at>=? AND symbol_name=? AND direction=? AND status IN ('TP','SL')
-                  AND ABS(rsi_5m - ?) <= 5 AND ABS(rsi_15m - ?) <= 6 AND ABS(adx_15m - ?) <= 5
-                  AND volume_ratio_5m BETWEEN ? AND ? AND volume_ratio_15m BETWEEN ? AND ?
-                """,
-                (
-                    start.isoformat(), symbol_name, direction, rsi_5m, rsi_15m, adx_15m,
-                    max(0.0, volume_ratio_5m - 0.55), volume_ratio_5m + 0.55,
-                    max(0.0, volume_ratio_15m - 0.55), volume_ratio_15m + 0.55,
-                ),
-            ).fetchall()
+            rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND status IN ('TP','SL') AND ABS(rsi_5m - ?) <= 5 AND ABS(rsi_15m - ?) <= 6 AND ABS(adx_15m - ?) <= 5 AND volume_ratio_5m BETWEEN ? AND ? AND volume_ratio_15m BETWEEN ? AND ?", (start.isoformat(), symbol_name, direction, rsi_5m, rsi_15m, adx_15m, max(0.0, volume_ratio_5m - 0.55), volume_ratio_5m + 0.55, max(0.0, volume_ratio_15m - 0.55), volume_ratio_15m + 0.55)).fetchall()
         if len(rows) < 5 and entry_quality:
             with self._connect() as conn:
                 rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND entry_quality=? AND status IN ('TP','SL')", (start.isoformat(), symbol_name, direction, entry_quality)).fetchall()
@@ -486,13 +450,78 @@ class Storage:
             rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND session_bucket=? AND status IN ('TP','SL')", (start.isoformat(), symbol_name, direction, bucket)).fetchall()
         return self._learning_summary(rows)
 
+    def symbol_direction_profile(self, symbol_name: str, direction: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM ai_symbol_direction_profiles WHERE symbol_name=? AND direction=?", (symbol_name, direction)).fetchone()
+            return dict(row) if row else {"total_signals": 0, "win_rate": 0.0, "consecutive_sl": 0}
+
+    def add_shadow_test(self, signal_id: int, plan_name: str, tp: float, sl: float) -> None:
+        with self._connect() as conn:
+            conn.execute("INSERT INTO ai_shadow_tests(signal_id, plan_name, tp, sl, created_at) VALUES(?, ?, ?, ?, ?)", (signal_id, plan_name, tp, sl, datetime.now(timezone.utc).isoformat()))
+
+    def update_shadow_tests(self, signal_id: int) -> None:
+        signal = self.signal_dict(signal_id)
+        if not signal:
+            return
+        direction = str(signal["direction"])
+        best = float(signal.get("best_price") or signal["entry"])
+        worst = float(signal.get("worst_price") or signal["entry"])
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM ai_shadow_tests WHERE signal_id=?", (signal_id,)).fetchall()
+            for row in rows:
+                tp = float(row["tp"])
+                sl = float(row["sl"])
+                if direction == "LONG":
+                    result = "TP" if best >= tp else "SL" if worst <= sl else "OPEN"
+                else:
+                    result = "TP" if best <= tp else "SL" if worst >= sl else "OPEN"
+                conn.execute("UPDATE ai_shadow_tests SET result=?, updated_at=? WHERE id=?", (result, datetime.now(timezone.utc).isoformat(), row["id"]))
+
+    def record_ai_judgement(self, signal_id: int, judgement) -> None:
+        with self._connect() as conn:
+            conn.execute("INSERT INTO ai_judgements(signal_id, entry_quality, tp_quality, sl_quality, failure_reason, score_delta, reasons, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)", (signal_id, judgement.entry_quality, judgement.tp_quality, judgement.sl_quality, judgement.failure_reason, judgement.score_delta, " | ".join(judgement.reasons), datetime.now(timezone.utc).isoformat()))
+
+    def update_ai_profiles_from_signal(self, signal_id: int, judgement) -> None:
+        signal = self.signal_dict(signal_id)
+        if not signal:
+            return
+        symbol = str(signal["symbol_name"])
+        direction = str(signal["direction"])
+        status = str(signal["status"])
+        pattern_id = str(signal.get("pattern_id") or "")
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM signals WHERE symbol_name=? AND direction=? AND status IN ('TP','SL','EXIT')", (symbol, direction)).fetchall()
+            total = len(rows)
+            tp = sum(1 for r in rows if r["status"] == "TP")
+            sl = sum(1 for r in rows if r["status"] == "SL")
+            exit_count = sum(1 for r in rows if r["status"] == "EXIT")
+            wr = tp / max(1, tp + sl) * 100.0 if tp + sl else 0.0
+            avg_mfe = sum(float(r["mfe_pct"] or 0.0) for r in rows) / max(1, total)
+            avg_mae = sum(float(r["mae_pct"] or 0.0) for r in rows) / max(1, total)
+            consecutive_sl = 0
+            for r in reversed(rows):
+                if r["status"] == "SL":
+                    consecutive_sl += 1
+                else:
+                    break
+            conn.execute("INSERT INTO ai_symbol_direction_profiles(symbol_name, direction, total_signals, tp, sl, exit_count, win_rate, net_profit, avg_mfe, avg_mae, consecutive_sl, learning_confidence, last_updated) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(symbol_name, direction) DO UPDATE SET total_signals=excluded.total_signals, tp=excluded.tp, sl=excluded.sl, exit_count=excluded.exit_count, win_rate=excluded.win_rate, net_profit=excluded.net_profit, avg_mfe=excluded.avg_mfe, avg_mae=excluded.avg_mae, consecutive_sl=excluded.consecutive_sl, learning_confidence=excluded.learning_confidence, last_updated=excluded.last_updated", (symbol, direction, total, tp, sl, exit_count, wr, sum(float(r["approx_pnl"] or 0.0) for r in rows), avg_mfe, avg_mae, consecutive_sl, min(99, total * 2), datetime.now(timezone.utc).isoformat()))
+            if pattern_id:
+                pattern_rows = [r for r in rows if str(r["pattern_id"] or "") == pattern_id]
+                p_total = len(pattern_rows)
+                p_tp = sum(1 for r in pattern_rows if r["status"] == "TP")
+                p_sl = sum(1 for r in pattern_rows if r["status"] == "SL")
+                p_wr = p_tp / max(1, p_tp + p_sl) * 100.0 if p_tp + p_sl else 0.0
+                verdict = "POSITIVE" if p_total >= 10 and p_wr >= 60 else "NEGATIVE" if p_total >= 10 and p_wr <= 40 else "NEUTRAL"
+                conn.execute("INSERT INTO ai_patterns(symbol_name, direction, pattern_id, total, tp, sl, win_rate, avg_mfe, avg_mae, verdict, last_updated) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(symbol_name, direction, pattern_id) DO UPDATE SET total=excluded.total, tp=excluded.tp, sl=excluded.sl, win_rate=excluded.win_rate, avg_mfe=excluded.avg_mfe, avg_mae=excluded.avg_mae, verdict=excluded.verdict, last_updated=excluded.last_updated", (symbol, direction, pattern_id, p_total, p_tp, p_sl, p_wr, sum(float(r["mfe_pct"] or 0.0) for r in pattern_rows) / max(1, p_total), sum(float(r["mae_pct"] or 0.0) for r in pattern_rows) / max(1, p_total), verdict, datetime.now(timezone.utc).isoformat()))
+                conn.execute("INSERT INTO ai_pattern_results(signal_id, symbol_name, direction, pattern_id, status, mfe_pct, mae_pct, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)", (signal_id, symbol, direction, pattern_id, status, signal.get("mfe_pct") or 0.0, signal.get("mae_pct") or 0.0, datetime.now(timezone.utc).isoformat()))
+
     def _learning_summary(self, rows: list[sqlite3.Row]) -> dict[str, Any]:
         samples = len(rows)
         tp = sum(1 for row in rows if row["status"] == "TP")
         sl = sum(1 for row in rows if row["status"] == "SL")
         avg_mfe = sum(float(row["mfe_pct"] or 0.0) for row in rows) / samples if samples else 0.0
         avg_mae = sum(float(row["mae_pct"] or 0.0) for row in rows) / samples if samples else 0.0
-        return {"samples": samples, "tp": tp, "sl": sl, "win_rate": (tp / samples * 100.0) if samples else 0.0, "avg_mfe": avg_mfe, "avg_mae": avg_mae}
+        return {"samples": samples, "tp": tp, "sl": sl, "win_rate": (tp / max(1, tp + sl) * 100.0) if tp + sl else 0.0, "avg_mfe": avg_mfe, "avg_mae": avg_mae}
 
     def stats(self, days: int) -> dict[str, Any]:
         days = max(1, min(days, 30))
@@ -514,75 +543,39 @@ class Storage:
     def ai_panel_stats(self) -> dict[str, Any]:
         start = datetime.now(timezone.utc) - timedelta(days=LEARNING_DAYS)
         with self._connect() as conn:
-            active_rows = conn.execute("SELECT * FROM signals WHERE created_at >= ?", (start.isoformat(),)).fetchall()
-            all_patterns = conn.execute("SELECT COUNT(*) AS n FROM signals WHERE candle_pattern IS NOT NULL").fetchone()
-        closed = [r for r in active_rows if r["status"] in ("TP", "SL")]
-        hunter = [r for r in closed if r["hunter_type"] == "hunter"]
-        avg_ai = sum(float(r["ai_confidence"] or 0) for r in active_rows) / len(active_rows) if active_rows else 0.0
+            rows = conn.execute("SELECT * FROM signals WHERE created_at >= ?", (start.isoformat(),)).fetchall()
+            patterns = conn.execute("SELECT * FROM ai_patterns ORDER BY total DESC, win_rate DESC LIMIT 5").fetchall()
+            suggestions = conn.execute("SELECT * FROM ai_suggestions WHERE status='open' ORDER BY id DESC LIMIT 5").fetchall()
+        closed = [r for r in rows if r["status"] in ("TP", "SL", "EXIT")]
         return {
             "learning_days": LEARNING_DAYS,
-            "stored_patterns": int(all_patterns["n"] or 0),
-            "active_patterns": len(active_rows),
-            "hunter_tp": sum(1 for r in hunter if r["status"] == "TP"),
-            "hunter_sl": sum(1 for r in hunter if r["status"] == "SL"),
+            "stored_patterns": len(patterns),
+            "active_patterns": len(rows),
             "analysis_right": sum(1 for r in closed if r["status"] == "TP"),
             "analysis_wrong": sum(1 for r in closed if r["status"] == "SL"),
-            "avg_ai_confidence": avg_ai,
+            "avg_ai_confidence": sum(float(r["ai_confidence"] or 0) for r in rows) / len(rows) if rows else 0.0,
             "best_symbol_side": self._best_worst_symbol_side(closed, True),
             "worst_symbol_side": self._best_worst_symbol_side(closed, False),
-            "good_sessions": self._session_list(closed, good=True),
-            "bad_sessions": self._session_list(closed, good=False),
-            "best_indicator_patterns": self._best_pattern_text(closed),
             "best_indicator_ranges": self._best_indicator_range_text(closed),
+            "patterns": "\n".join(f"• {p['symbol_name']} {p['direction']} {p['pattern_id']} / WR {float(p['win_rate']):.1f}% / {p['total']}" for p in patterns) or "نمونه کافی نیست",
+            "suggestions": "\n".join(f"• {s['message']}" for s in suggestions) or "پیشنهاد باز ندارد",
         }
 
     def _best_worst_symbol_side(self, rows: list[sqlite3.Row], reverse: bool) -> str:
         groups: dict[str, list[sqlite3.Row]] = {}
         for row in rows:
-            key = f"{row['symbol_name']} {row['direction']}"
-            groups.setdefault(key, []).append(row)
+            groups.setdefault(f"{row['symbol_name']} {row['direction']}", []).append(row)
         scored = []
         for key, items in groups.items():
-            if len(items) >= 3:
-                tp = sum(1 for x in items if x["status"] == "TP")
-                scored.append((tp / len(items) * 100.0, key, len(items)))
+            tp = sum(1 for x in items if x["status"] == "TP")
+            sl = sum(1 for x in items if x["status"] == "SL")
+            if tp + sl >= 3:
+                scored.append((tp / (tp + sl) * 100.0, key, tp + sl))
         if not scored:
             return "نمونه کافی نیست"
         scored.sort(reverse=reverse)
         wr, key, n = scored[0]
         return f"{key} / WR {wr:.1f}% / {n} نمونه"
-
-    def _session_list(self, rows: list[sqlite3.Row], *, good: bool) -> str:
-        groups: dict[str, list[sqlite3.Row]] = {}
-        for row in rows:
-            bucket = str(row["session_bucket"] or "--")
-            groups.setdefault(bucket, []).append(row)
-        items = []
-        for bucket, subset in groups.items():
-            if len(subset) < 5:
-                continue
-            tp = sum(1 for r in subset if r["status"] == "TP")
-            wr = tp / len(subset) * 100.0
-            if (good and wr >= 62) or ((not good) and wr <= 42):
-                items.append((wr, bucket))
-        items.sort(reverse=good)
-        return "، ".join(bucket for _, bucket in items[:4]) or "نمونه کافی نیست"
-
-    def _best_pattern_text(self, rows: list[sqlite3.Row]) -> str:
-        groups: dict[str, list[sqlite3.Row]] = {}
-        for row in rows:
-            key = str(row["candle_pattern"] or "UNKNOWN")
-            groups.setdefault(key, []).append(row)
-        best = []
-        for key, subset in groups.items():
-            if len(subset) < 3:
-                continue
-            tp = sum(1 for r in subset if r["status"] == "TP")
-            best.append((tp / len(subset) * 100.0, key, len(subset)))
-        if not best:
-            return "نمونه کافی نیست"
-        best.sort(reverse=True)
-        return " / ".join(f"{key} WR {wr:.1f}%" for wr, key, _ in best[:3])
 
     def _best_indicator_range_text(self, rows: list[sqlite3.Row]) -> str:
         groups: dict[str, list[sqlite3.Row]] = {}
@@ -591,10 +584,10 @@ class Storage:
             groups.setdefault(key, []).append(row)
         best = []
         for key, subset in groups.items():
-            if len(subset) < 3:
-                continue
             tp = sum(1 for r in subset if r["status"] == "TP")
-            best.append((tp / len(subset) * 100.0, key, len(subset)))
+            sl = sum(1 for r in subset if r["status"] == "SL")
+            if tp + sl >= 3:
+                best.append((tp / (tp + sl) * 100.0, key, tp + sl))
         if not best:
             return "نمونه کافی نیست"
         best.sort(reverse=True)
@@ -605,10 +598,19 @@ class Storage:
             conn.execute("DELETE FROM signals")
             conn.execute("DELETE FROM rejection_log")
             conn.execute("DELETE FROM watchlist")
+            conn.execute("DELETE FROM ai_second_snapshots")
+            conn.execute("DELETE FROM ai_shadow_tests")
+            conn.execute("DELETE FROM ai_judgements")
 
     def reset_learning(self) -> None:
         with self._connect() as conn:
-            conn.execute("UPDATE signals SET ai_confidence=0, ai_experience=0, ai_adjustment=0, ai_effect='neutral', mfe_pct=0, mae_pct=0")
+            conn.execute("DELETE FROM ai_symbol_direction_profiles")
+            conn.execute("DELETE FROM ai_patterns")
+            conn.execute("DELETE FROM ai_pattern_results")
+            conn.execute("DELETE FROM ai_sensor_weights")
+            conn.execute("DELETE FROM ai_shadow_tests")
+            conn.execute("DELETE FROM ai_judgements")
+            conn.execute("UPDATE signals SET ai_confidence=0, ai_experience=0, ai_adjustment=0, ai_effect='NEUTRAL', mfe_pct=0, mae_pct=0")
 
     def _build_stats(self, rows: list[sqlite3.Row]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -616,47 +618,19 @@ class Storage:
         result["normal"] = self._summarize([r for r in rows if r["signal_type"] == "normal"], pnl_key="approx_pnl")
         result["real"] = self._summarize([r for r in rows if r["signal_type"] == "real"], pnl_key="real_pnl")
         result["hunter"] = self._summarize([r for r in rows if r["hunter_type"] == "hunter"], pnl_key="approx_pnl")
-        result["ordinary"] = self._summarize([r for r in rows if r["hunter_type"] != "hunter"], pnl_key="approx_pnl")
         result["real_failed"] = self._summarize([r for r in rows if r["signal_type"] == "real_failed"], pnl_key="real_pnl")
         result["toobit_real_tp_sl"] = self._summarize([r for r in rows if r["result_source"] == "toobit_real"], pnl_key="real_pnl")
         result["normal_tp_sl"] = self._summarize([r for r in rows if r["result_source"] in ("normal", "normal_on_real")], pnl_key="approx_pnl")
         for side in ("LONG", "SHORT"):
             key = side.lower()
             result[key] = self._summarize([r for r in rows if r["direction"] == side], pnl_key="approx_pnl")
-            result[f"normal_{key}"] = self._summarize([r for r in rows if r["signal_type"] == "normal" and r["direction"] == side], pnl_key="approx_pnl")
-            result[f"real_{key}"] = self._summarize([r for r in rows if r["signal_type"] == "real" and r["direction"] == side], pnl_key="real_pnl")
         return result
 
     def _summarize(self, subset: list[sqlite3.Row], *, pnl_key: str) -> dict[str, Any]:
         closed = [row for row in subset if row["status"] in ("TP", "SL")]
         tp_count = sum(1 for row in subset if row["status"] == "TP")
         sl_count = sum(1 for row in subset if row["status"] == "SL")
-        return {
-            "total": len(subset),
-            "tp": tp_count,
-            "sl": sl_count,
-            "open": sum(1 for row in subset if row["status"] == "OPEN"),
-            "failed": sum(1 for row in subset if row["status"] == "FAILED"),
-            "win_rate": (tp_count / len(closed) * 100.0) if closed else 0.0,
-            "pnl": sum(float(row[pnl_key] or 0.0) for row in subset),
-            "avg_score": sum(float(row["score"] or 0) for row in subset) / len(subset) if subset else 0.0,
-        }
+        return {"total": len(subset), "tp": tp_count, "sl": sl_count, "open": sum(1 for row in subset if row["status"] == "OPEN"), "exit": sum(1 for row in subset if row["status"] == "EXIT"), "failed": sum(1 for row in subset if row["status"] == "FAILED"), "win_rate": (tp_count / len(closed) * 100.0) if closed else 0.0, "pnl": sum(float(row[pnl_key] or 0.0) for row in subset), "avg_score": sum(float(row["score"] or 0) for row in subset) / len(subset) if subset else 0.0}
 
     def _row_to_signal(self, row: sqlite3.Row) -> StoredSignal:
-        return StoredSignal(
-            id=int(row["id"]), created_at=str(row["created_at"]), okx_symbol=str(row["okx_symbol"]), toobit_symbol=str(row["toobit_symbol"]),
-            symbol_name=str(row["symbol_name"] or ""), direction=str(row["direction"]), entry=float(row["entry"]), tp=float(row["tp"]), sl=float(row["sl"]),
-            score=int(row["score"]), ai_confidence=int(row["ai_confidence"] or 0), ai_experience=int(row["ai_experience"] or 0),
-            signal_type=str(row["signal_type"]), hunter_type=str(row["hunter_type"] or "ordinary"), status=str(row["status"]), real_status=str(row["real_status"]),
-            message_id=int(row["message_id"]) if row["message_id"] is not None else None,
-            result_message_id=int(row["result_message_id"]) if row["result_message_id"] is not None else None,
-            order_id=str(row["order_id"]) if row["order_id"] is not None else None,
-            approx_pnl=float(row["approx_pnl"]) if row["approx_pnl"] is not None else None,
-            real_pnl=float(row["real_pnl"]) if row["real_pnl"] is not None else None,
-            margin_usdt=float(row["margin_usdt"] or 0.0), leverage=int(row["leverage"] or 1), net_edge=float(row["net_edge"] or 0.0),
-            estimated_profit_usdt=float(row["estimated_profit_usdt"] or 0.0), estimated_profit_pct=float(row["estimated_profit_pct"] or 0.0),
-            risk_reward=float(row["risk_reward"] or 0.0), reason=str(row["reason"]) if row["reason"] is not None else None,
-            result_source=str(row["result_source"]) if row["result_source"] is not None else None,
-            entry_quality=str(row["entry_quality"]) if row["entry_quality"] is not None else None,
-            indicator_profile=str(row["indicator_profile"]) if row["indicator_profile"] is not None else None,
-        )
+        return StoredSignal(id=int(row["id"]), created_at=str(row["created_at"]), okx_symbol=str(row["okx_symbol"]), toobit_symbol=str(row["toobit_symbol"]), symbol_name=str(row["symbol_name"] or ""), direction=str(row["direction"]), entry=float(row["entry"]), tp=float(row["tp"]), sl=float(row["sl"]), score=int(row["score"]), ai_confidence=int(row["ai_confidence"] or 0), ai_experience=int(row["ai_experience"] or 0), signal_type=str(row["signal_type"]), hunter_type=str(row["hunter_type"] or "ordinary"), status=str(row["status"]), real_status=str(row["real_status"]), message_id=int(row["message_id"]) if row["message_id"] is not None else None, result_message_id=int(row["result_message_id"]) if row["result_message_id"] is not None else None, order_id=str(row["order_id"]) if row["order_id"] is not None else None, approx_pnl=float(row["approx_pnl"]) if row["approx_pnl"] is not None else None, real_pnl=float(row["real_pnl"]) if row["real_pnl"] is not None else None, margin_usdt=float(row["margin_usdt"] or 0.0), leverage=int(row["leverage"] or 1), net_edge=float(row["net_edge"] or 0.0), estimated_profit_usdt=float(row["estimated_profit_usdt"] or 0.0), estimated_net_profit_usdt=float(row["estimated_net_profit_usdt"] or 0.0), estimated_profit_pct=float(row["estimated_profit_pct"] or 0.0), risk_reward=float(row["risk_reward"] or 0.0), reason=str(row["reason"]) if row["reason"] is not None else None, result_source=str(row["result_source"]) if row["result_source"] is not None else None, entry_quality=str(row["entry_quality"]) if row["entry_quality"] is not None else None, indicator_profile=str(row["indicator_profile"]) if row["indicator_profile"] is not None else None, mfe_pct=float(row["mfe_pct"] or 0.0), mae_pct=float(row["mae_pct"] or 0.0))

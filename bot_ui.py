@@ -6,6 +6,7 @@ from typing import Any
 from config import OWNER_ID, TELEGRAM_CHAT_ID
 from scorer import SignalDecision
 from storage import Storage, StoredSignal
+from symbols import ALTERNATIVE_SYMBOLS, MAIN_SYMBOLS
 from trade_manager import CreatedSignal, PanelData, TradeManager
 
 PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
@@ -31,7 +32,7 @@ def fmt_price(value: float | None) -> str:
 def fmt_money(value: float | None) -> str:
     if value is None:
         return "خطا در خواندن"
-    return f"{value:.2f} USDT"
+    return f"{value:.4f} USDT"
 
 
 def fmt_pct(value: float) -> str:
@@ -55,7 +56,7 @@ class BotUI:
         if self.app is None:
             return None
         direction_fa = "لانگ" if direction == "LONG" else "شورت"
-        text = f"🟡 آماده شکار اسکالپ\n{symbol_name} {direction_fa}\nپنجره: 5 تا 15 دقیقه"
+        text = f"🟡 آماده شکار\n{symbol_name} {direction_fa}\nAI هنوز منتظر ورود دقیق است."
         msg = await self.app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
         return int(msg.message_id)
 
@@ -68,57 +69,39 @@ class BotUI:
             f"{color} سیگنال اسکالپ {direction_fa}\n\n"
             f"ارز: {symbol_name}\n"
             f"نوع: {created.signal_label}\n"
-            f"Score: {decision.score}/{decision.threshold}\n"
-            f"کیفیت ورود: {decision.entry_quality}\n"
-            f"AI Confidence: {decision.ai_confidence}%\n"
-            f"AI Experience: {decision.ai_experience} نمونه\n"
-            f"اثر AI: {decision.ai_effect} / adj {decision.ai_adjustment}\n\n"
+            f"امتیاز: {decision.score}/{decision.threshold}\n"
+            f"کیفیت AI: {decision.entry_quality}\n"
+            f"دقت ورود AI: {decision.entry_precision_pct:.1f}%\n"
+            f"اعتماد AI: {decision.ai_confidence}% / تجربه: {decision.ai_experience}\n"
+            f"اثر AI: {decision.ai_effect} / adj {decision.ai_adjustment}\n"
+            f"Market Mode: {decision.market_mode}\n\n"
             f"Entry: {fmt_price(decision.entry)}\n"
             f"TP: {fmt_price(decision.tp)}\n"
-            f"SL: {fmt_price(decision.sl)}\n\n"
-            f"Pattern: {decision.candle_pattern}\n"
-            f"Entry Stage: {decision.entry_stage_pct:.1f}%\n"
-            f"RSI 5m/15m: {decision.rsi_5m:.1f} / {decision.rsi_15m:.1f}\n"
-            f"ADX 15m: {decision.adx_15m:.1f}\n"
-            f"Vol 5m/15m: {decision.volume_ratio_5m:.2f}x / {decision.volume_ratio_15m:.2f}x\n"
-            f"Net Edge نمایشی: {fmt_pct(decision.net_edge)}\n"
-            f"سود کل تخمینی تا TP: {fmt_money(decision.estimated_profit_usdt)}\n"
+            f"SL: {fmt_price(decision.sl)}\n"
             f"RR: {decision.risk_reward:.2f}\n\n"
-            f"امتیازها: جهت {decision.breakdown.score_direction} | شروع حرکت {decision.breakdown.score_pre_ignition} | "
-            f"ورود {decision.breakdown.score_candle_entry} | AI {decision.breakdown.score_ai_memory} | "
-            f"سشن {decision.breakdown.score_session} | محدوده {decision.breakdown.score_order_block}\n\n"
-            f"دلیل: {decision.reason}\n"
+            f"سود خالص تخمینی: {fmt_money(decision.estimated_net_profit_usdt)}\n"
+            f"Net Edge: {fmt_pct(decision.net_edge)}\n"
             f"وضعیت اجرا: {created.reason}\n\n"
-            f"پروفایل AI:\n{decision.indicator_profile[:700]}"
+            f"امتیازها: جهت {decision.breakdown.score_direction} | شروع {decision.breakdown.score_pre_ignition} | کندل {decision.breakdown.score_candle_entry} | دقت ورود {decision.breakdown.score_entry_precision} | AI {decision.breakdown.score_ai_memory} | TP/SL {decision.breakdown.score_tp_sl} | بازار {decision.breakdown.score_market_mode} | زمان {decision.breakdown.score_session} | سود {decision.breakdown.score_net_sync}\n\n"
+            f"دلیل: {decision.reason}\n"
+            f"پروفایل: {decision.indicator_profile[:650]}"
         )
-        message = await self.app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
-        self.storage.update_message_id(created.signal_id, int(message.message_id))
-        return int(message.message_id)
+        msg = await self.app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+        self.storage.update_message_id(created.signal_id, int(msg.message_id))
+        return int(msg.message_id)
 
     async def send_result(self, signal: StoredSignal, status: str, approx_pnl: float, real_pnl: float | None, result_source: str | None = None) -> int | None:
         if self.app is None:
             return None
         direction_fa = "لانگ" if signal.direction == "LONG" else "شورت"
-        result_fa = "تیپی خورد" if status == "TP" else "استاپ خورد"
-        icon = "🟢" if status == "TP" else "🔴"
-        source_fa = {
-            "toobit_real": "واقعی توبیت",
-            "normal_on_real": "عادی روی سیگنال واقعی",
-            "normal": "عادی ربات",
-            "ghost_or_failed": "Ghost/Failed",
-        }.get(result_source or signal.result_source or "", "عادی ربات")
-        text = (
-            f"{icon} نتیجه {direction_fa}: {result_fa}\n"
-            f"ارز: {signal.symbol_name or signal.toobit_symbol}\n"
-            f"نوع نتیجه: {source_fa}\n"
-            f"نوع سیگنال: {signal.hunter_type} / {signal.signal_type}\n"
-            f"کیفیت ورود: {signal.entry_quality or '-'}\n"
-            f"سود/ضرر تقریبی: {fmt_money(approx_pnl)}"
-        )
+        result_fa = "تیپی خورد" if status == "TP" else "استاپ خورد" if status == "SL" else "خروج هوشمند AI"
+        icon = "🟢" if status == "TP" else "🔴" if status == "SL" else "🟡"
+        source_fa = {"toobit_real": "واقعی توبیت", "normal_on_real": "عادی روی سیگنال واقعی", "normal": "عادی ربات", "ghost_or_failed": "Ghost/Failed"}.get(result_source or signal.result_source or "", "عادی ربات")
+        text = f"{icon} نتیجه {direction_fa}: {result_fa}\nارز: {signal.symbol_name or signal.toobit_symbol}\nنوع نتیجه: {source_fa}\nنوع سیگنال: {signal.hunter_type} / {signal.signal_type}\nکیفیت AI: {signal.entry_quality or '-'}\nسود/ضرر تقریبی: {fmt_money(approx_pnl)}"
         if signal.signal_type == "real":
             text += f"\nسود/ضرر واقعی Toobit: {fmt_money(real_pnl)}"
-        message = await self.app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, reply_to_message_id=signal.message_id)
-        return int(message.message_id)
+        msg = await self.app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, reply_to_message_id=signal.message_id)
+        return int(msg.message_id)
 
     async def send_panel(self, chat_id: int | str) -> None:
         data = await self.trade_manager.panel_data()
@@ -126,44 +109,26 @@ class BotUI:
 
     def panel_text(self, data: PanelData) -> str:
         status = "فعال ✅" if data.trade_enabled else "خاموش ⛔️"
-        wallet_line = fmt_money(data.wallet_margin_usdt)
-        if data.wallet_error:
-            wallet_line = f"خطا در خواندن ({data.wallet_error[:80]})"
-        pos_line = "نامشخص" if data.exchange_open_positions is None else str(data.exchange_open_positions)
-        ord_line = "نامشخص" if data.exchange_open_orders is None else str(data.exchange_open_orders)
-        exch_note = f"\nخطای وضعیت Toobit: {data.exchange_error[:90]}" if data.exchange_error else ""
-        long_stats = data.today_stats.get("long", {})
-        short_stats = data.today_stats.get("short", {})
-        hunter_stats = data.today_stats.get("hunter", {})
         real_tpsl = data.today_stats.get("toobit_real_tp_sl", {})
         normal_tpsl = data.today_stats.get("normal_tp_sl", {})
         return (
-            "📌 پنل ترید Forex Scalper\n\n"
-            f"وضعیت ترید واقعی: {status}\n"
+            "📌 پنل Forex Scalper AI\n\n"
+            f"ترید واقعی: {status}\n"
             "بازار واقعی: Toobit Futures | دیتا: OKX\n"
-            "تحلیل: اسکالپ 5 تا 15 دقیقه\n\n"
-            "💰 Toobit:\n"
-            f"موجودی قابل استفاده: {wallet_line}\n"
-            f"پوزیشن‌های باز واقعی: {pos_line}\n"
-            f"سفارش‌های باز واقعی: {ord_line}{exch_note}\n\n"
-            "⚙️ تنظیمات ربات:\n"
+            "تحلیل: اسکالپ 5 تا 15 دقیقه | مانیتور: 1 ثانیه\n\n"
+            f"موجودی قابل استفاده: {fmt_money(data.wallet_margin_usdt)}\n"
+            f"پوزیشن‌های باز واقعی: {'نامشخص' if data.exchange_open_positions is None else data.exchange_open_positions}\n"
+            f"سفارش‌های باز واقعی: {'نامشخص' if data.exchange_open_orders is None else data.exchange_open_orders}\n\n"
             f"دلار هر پوزیشن: {data.margin_usdt:.2f} USDT\n"
             f"لوریج: {data.leverage}x\n"
             f"حداکثر پوزیشن: {data.max_positions}\n"
-            "شرط حداقل سود: حذف شده؛ سود فقط برای نمایش و آمار است.\n"
-            f"اسلات پر/رزرو: {data.filled_slots}\n"
-            f"اسلات خالی: {data.empty_slots}\n"
-            f"در انتظار تایید 70 ثانیه‌ای: {data.pending_slots}\n"
+            f"اسلات پر/رزرو: {data.filled_slots} / در انتظار: {data.pending_slots} / خالی: {data.empty_slots}\n"
             f"نماد OKX خطادار: {data.symbol_health.get('okx_disabled', 0)}\n"
             f"نماد Toobit real غیرفعال: {data.symbol_health.get('toobit_real_disabled', 0)}\n\n"
-            "📈 امروز:\n"
             f"PnL واقعی Toobit/ربات: {fmt_money(data.today_real_pnl)}\n"
             f"PnL تقریبی عادی: {fmt_money(data.today_approx_pnl)}\n"
             f"TP/SL واقعی Toobit: TP {real_tpsl.get('tp', 0)} / SL {real_tpsl.get('sl', 0)} / WR {real_tpsl.get('win_rate', 0):.1f}%\n"
-            f"TP/SL عادی ربات: TP {normal_tpsl.get('tp', 0)} / SL {normal_tpsl.get('sl', 0)} / WR {normal_tpsl.get('win_rate', 0):.1f}%\n"
-            f"لانگ: TP {long_stats.get('tp', 0)} / SL {long_stats.get('sl', 0)} / WR {long_stats.get('win_rate', 0):.1f}%\n"
-            f"شورت: TP {short_stats.get('tp', 0)} / SL {short_stats.get('sl', 0)} / WR {short_stats.get('win_rate', 0):.1f}%\n"
-            f"شکار: TP {hunter_stats.get('tp', 0)} / SL {hunter_stats.get('sl', 0)} / WR {hunter_stats.get('win_rate', 0):.1f}%"
+            f"TP/SL عادی ربات: TP {normal_tpsl.get('tp', 0)} / SL {normal_tpsl.get('sl', 0)} / WR {normal_tpsl.get('win_rate', 0):.1f}%"
         )
 
     async def handle_text(self, update: Any, context: Any) -> None:
@@ -178,8 +143,10 @@ class BotUI:
                 await self._send_text(chat_id, self.help_text())
             elif text in {"/پنل", "پنل", "ترید", "/ترید", "وضعیت", "/وضعیت"}:
                 await self.send_panel(chat_id)
-            elif text.lower() in {"ai", "هوش", "مصنوعی", "هوش مصنوعی", "پنل هوش", "پنل هوش مصنوعی"}:
+            elif text.lower() in {"ai", "هوش", "مصنوعی", "هوش مصنوعی", "یادگیری", "پیشنهاد"}:
                 await self._send_text(chat_id, self.ai_text())
+            elif text in {"ارزها", "/ارزها"}:
+                await self._send_text(chat_id, self.symbols_text())
             elif text in {"/ترید_فعال", "ترید فعال", "ترید روشن"}:
                 self.storage.set_trade_enabled(True)
                 await self._send_text(chat_id, "✅ ترید واقعی فعال شد.")
@@ -198,8 +165,6 @@ class BotUI:
                 value = int(self._last_number(text))
                 self.storage.set_max_positions(value)
                 await self._send_text(chat_id, f"✅ حداکثر پوزیشن روی {value} تنظیم شد.")
-            elif text.startswith("حداقل سود") or text.startswith("درصد سود"):
-                await self._send_text(chat_id, "❌ شرط حداقل سود از منطق ورود حذف شده است. سود فقط برای نمایش و آمار ثبت می‌شود.")
             elif text == "حذف آمار":
                 await self._send_text(chat_id, "⚠️ برای صفر کردن آمار بنویس: حذف آمار تایید")
             elif text == "حذف آمار تایید":
@@ -212,70 +177,56 @@ class BotUI:
                 await self._send_text(chat_id, "✅ حافظه AI ریست شد.")
             elif text.startswith("/آمار") or text.startswith("آمار") or text.startswith("امار"):
                 parts = text.split()
-                days = 7
-                if len(parts) > 1:
-                    try:
-                        days = int(float(parts[-1]))
-                    except ValueError:
-                        days = 7
+                days = int(parts[-1]) if len(parts) > 1 and parts[-1].isdigit() else 7
                 await self._send_text(chat_id, self.stats_text(days))
             else:
-                await self._send_text(chat_id, "دستور نامعتبر است. راهنما را بزن.")
+                await self._send_text(chat_id, "دستور نامشخص است. برای راهنما بنویس: راهنما")
         except Exception as exc:
-            await self._send_text(chat_id, f"❌ خطا: {exc}")
+            await self._send_text(chat_id, f"خطا: {exc}")
 
     def ai_text(self) -> str:
         data = self.storage.ai_panel_stats()
         return (
-            "🤖 پنل هوش مصنوعی اسکالپ\n\n"
-            f"حافظه فعال: {data['learning_days']} روز\n"
-            f"الگوهای ذخیره‌شده: {data['stored_patterns']}\n"
-            f"الگوهای فعال هفته اخیر: {data['active_patterns']}\n\n"
-            f"شکارهای درست: {data['hunter_tp']}\n"
-            f"شکارهای SL شده: {data['hunter_sl']}\n\n"
-            f"تحلیل‌های درست: {data['analysis_right']}\n"
-            f"تحلیل‌های غلط: {data['analysis_wrong']}\n"
-            f"میانگین AI Confidence: {data['avg_ai_confidence']:.1f}%\n\n"
+            "🧠 گزارش هوش مصنوعی\n\n"
+            f"بازه یادگیری: {data['learning_days']} روز\n"
+            f"الگوهای فعال/ثبت‌شده: {data['active_patterns']} / {data['stored_patterns']}\n"
+            f"درست/غلط: {data['analysis_right']} / {data['analysis_wrong']}\n"
+            f"میانگین اعتماد AI: {data['avg_ai_confidence']:.1f}%\n"
             f"بهترین ارز/جهت: {data['best_symbol_side']}\n"
-            f"بدترین ارز/جهت: {data['worst_symbol_side']}\n\n"
-            f"ساعت‌های خوب: {data['good_sessions']}\n"
-            f"ساعت‌های بد فقط عادی: {data['bad_sessions']}\n\n"
-            f"بهترین الگوهای کندلی:\n{data['best_indicator_patterns']}\n\n"
-            f"بهترین بازه‌های AI/اندیکاتور:\n{data['best_indicator_ranges']}"
+            f"ضعیف‌ترین ارز/جهت: {data['worst_symbol_side']}\n\n"
+            f"الگوهای قوی:\n{data['patterns']}\n\n"
+            f"بازه‌های اندیکاتوری:\n{data['best_indicator_ranges']}\n\n"
+            f"پیشنهادها:\n{data['suggestions']}"
         )
 
     def stats_text(self, days: int) -> str:
-        stats = self.storage.stats(days)
-        def line(title: str, key: str) -> str:
-            item = stats.get(key, {})
-            return f"{title}: کل {item.get('total', 0)} | TP {item.get('tp', 0)} | SL {item.get('sl', 0)} | WR {item.get('win_rate', 0):.1f}% | PnL {item.get('pnl', 0):.2f}"
-        return "📊 آمار " + str(days) + " روز\n\n" + "\n".join([
-            line("همه", "all"), line("عادی", "normal"), line("واقعی", "real"), line("شکار", "hunter"),
-            line("TP/SL واقعی Toobit", "toobit_real_tp_sl"), line("TP/SL عادی", "normal_tp_sl"),
-            line("لانگ", "long"), line("شورت", "short"), line("Real Failed", "real_failed"),
-        ])
-
-    def help_text(self) -> str:
+        data = self.storage.stats(days)
+        all_stats = data.get("all", {})
+        real = data.get("real", {})
+        normal = data.get("normal", {})
         return (
-            "دستورات فارسی ربات:\n"
-            "پنل / وضعیت / ترید\n"
-            "آمار یا آمار 7\n"
-            "هوش مصنوعی / Ai / هوش / مصنوعی\n"
-            "ترید فعال / ترید خاموش\n"
-            "ترید دلار 20\n"
-            "ترید لوریج 10\n"
-            "حداکثر پوزیشن 3\n"
-            "حذف آمار / حذف آمار تایید\n"
-            "ریست یادگیری / ریست یادگیری تایید\n\n"
-            "شرط حداقل سود از ورود حذف شده؛ سود فقط برای نمایش و آمار ثبت می‌شود."
+            f"📊 آمار {days} روز\n\n"
+            f"کل: TP {all_stats.get('tp', 0)} / SL {all_stats.get('sl', 0)} / WR {all_stats.get('win_rate', 0):.1f}% / PnL {fmt_money(all_stats.get('pnl', 0))}\n"
+            f"واقعی: TP {real.get('tp', 0)} / SL {real.get('sl', 0)} / WR {real.get('win_rate', 0):.1f}% / PnL {fmt_money(real.get('pnl', 0))}\n"
+            f"عادی: TP {normal.get('tp', 0)} / SL {normal.get('sl', 0)} / WR {normal.get('win_rate', 0):.1f}% / PnL {fmt_money(normal.get('pnl', 0))}"
         )
 
-    async def _send_text(self, chat_id: int | str, text: str) -> None:
-        if self.app is not None:
-            await self.app.bot.send_message(chat_id=chat_id, text=text)
+    def symbols_text(self) -> str:
+        main = "، ".join(s.name for s in MAIN_SYMBOLS)
+        alt = "، ".join(s.name for s in ALTERNATIVE_SYMBOLS)
+        return f"🪙 ارزهای اصلی فعال:\n{main}\n\nجایگزین‌های AI بعد از یادگیری کافی:\n{alt}"
 
-    def _last_number(self, text: str) -> float:
-        matches = re.findall(r"[-+]?\d+(?:\.\d+)?", text)
+    def help_text(self) -> str:
+        return "پنل\nآمار\nآمار 7\nهوش\nیادگیری\nپیشنهاد\nارزها\nترید فعال\nترید خاموش\nترید دلار 20\nترید لوریج 10\nحداکثر پوزیشن 3\nحذف آمار\nریست یادگیری"
+
+    async def _send_text(self, chat_id: int | str, text: str) -> None:
+        if self.app is None:
+            return
+        await self.app.bot.send_message(chat_id=chat_id, text=text)
+
+    @staticmethod
+    def _last_number(text: str) -> float:
+        matches = re.findall(r"\d+(?:\.\d+)?", text)
         if not matches:
             raise ValueError("عدد پیدا نشد.")
         return float(matches[-1])
