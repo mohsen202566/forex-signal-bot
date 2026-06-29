@@ -1,141 +1,195 @@
+"""اجرای اصلی ربات اسکالپ کلاسیک ۵ دقیقه‌ای.
+
+تحلیل از OKX گرفته می‌شود و اجرای واقعی، در صورت روشن بودن ترید، روی Toobit انجام می‌شود.
+"""
 from __future__ import annotations
 
-import asyncio
-import logging
+import signal
+import threading
+import time
+from typing import Any
 
-from telegram.ext import Application, MessageHandler, filters
-
-from ai_controller import AIController, AnalysisInput
-from bot_ui import BotUI
-from config import FULL_SCAN_SECONDS, MARKET_CONTEXT_SYMBOLS, MONITOR_INTERVAL_SECONDS, TELEGRAM_BOT_TOKEN, TIMEFRAME_1H, TIMEFRAMES, WATCH_SCAN_SECONDS, ensure_runtime_config
-from logger_setup import setup_logging
-from monitor import SignalMonitor
-from okx_data import OkxDataClient
-from storage import Storage
-from symbol_health import SymbolHealth
-from symbols import ACTIVE_SYMBOLS, SYMBOL_BY_NAME, MarketSymbol
-from toobit_client import get_client
+import config
+from indicators import calculate_indicators
+from messages_fa import normal_result_message, real_result_message, signal_message
+from okx_client import OKXClient
+from stats_manager import StatsManager
+from storage import JSONStorage
+from strategy import ClassicScalpingStrategy
+from telegram_bot import TelegramBotService
+from toobit_client import ToobitClient
 from trade_manager import TradeManager
-from watch_engine import WatchEngine
-
-LOGGER = logging.getLogger("forex_scalper_ai")
+from utils import logger, now_utc_iso, safe_sleep
 
 
-async def load_market_cache(okx: OkxDataClient) -> dict[str, list]:
-    cache: dict[str, list] = {}
-    for inst_id in MARKET_CONTEXT_SYMBOLS:
+class FiveMinuteScalperBot:
+    def __init__(self):
+        self.storage = JSONStorage()
+        self.okx = OKXClient()
+        self.toobit = ToobitClient()
+        self.stats = StatsManager(self.storage)
+        self.strategy = ClassicScalpingStrategy()
+        self.trade_manager = TradeManager(self.storage, self.stats, self.toobit)
+        self.telegram = TelegramBotService(self.storage, self.trade_manager, self.stats)
+        self.stop_event = threading.Event()
+        self.valid_symbols: dict[str, dict[str, Any]] = {}
+        self.last_signal_ts: dict[str, float] = {}
+        self.last_error_ts: dict[str, float] = {}
+
+    def validate_symbols(self) -> dict[str, dict[str, Any]]:
+        logger.info("شروع اعتبارسنجی نمادها بین OKX و Toobit")
+        okx_instruments = None
+        toobit_symbols = None
+
         try:
-            cache[inst_id] = await asyncio.to_thread(okx.get_candles, inst_id, TIMEFRAME_1H)
+            okx_instruments = self.okx.get_instruments("SWAP")
+            logger.info("تعداد نمادهای OKX دریافت شد: %s", len(okx_instruments))
         except Exception as exc:
-            LOGGER.warning("market context error for %s: %s", inst_id, exc)
-    return cache
+            logger.warning("اعتبارسنجی OKX ناموفق بود؛ در زمان دریافت کندل دوباره بررسی می‌شود: %s", exc)
 
-
-async def analyze_symbol(okx: OkxDataClient, controller: AIController, symbol: MarketSymbol, market_cache: dict[str, list], watch_mode: bool = False):
-    candles_task = asyncio.to_thread(okx.get_multi_timeframe, symbol.okx_inst_id, TIMEFRAMES)
-    price_task = asyncio.to_thread(okx.get_last_price, symbol.okx_inst_id)
-    candles_by_tf, live_price = await asyncio.gather(candles_task, price_task)
-    return controller.analyze(AnalysisInput(symbol_name=symbol.name, candles_by_tf=candles_by_tf, btc_1h=market_cache.get(MARKET_CONTEXT_SYMBOLS[0]), eth_1h=market_cache.get(MARKET_CONTEXT_SYMBOLS[1]), watch_mode=watch_mode, live_price=live_price))
-
-
-async def scanner_loop(okx: OkxDataClient, controller: AIController, trade_manager: TradeManager, watch_engine: WatchEngine, health: SymbolHealth, ui: BotUI) -> None:
-    while True:
         try:
-            market_cache = await load_market_cache(okx)
-            signal_items = []
-            for symbol in ACTIVE_SYMBOLS:
-                if not health.okx_enabled(symbol.name):
-                    continue
-                try:
-                    decision = await analyze_symbol(okx, controller, symbol, market_cache)
-                    health.record_okx_success(symbol.name)
-                    if decision.action == "WATCH":
-                        watch_engine.register_watch(symbol, decision)
-                        if decision.direction and watch_engine.should_send_ready(symbol.name, decision.direction, decision):
-                            await ui.send_ready_alert(symbol_name=symbol.name, direction=decision.direction)
-                            watch_engine.mark_ready_sent(symbol.name, decision.direction)
-                    elif decision.accepted:
-                        signal_items.append((symbol, decision))
-                    else:
-                        health.storage.record_rejection(symbol.name, decision.direction, decision.reject_code, decision.reason, decision.score)
-                except Exception as exc:
-                    health.record_okx_error(symbol.name, str(exc))
-                    LOGGER.warning("scan error for %s: %s", symbol.name, exc)
-            created = await trade_manager.create_signals_batch(signal_items)
-            for symbol, decision, created_item in created:
-                await ui.send_signal(symbol_name=symbol.name, decision=decision, created=created_item)
-                if decision.direction:
-                    watch_engine.remove_watch(symbol.name, decision.direction)
+            toobit_symbols = self.toobit.get_exchange_symbols()
+            logger.info("تعداد نمادهای Toobit دریافت شد: %s", len(toobit_symbols))
         except Exception as exc:
-            LOGGER.warning("scanner loop error: %s", exc)
-        await asyncio.sleep(FULL_SCAN_SECONDS)
+            logger.warning("اعتبارسنجی Toobit ناموفق بود؛ در زمان اجرا دوباره بررسی می‌شود: %s", exc)
 
+        valid: dict[str, dict[str, Any]] = {}
+        for internal in config.WATCHLIST:
+            try:
+                okx_symbol = config.SYMBOL_MAP[internal]["okx"]
+                toobit_symbol = config.SYMBOL_MAP[internal]["toobit"]
+                symbol_info: dict[str, Any] = {}
 
-async def watch_loop(okx: OkxDataClient, controller: AIController, trade_manager: TradeManager, watch_engine: WatchEngine, health: SymbolHealth, ui: BotUI) -> None:
-    while True:
+                if okx_instruments is not None:
+                    okx_symbol = self.okx.validate_symbol(internal, okx_instruments)
+                if toobit_symbols is not None:
+                    toobit_symbol, symbol_info = self.toobit.validate_symbol(internal, toobit_symbols)
+
+                valid[internal] = {
+                    "okx_symbol": okx_symbol,
+                    "toobit_symbol": toobit_symbol,
+                    "toobit_info": symbol_info,
+                }
+                logger.info("نماد معتبر شد: %s | OKX=%s | Toobit=%s", internal, okx_symbol, toobit_symbol)
+            except Exception as exc:
+                logger.warning("نماد %s رد شد و ربات ادامه می‌دهد: %s", internal, exc)
+
+        self.valid_symbols = valid
+        self.storage.set_validated_symbols(valid)
+        if not valid:
+            logger.error("هیچ نماد معتبری پیدا نشد. ربات فعال می‌ماند اما تحلیل انجام نمی‌شود.")
+        return valid
+
+    def start(self) -> None:
+        logger.info("ربات اسکالپ کلاسیک ۵ دقیقه‌ای شروع شد")
+        self.validate_symbols()
+        self.telegram.start()
+        self.telegram.send_message("✅ ربات اسکالپ کلاسیک ۵ دقیقه‌ای روشن شد.\nتحلیل از OKX و اجرای واقعی از Toobit انجام می‌شود.")
+        self._install_signal_handlers()
+        self.analysis_loop()
+
+    def _install_signal_handlers(self) -> None:
+        def handler(_sig: int, _frame: Any) -> None:
+            logger.info("درخواست توقف دریافت شد")
+            self.stop_event.set()
+            self.telegram.stop()
+
         try:
-            market_cache = await load_market_cache(okx)
-            signal_items = []
-            for watch in watch_engine.active_watches():
-                symbol = SYMBOL_BY_NAME.get(str(watch["symbol_name"]))
-                if symbol is None or not health.okx_enabled(symbol.name):
-                    continue
-                try:
-                    decision = await analyze_symbol(okx, controller, symbol, market_cache, watch_mode=True)
-                    health.record_okx_success(symbol.name)
-                    if decision.action == "WATCH":
-                        watch_engine.register_watch(symbol, decision)
-                        if decision.direction and watch_engine.should_send_ready(symbol.name, decision.direction, decision):
-                            await ui.send_ready_alert(symbol_name=symbol.name, direction=decision.direction)
-                            watch_engine.mark_ready_sent(symbol.name, decision.direction)
-                    elif decision.accepted:
-                        signal_items.append((symbol, decision))
-                    else:
-                        watch_engine.remove_watch(symbol.name, str(watch["direction"]))
-                except Exception as exc:
-                    health.record_okx_error(symbol.name, str(exc))
-                    LOGGER.warning("watch scan error for %s: %s", symbol.name, exc)
-            created = await trade_manager.create_signals_batch(signal_items)
-            for symbol, decision, created_item in created:
-                await ui.send_signal(symbol_name=symbol.name, decision=decision, created=created_item)
-                if decision.direction:
-                    watch_engine.remove_watch(symbol.name, decision.direction)
-        except Exception as exc:
-            LOGGER.warning("watch loop error: %s", exc)
-        await asyncio.sleep(WATCH_SCAN_SECONDS)
+            signal.signal(signal.SIGINT, handler)
+            signal.signal(signal.SIGTERM, handler)
+        except Exception:
+            pass
 
+    def _symbol_in_cooldown(self, symbol: str) -> bool:
+        last = self.last_error_ts.get(symbol, 0)
+        return time.time() - last < config.SYMBOL_ERROR_COOLDOWN_SECONDS
 
-async def monitor_loop(monitor: SignalMonitor, ui: BotUI) -> None:
-    while True:
+    def _mark_symbol_error(self, symbol: str, exc: Exception) -> None:
+        self.last_error_ts[symbol] = time.time()
+        self.storage.set_symbol_error(symbol, str(exc), time.time())
+        logger.warning("خطای نماد %s؛ فقط همین نماد رد شد: %s", symbol, exc)
+
+    def _process_symbol(self, internal: str, mapped: dict[str, Any]) -> float | None:
+        if self._symbol_in_cooldown(internal):
+            return None
+        okx_symbol = mapped["okx_symbol"]
+        toobit_symbol = mapped["toobit_symbol"]
         try:
-            await monitor.check_once(ui.send_result)
+            candles = self.okx.get_candles(okx_symbol)
+            indicators = calculate_indicators(candles)
+            latest_price = float(indicators["close"])
+            signal_data = self.strategy.evaluate(internal, okx_symbol, toobit_symbol, indicators)
+            if not signal_data:
+                return latest_price
+
+            now_ts = time.time()
+            if now_ts - self.last_signal_ts.get(internal, 0) < config.SIGNAL_COOLDOWN_SECONDS:
+                return latest_price
+
+            ok, reason = self.trade_manager.can_accept_signal(signal_data)
+            if not ok:
+                logger.info("سیگنال %s رد شد: %s", internal, reason)
+                return latest_price
+
+            # تعیین ریشه‌ای نوع سیگنال قبل از ارسال:
+            # اگر ترید روشن، Toobit وصل، و اسلات پوزیشن خالی باشد => رئال Toobit
+            # در غیر این صورت => عادی / داخلی
+            signal_data = self.trade_manager.decide_execution_mode(signal_data)
+            signal_data = self.trade_manager.register_signal(signal_data)
+            msg_id = self.telegram.send_message(signal_message(signal_data))
+            if msg_id:
+                self.storage.update_signal(signal_data["signal_id"], telegram_message_id=msg_id)
+                signal_data["telegram_message_id"] = msg_id
+
+            if signal_data.get("execution_mode") == "REAL":
+                executed, exec_message, _response = self.trade_manager.try_execute_real(signal_data, mapped.get("toobit_info", {}))
+                if not executed:
+                    self.telegram.send_message(f"⚠️ اجرای واقعی سیگنال انجام نشد:\n{exec_message}", reply_to_message_id=msg_id)
+                else:
+                    self.telegram.send_message("✅ سفارش رئال Toobit تایید شد. TP و SL همراه همان سفارش اصلی ثبت شدند.", reply_to_message_id=msg_id)
+
+            self.last_signal_ts[internal] = now_ts
+            return latest_price
         except Exception as exc:
-            LOGGER.warning("monitor error: %s", exc)
-        await asyncio.sleep(MONITOR_INTERVAL_SECONDS)
+            self._mark_symbol_error(internal, exc)
+            return None
+
+    def _check_results(self, latest_prices: dict[str, float]) -> None:
+        for signal_data, result, price, pnl in self.trade_manager.check_normal_results(latest_prices):
+            msg_id = signal_data.get("telegram_message_id")
+            self.telegram.send_message(normal_result_message(signal_data, result, price, pnl), reply_to_message_id=msg_id)
+
+        for signal_data, result, price, pnl in self.trade_manager.check_real_results():
+            msg_id = signal_data.get("telegram_message_id")
+            self.telegram.send_message(real_result_message(signal_data, result, price, pnl), reply_to_message_id=msg_id)
+
+    def analysis_loop(self) -> None:
+        while not self.stop_event.is_set():
+            if not self.valid_symbols:
+                self.validate_symbols()
+                safe_sleep(15)
+                continue
+
+            latest_prices: dict[str, float] = {}
+            for internal, mapped in list(self.valid_symbols.items()):
+                if self.stop_event.is_set():
+                    break
+                price = self._process_symbol(internal, mapped)
+                if price is not None:
+                    latest_prices[internal] = price
+                safe_sleep(0.15)
+
+            try:
+                self._check_results(latest_prices)
+            except Exception as exc:
+                logger.warning("بررسی نتیجه‌ها ناموفق بود، ربات ادامه می‌دهد: %s", exc)
+
+            safe_sleep(config.POLL_INTERVAL_SECONDS)
 
 
 def main() -> None:
-    setup_logging()
-    ensure_runtime_config()
-    storage = Storage()
-    health = SymbolHealth(storage)
-    okx = OkxDataClient()
-    controller = AIController(storage)
-    toobit = get_client()
-    trade_manager = TradeManager(storage, toobit, health)
-    watch_engine = WatchEngine(storage)
-    ui = BotUI(storage, trade_manager)
-    monitor = SignalMonitor(storage, okx, toobit)
-
-    async def post_init(app: Application) -> None:
-        ui.bind_app(app)
-        asyncio.create_task(scanner_loop(okx, controller, trade_manager, watch_engine, health, ui))
-        asyncio.create_task(watch_loop(okx, controller, trade_manager, watch_engine, health, ui))
-        asyncio.create_task(monitor_loop(monitor, ui))
-
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
-    app.add_handler(MessageHandler(filters.TEXT, ui.handle_text))
-    app.run_polling(drop_pending_updates=True)
+    bot = FiveMinuteScalperBot()
+    bot.start()
 
 
 if __name__ == "__main__":
