@@ -84,6 +84,8 @@ class Storage:
                     sl REAL NOT NULL,
                     score INTEGER NOT NULL,
                     threshold INTEGER NOT NULL,
+                    real_threshold INTEGER DEFAULT 78,
+                    threshold_source TEXT DEFAULT 'BOOT',
                     ai_confidence INTEGER DEFAULT 0,
                     ai_experience INTEGER DEFAULT 0,
                     ai_adjustment INTEGER DEFAULT 0,
@@ -192,7 +194,7 @@ class Storage:
                 """
             )
             conn.execute("CREATE TABLE IF NOT EXISTS rejection_log (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, symbol_name TEXT NOT NULL, direction TEXT, code TEXT, reason TEXT, score INTEGER DEFAULT 0)")
-            conn.execute("CREATE TABLE IF NOT EXISTS ai_symbol_direction_profiles (symbol_name TEXT NOT NULL, direction TEXT NOT NULL, total_signals INTEGER DEFAULT 0, tp INTEGER DEFAULT 0, sl INTEGER DEFAULT 0, exit_count INTEGER DEFAULT 0, win_rate REAL DEFAULT 0, net_profit REAL DEFAULT 0, avg_mfe REAL DEFAULT 0, avg_mae REAL DEFAULT 0, best_tp_range REAL DEFAULT 0, best_sl_range REAL DEFAULT 0, noise_level REAL DEFAULT 0, early_entry_success INTEGER DEFAULT 0, reversal_after_entry INTEGER DEFAULT 0, consecutive_sl INTEGER DEFAULT 0, sensor_weights TEXT, risk_level TEXT DEFAULT 'normal', learning_confidence INTEGER DEFAULT 0, last_updated TEXT, PRIMARY KEY(symbol_name, direction))")
+            conn.execute("CREATE TABLE IF NOT EXISTS ai_symbol_direction_profiles (symbol_name TEXT NOT NULL, direction TEXT NOT NULL, total_signals INTEGER DEFAULT 0, tp INTEGER DEFAULT 0, sl INTEGER DEFAULT 0, exit_count INTEGER DEFAULT 0, win_rate REAL DEFAULT 0, net_profit REAL DEFAULT 0, avg_mfe REAL DEFAULT 0, avg_mae REAL DEFAULT 0, best_tp_range REAL DEFAULT 0, best_sl_range REAL DEFAULT 0, noise_level REAL DEFAULT 0, early_entry_success INTEGER DEFAULT 0, reversal_after_entry INTEGER DEFAULT 0, consecutive_sl INTEGER DEFAULT 0, sensor_weights TEXT, risk_level TEXT DEFAULT 'normal', learning_confidence INTEGER DEFAULT 0, signal_threshold INTEGER DEFAULT 70, real_threshold INTEGER DEFAULT 78, threshold_source TEXT DEFAULT 'BOOT', last_updated TEXT, PRIMARY KEY(symbol_name, direction))")
             conn.execute("CREATE TABLE IF NOT EXISTS ai_patterns (symbol_name TEXT NOT NULL, direction TEXT NOT NULL, pattern_id TEXT NOT NULL, total INTEGER DEFAULT 0, tp INTEGER DEFAULT 0, sl INTEGER DEFAULT 0, win_rate REAL DEFAULT 0, avg_mfe REAL DEFAULT 0, avg_mae REAL DEFAULT 0, weight REAL DEFAULT 1, verdict TEXT DEFAULT 'NEUTRAL', last_updated TEXT, PRIMARY KEY(symbol_name, direction, pattern_id))")
             conn.execute("CREATE TABLE IF NOT EXISTS ai_pattern_results (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER, symbol_name TEXT, direction TEXT, pattern_id TEXT, status TEXT, mfe_pct REAL, mae_pct REAL, created_at TEXT)")
             conn.execute("CREATE TABLE IF NOT EXISTS ai_sensor_weights (symbol_name TEXT NOT NULL, direction TEXT NOT NULL, sensor TEXT NOT NULL, weight REAL DEFAULT 1, updated_at TEXT, PRIMARY KEY(symbol_name, direction, sensor))")
@@ -212,13 +214,22 @@ class Storage:
     def _migrate_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
         columns = {
-            "real_allowed": "INTEGER DEFAULT 0", "real_block_reason": "TEXT", "score_entry_precision": "INTEGER DEFAULT 0", "score_tp_sl": "INTEGER DEFAULT 0",
+            "real_allowed": "INTEGER DEFAULT 0", "real_block_reason": "TEXT", "real_threshold": "INTEGER DEFAULT 78", "threshold_source": "TEXT DEFAULT 'BOOT'", "score_entry_precision": "INTEGER DEFAULT 0", "score_tp_sl": "INTEGER DEFAULT 0",
             "score_market_mode": "INTEGER DEFAULT 0", "score_net_sync": "INTEGER DEFAULT 0", "entry_precision_pct": "REAL DEFAULT 0", "pattern_id": "TEXT",
             "estimated_net_profit_usdt": "REAL DEFAULT 0", "market_mode": "TEXT", "best_price": "REAL", "worst_price": "REAL",
         }
         for name, spec in columns.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE signals ADD COLUMN {name} {spec}")
+        profile_existing = {row["name"] for row in conn.execute("PRAGMA table_info(ai_symbol_direction_profiles)").fetchall()}
+        profile_columns = {
+            "signal_threshold": "INTEGER DEFAULT 70",
+            "real_threshold": "INTEGER DEFAULT 78",
+            "threshold_source": "TEXT DEFAULT 'BOOT'",
+        }
+        for name, spec in profile_columns.items():
+            if name not in profile_existing:
+                conn.execute(f"ALTER TABLE ai_symbol_direction_profiles ADD COLUMN {name} {spec}")
 
     def _set_default(self, conn: sqlite3.Connection, key: str, value: str) -> None:
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
@@ -274,7 +285,7 @@ class Storage:
             cur = conn.execute(
                 """
                 INSERT INTO signals(
-                    created_at, okx_symbol, toobit_symbol, symbol_name, direction, entry, tp, sl, score, threshold,
+                    created_at, okx_symbol, toobit_symbol, symbol_name, direction, entry, tp, sl, score, threshold, real_threshold, threshold_source,
                     ai_confidence, ai_experience, ai_adjustment, ai_effect, signal_type, hunter_type, signal_label,
                     status, real_status, real_allowed, real_block_reason, margin_usdt, leverage,
                     score_direction, score_pre_ignition, score_candle_entry, score_entry_precision, score_ai_memory,
@@ -284,11 +295,11 @@ class Storage:
                     risk_reward, estimated_cost_pct, market_bias, market_mode, session_state, order_block_state, session_bucket,
                     reason, notes, best_price, worst_price, rsi_5m, rsi_15m, macd_hist_5m, macd_hist_15m, adx_15m,
                     atr_pct_15m, volume_ratio_5m, volume_ratio_15m
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now.isoformat(), okx_symbol, toobit_symbol, symbol_name, decision.direction, decision.entry, decision.tp, decision.sl,
-                    decision.score, decision.threshold, decision.ai_confidence, decision.ai_experience, decision.ai_adjustment, decision.ai_effect,
+                    decision.score, decision.threshold, decision.real_threshold, decision.threshold_source, decision.ai_confidence, decision.ai_experience, decision.ai_adjustment, decision.ai_effect,
                     signal_type, hunter_type, label, real_status, 1 if decision.real_allowed else 0, decision.real_block_reason,
                     self.margin_usdt(), self.leverage(), decision.breakdown.score_direction, decision.breakdown.score_pre_ignition,
                     decision.breakdown.score_candle_entry, decision.breakdown.score_entry_precision, decision.breakdown.score_ai_memory,
@@ -453,7 +464,51 @@ class Storage:
     def symbol_direction_profile(self, symbol_name: str, direction: str) -> dict[str, Any]:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM ai_symbol_direction_profiles WHERE symbol_name=? AND direction=?", (symbol_name, direction)).fetchone()
-            return dict(row) if row else {"total_signals": 0, "win_rate": 0.0, "consecutive_sl": 0}
+            return dict(row) if row else {"total_signals": 0, "win_rate": 0.0, "consecutive_sl": 0, "signal_threshold": 70, "real_threshold": 78, "threshold_source": "BOOT"}
+
+    def score_bucket_stats(self, symbol_name: str, direction: str) -> list[dict[str, Any]]:
+        start = datetime.now(timezone.utc) - timedelta(days=LEARNING_DAYS)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT score, status, mfe_pct, mae_pct FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND status IN ('TP','SL')",
+                (start.isoformat(), symbol_name, direction),
+            ).fetchall()
+        buckets: dict[int, list[sqlite3.Row]] = {}
+        for row in rows:
+            bucket_low = int(float(row["score"] or 0) // 5) * 5
+            buckets.setdefault(bucket_low, []).append(row)
+        result: list[dict[str, Any]] = []
+        for bucket_low, items in sorted(buckets.items()):
+            tp = sum(1 for r in items if r["status"] == "TP")
+            sl = sum(1 for r in items if r["status"] == "SL")
+            samples = len(items)
+            result.append({
+                "bucket_low": bucket_low,
+                "bucket_high": bucket_low + 4,
+                "samples": samples,
+                "tp": tp,
+                "sl": sl,
+                "win_rate": (tp / max(1, tp + sl) * 100.0) if tp + sl else 0.0,
+                "avg_mfe": sum(float(r["mfe_pct"] or 0.0) for r in items) / max(1, samples),
+                "avg_mae": sum(float(r["mae_pct"] or 0.0) for r in items) / max(1, samples),
+            })
+        return result
+
+    def store_profile_thresholds(self, *, symbol_name: str, direction: str, signal_threshold: int, real_threshold: int, source: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ai_symbol_direction_profiles(symbol_name, direction, signal_threshold, real_threshold, threshold_source, last_updated)
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol_name, direction) DO UPDATE SET
+                    signal_threshold=excluded.signal_threshold,
+                    real_threshold=excluded.real_threshold,
+                    threshold_source=excluded.threshold_source,
+                    last_updated=excluded.last_updated
+                """,
+                (symbol_name, direction, int(signal_threshold), int(real_threshold), source, now),
+            )
 
     def add_shadow_test(self, signal_id: int, plan_name: str, tp: float, sl: float) -> None:
         with self._connect() as conn:

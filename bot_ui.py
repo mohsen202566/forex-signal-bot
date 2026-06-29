@@ -54,9 +54,9 @@ class BotUI:
 
     async def send_ready_alert(self, *, symbol_name: str, direction: str) -> int | None:
         # Watch/ready alerts are internal only.
-        # Telegram must receive only final signals, TP/SL results,
-        # and panel/stat/AI reports requested by command.
+        # Telegram receives only final signals, TP/SL results, and command reports.
         return None
+
 
     async def send_signal(self, *, symbol_name: str, decision: SignalDecision, created: CreatedSignal) -> int | None:
         if self.app is None or decision.direction is None:
@@ -67,11 +67,12 @@ class BotUI:
             f"{color} سیگنال اسکالپ {direction_fa}\n\n"
             f"ارز: {symbol_name}\n"
             f"نوع: {created.signal_label}\n"
-            f"امتیاز: {decision.score}/{decision.threshold}\n"
+            f"امتیاز: {decision.score}/{decision.threshold} | Real {decision.real_threshold}\n"
             f"کیفیت AI: {decision.entry_quality}\n"
             f"دقت ورود AI: {decision.entry_precision_pct:.1f}%\n"
             f"اعتماد AI: {decision.ai_confidence}% / تجربه: {decision.ai_experience}\n"
             f"اثر AI: {decision.ai_effect} / adj {decision.ai_adjustment}\n"
+            f"Threshold AI: {decision.threshold_source}\n"
             f"Market Mode: {decision.market_mode}\n\n"
             f"Entry: {fmt_price(decision.entry)}\n"
             f"TP: {fmt_price(decision.tp)}\n"

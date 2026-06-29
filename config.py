@@ -71,9 +71,23 @@ MAX_WATCH_SYMBOLS = _env_int("MAX_WATCH_SYMBOLS", default=6)
 WATCH_EXPIRE_SECONDS = _env_int("WATCH_EXPIRE_SECONDS", default=120)
 READY_ALERT_COOLDOWN_SECONDS = _env_int("READY_ALERT_COOLDOWN_SECONDS", default=45)
 
-SIGNAL_THRESHOLD = _env_int("SIGNAL_THRESHOLD", "ACCEPT_SCORE", default=80)
+# Starting thresholds only. AI learns real per-symbol/per-direction thresholds from results.
+# These are not permanent strategy rules.
+BASE_SIGNAL_THRESHOLD = _env_int("BASE_SIGNAL_THRESHOLD", default=70)
+BASE_REAL_THRESHOLD = _env_int("BASE_REAL_THRESHOLD", default=78)
+
+# Compatibility names used by older code and panels.
+SIGNAL_THRESHOLD = BASE_SIGNAL_THRESHOLD
+REAL_SIGNAL_THRESHOLD = BASE_REAL_THRESHOLD
+
 WATCH_THRESHOLD = _env_int("WATCH_THRESHOLD", default=45)
-GHOST_THRESHOLD = _env_int("GHOST_THRESHOLD", default=65)
+GHOST_THRESHOLD = _env_int("GHOST_THRESHOLD", default=60)
+
+# Guard rails only, not fixed trading thresholds. AI can move thresholds inside this range.
+MIN_DYNAMIC_SIGNAL_THRESHOLD = _env_int("MIN_DYNAMIC_SIGNAL_THRESHOLD", default=55)
+MAX_DYNAMIC_SIGNAL_THRESHOLD = _env_int("MAX_DYNAMIC_SIGNAL_THRESHOLD", default=88)
+MIN_DYNAMIC_REAL_THRESHOLD = _env_int("MIN_DYNAMIC_REAL_THRESHOLD", default=60)
+MAX_DYNAMIC_REAL_THRESHOLD = _env_int("MAX_DYNAMIC_REAL_THRESHOLD", default=92)
 WEIGHTS = ScoreWeights()
 
 DEFAULT_TRADE_ENABLED = _env_bool("DEFAULT_TRADE_ENABLED", default=False)

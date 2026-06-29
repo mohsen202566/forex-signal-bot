@@ -6,8 +6,9 @@ from adaptive_tp_sl_engine import AdaptiveTpSlEngine
 from ai_market_mode import MarketModeBrain
 from ai_meta_brain import AIMetaBrain
 from ai_sensitivity_engine import AISensitivityEngine
+from ai_threshold_engine import AIThresholdEngine
 from candle_hunter_engine import CandleHunterEngine
-from config import SIGNAL_THRESHOLD, TIMEFRAME_15M, TIMEFRAME_1H, TIMEFRAME_4H, TIMEFRAME_5M, WEIGHTS
+from config import BASE_SIGNAL_THRESHOLD, TIMEFRAME_15M, TIMEFRAME_1H, TIMEFRAME_4H, TIMEFRAME_5M, WEIGHTS
 from cost_engine import CostEngine
 from direction_engine import DirectionEngine
 from entry_precision_engine import EntryPrecisionEngine
@@ -53,6 +54,7 @@ class AIController:
         self.session_engine = SessionEngine()
         self.learning = LearningEngine()
         self.sensitivity = AISensitivityEngine()
+        self.threshold_engine = AIThresholdEngine()
         self.meta = AIMetaBrain()
 
     def analyze(self, data: AnalysisInput) -> SignalDecision:
@@ -88,6 +90,7 @@ class AIController:
         ob = self.order_block_engine.analyze(data.candles_by_tf[TIMEFRAME_15M], direction, entry, s15.atr)
         session = self.session_engine.analyze(self.storage, data.symbol_name, direction)
         sensitivity = self.sensitivity.analyze(self.storage, data.symbol_name, direction)
+        thresholds = self.threshold_engine.analyze(self.storage, data.symbol_name, direction)
 
         score_direction = min(WEIGHTS.direction, dir15.score)
         score_pre = min(WEIGHTS.pre_ignition, pre.score)
@@ -103,12 +106,12 @@ class AIController:
         verdicts = {pattern.verdict, range_ai.verdict}
         negative = "NEGATIVE" if "NEGATIVE" in verdicts else "NEUTRAL"
         positive = "POSITIVE" if "POSITIVE" in verdicts and negative != "NEGATIVE" else negative
-        meta = self.meta.decide(total_score=total, entry_quality=entry_quality.quality, risk_ok=risk.ok, net_profit_ok=cost.ok, range_verdict=range_ai.verdict, pattern_verdict=pattern.verdict, session_state=session.state, market_mode=mode.mode)
+        meta = self.meta.decide(total_score=total, signal_threshold=thresholds.signal_threshold, real_threshold=thresholds.real_threshold, entry_quality=entry_quality.quality, risk_ok=risk.ok, net_profit_ok=cost.ok, range_verdict=range_ai.verdict, pattern_verdict=pattern.verdict, session_state=session.state, market_mode=mode.mode)
         ai_confidence = max(0, min(99, max(pattern.confidence, range_ai.confidence, entry_quality.confidence) + sensitivity.confidence_adjustment))
         ai_experience = max(pattern.experience, range_ai.experience)
-        notes = dir15.reasons + context1h.reasons + bias4h.reasons + pre.reasons + candle.reasons + precision.reasons + ignition.reasons + entry_quality.reasons + risk.reasons + cost.reasons + market.reasons + mode.reasons + ob.reasons + session.reasons + pattern.reasons + range_ai.reasons + sensitivity.reasons
+        notes = dir15.reasons + context1h.reasons + bias4h.reasons + pre.reasons + candle.reasons + precision.reasons + ignition.reasons + entry_quality.reasons + risk.reasons + cost.reasons + market.reasons + mode.reasons + ob.reasons + session.reasons + pattern.reasons + range_ai.reasons + sensitivity.reasons + thresholds.reasons
         common = dict(direction=direction, direction_state_1h=context1h.state, direction_confidence_1h=context1h.confidence, bias_4h=bias4h.state, setup_15m=dir15.state, entry_5m=ignition.state, candle_pattern=candle.label, entry_precision_pct=precision.precision_pct, entry_quality=entry_quality.quality, technical_zone=ob.state, indicator_profile=range_ai.profile, pattern_id=pattern.pattern_id, ai_confidence=ai_confidence, ai_experience=ai_experience, ai_adjustment=pattern.adjustment + range_ai.adjustment + sensitivity.score_adjustment, ai_effect=positive, net_edge=cost.net_edge, estimated_profit_usdt=cost.estimated_profit_usdt, estimated_net_profit_usdt=cost.estimated_net_profit_usdt, estimated_profit_pct=cost.estimated_profit_pct, risk_reward=risk.risk_reward, estimated_cost_pct=cost.estimated_cost_pct, market_bias=market.bias, market_mode=mode.mode, session_state=session.state, order_block_state=ob.state, rsi_5m=s5.rsi, rsi_15m=s15.rsi, macd_hist_5m=s5.macd_hist, macd_hist_15m=s15.macd_hist, adx_15m=s15.adx, atr_pct_15m=s15.atr_pct, volume_ratio_5m=s5.volume_ratio, volume_ratio_15m=s15.volume_ratio, notes=notes)
-        return SignalDecision(action=meta.action, accepted=meta.accepted, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason=meta.reason, reject_code=None if meta.accepted else meta.real_block_reason or "NOT_READY", ready_alert=meta.ready_alert, hunter=entry_quality.quality in {"EARLY_IGNITION", "GOOD_ENTRY", "POWER_BUILDING", "REVERSAL_BUILDING"}, signal_label=meta.signal_label, real_allowed=meta.real_allowed, real_block_reason=meta.real_block_reason, **common)
+        return SignalDecision(action=meta.action, accepted=meta.accepted, entry=entry, tp=risk.tp, sl=risk.sl, score=total, threshold=thresholds.signal_threshold, signal_threshold=thresholds.signal_threshold, real_threshold=thresholds.real_threshold, threshold_source=thresholds.source, breakdown=breakdown, reason=meta.reason, reject_code=None if meta.accepted else meta.real_block_reason or "NOT_READY", ready_alert=meta.ready_alert, hunter=entry_quality.quality in {"EARLY_IGNITION", "GOOD_ENTRY", "POWER_BUILDING", "REVERSAL_BUILDING"}, signal_label=meta.signal_label, real_allowed=meta.real_allowed, real_block_reason=meta.real_block_reason, **common)
 
     def _safe_snapshot(self, candles: list[Candle] | None) -> IndicatorSnapshot | None:
         if not candles:
@@ -119,4 +122,4 @@ class AIController:
             return None
 
     def _reject(self, *, entry: float, breakdown: ScoreBreakdown, reason: str, code: str, hard: bool = False, **extra) -> SignalDecision:
-        return SignalDecision(action="REJECT", accepted=False, direction=extra.pop("direction", None), entry=entry, tp=extra.pop("tp", entry), sl=extra.pop("sl", entry), score=max(0, min(100, breakdown.total)), threshold=SIGNAL_THRESHOLD, breakdown=breakdown, reason=reason, hard_reject=hard, reject_code=code, **extra)
+        return SignalDecision(action="REJECT", accepted=False, direction=extra.pop("direction", None), entry=entry, tp=extra.pop("tp", entry), sl=extra.pop("sl", entry), score=max(0, min(100, breakdown.total)), threshold=BASE_SIGNAL_THRESHOLD, signal_threshold=BASE_SIGNAL_THRESHOLD, breakdown=breakdown, reason=reason, hard_reject=hard, reject_code=code, **extra)

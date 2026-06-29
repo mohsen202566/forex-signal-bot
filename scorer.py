@@ -69,6 +69,9 @@ class SignalDecision:
     threshold: int
     breakdown: ScoreBreakdown
     reason: str
+    signal_threshold: int = 70
+    real_threshold: int = 78
+    threshold_source: str = "BOOT"
     hard_reject: bool = False
     reject_code: str | None = None
     ready_alert: bool = False
