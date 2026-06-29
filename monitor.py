@@ -22,6 +22,11 @@ class SignalMonitor:
 
     async def check_once(self, send_result) -> None:
         for signal in self.storage.open_signals():
+            # Telegram must never receive a TP/SL result before the original signal message exists.
+            # The scanner creates the DB row first, then sends Telegram and stores message_id.
+            # With 1-second monitoring, TP/SL can be hit before message_id is written; skip until it is available.
+            if signal.message_id is None:
+                continue
             if signal.signal_type == "real" and signal.real_status not in {"opened", "reserved", "opening"}:
                 continue
             try:
