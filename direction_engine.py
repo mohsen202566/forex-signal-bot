@@ -32,6 +32,8 @@ class DirectionEngine:
         long_raw, long_reasons = self._scalp_side_strength(snapshot_15m, snapshot_5m, "LONG")
         short_raw, short_reasons = self._scalp_side_strength(snapshot_15m, snapshot_5m, "SHORT")
         edge = abs(long_raw - short_raw)
+
+        # Strong direction: clean enough for the normal scoring path.
         min_raw = 11
         min_edge = 2
         if long_raw >= min_raw and long_raw >= short_raw + min_edge:
@@ -42,9 +44,32 @@ class DirectionEngine:
             confidence = min(100, int(short_raw * 3.0 + edge * 2.0))
             score = min(WEIGHTS.direction, 4 + confidence // 14)
             return DirectionResult("SHORT", score, confidence, int(-short_raw), tuple(short_reasons + ["15m/5m فشار غالب را برای شورت نشان می‌دهد."]))
+
+        # Soft direction: Direction must not be a hard blocker. If one side has
+        # usable pressure but is not fully clean yet, let the rest of AI score it
+        # with lower direction confidence instead of stopping the whole analysis.
+        best_direction: Direction = "LONG" if long_raw >= short_raw else "SHORT"
+        best_raw = max(long_raw, short_raw)
+        other_raw = min(long_raw, short_raw)
+        soft_edge = best_raw - other_raw
+        if best_raw >= 8 and (soft_edge >= 1 or best_raw >= 10):
+            confidence = min(74, max(28, int(best_raw * 3.0 + soft_edge * 2.0)))
+            score = min(WEIGHTS.direction, max(3, 3 + confidence // 18))
+            if best_direction == "LONG":
+                reasons = list(long_reasons)
+                raw_strength = int(best_raw)
+                side_text = "لانگ"
+            else:
+                reasons = list(short_reasons)
+                raw_strength = int(-best_raw)
+                side_text = "شورت"
+            reasons.append(f"Direction نرم است: فشار {side_text} دیده شده ولی کامل نیست؛ AI ادامه تحلیل را با اعتماد کمتر انجام می‌دهد.")
+            reasons.append(f"raw_long={long_raw:.1f} raw_short={short_raw:.1f} edge={soft_edge:.1f}")
+            return DirectionResult(best_direction, score, confidence, raw_strength, tuple(reasons))
+
         raw = int(long_raw - short_raw)
         confidence = min(100, abs(raw) * 5)
-        return DirectionResult("NEUTRAL", min(WEIGHTS.direction, max(1, confidence // 10)), confidence, raw, ("فشار دوطرفه نزدیک است؛ فقط Watch/Ghost مناسب است.",))
+        return DirectionResult("NEUTRAL", min(WEIGHTS.direction, max(1, confidence // 10)), confidence, raw, (f"فشار دوطرفه نزدیک/ضعیف است؛ فقط Watch/Ghost مناسب است. raw_long={long_raw:.1f} raw_short={short_raw:.1f}",))
 
     def analyze_1h_context(self, snapshot: IndicatorSnapshot, direction: Direction) -> DirectionResult:
         raw, reasons = self._raw_strength(snapshot)
