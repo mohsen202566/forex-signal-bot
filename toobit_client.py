@@ -11,6 +11,8 @@ from urllib.parse import urlencode
 
 import requests
 
+from config import TOOBIT_PLACE_REAL_TP
+
 Direction = Literal["LONG", "SHORT"]
 _CLIENT: "ToobitClient | None" = None
 
@@ -160,6 +162,7 @@ class ToobitClient:
         self.path_close_order = _env_first("TOOBIT_PATH_CLOSE_ORDER", "TOBIT_PATH_CLOSE_ORDER", default=self.path_order)
         self.param_tp = _env_first("TOOBIT_PARAM_TP", "TOBIT_PARAM_TP", default="takeProfit")
         self.param_sl = _env_first("TOOBIT_PARAM_SL", "TOBIT_PARAM_SL", default="stopLoss")
+        self.close_verify_seconds = _env_float(("TOOBIT_CLOSE_VERIFY_SECONDS", "TOBIT_CLOSE_VERIFY_SECONDS"), 2.0)
 
     def get_wallet_margin_usdt(self) -> float:
         payload = self._request("GET", self.path_balance, signed=True)
@@ -256,6 +259,7 @@ class ToobitClient:
         tp_price: float,
         sl_price: float,
         price: float | None = None,
+        place_tp: bool = TOOBIT_PLACE_REAL_TP,
     ) -> OpenOrderResult:
         symbol = symbol.upper()
         _validate_direction(direction)
@@ -280,13 +284,16 @@ class ToobitClient:
             "priceType": "MARKET",
             "valueQuantity": _decimal_to_api(notional),
             "newClientOrderId": f"scalp5_{int(time.time() * 1000)}",
-            self.param_tp: _decimal_to_api(tp_decimal),
             self.param_sl: _decimal_to_api(sl_decimal),
-            "tpTriggerBy": "CONTRACT_PRICE",
             "slTriggerBy": "CONTRACT_PRICE",
-            "tpOrderType": "MARKET",
             "slOrderType": "MARKET",
         }
+        if place_tp:
+            params.update({
+                self.param_tp: _decimal_to_api(tp_decimal),
+                "tpTriggerBy": "CONTRACT_PRICE",
+                "tpOrderType": "MARKET",
+            })
         try:
             raw = self._request("POST", self.path_order, params=params, signed=True)
         except Exception as exc:
@@ -325,7 +332,10 @@ class ToobitClient:
             opened=position is not None,
             order_id=_extract_order_id(raw),
             position=position,
-            reason=f"سفارش ارسال شد و بعد از تایید {self.config.verify_after_error_seconds} ثانیه‌ای وضعیت پوزیشن بررسی شد.",
+            reason=(
+                f"سفارش ارسال شد؛ SL واقعی روی Toobit ثبت شد و TP {'ثابت هم ثبت شد' if place_tp else 'ذهنی/AI-managed است'}؛ "
+                f"بعد از تایید {self.config.verify_after_error_seconds} ثانیه‌ای وضعیت پوزیشن بررسی شد."
+            ),
             raw=raw if isinstance(raw, dict) else {"response": raw},
         )
 
@@ -347,15 +357,15 @@ class ToobitClient:
         }
         try:
             raw = self._request("POST", self.path_close_order, params=params, signed=True)
-            if self.config.verify_after_error_seconds > 0:
-                time.sleep(float(self.config.verify_after_error_seconds))
+            if self.close_verify_seconds > 0:
+                time.sleep(float(self.close_verify_seconds))
             still_open = self._verify_position(symbol, direction) is not None
-            return ClosePositionResult(symbol=symbol, direction=direction, closed=not still_open, order_id=_extract_order_id(raw), reason="درخواست بستن ارسال شد و وضعیت پوزیشن تایید شد.", raw=raw if isinstance(raw, dict) else {"response": raw})
+            return ClosePositionResult(symbol=symbol, direction=direction, closed=not still_open, order_id=_extract_order_id(raw), reason="درخواست بستن سریع AI ارسال شد و وضعیت پوزیشن تایید شد.", raw=raw if isinstance(raw, dict) else {"response": raw})
         except Exception as exc:
-            if self.config.verify_after_error_seconds > 0:
-                time.sleep(float(self.config.verify_after_error_seconds))
+            if self.close_verify_seconds > 0:
+                time.sleep(float(self.close_verify_seconds))
             still_open = self._verify_position(symbol, direction) is not None
-            return ClosePositionResult(symbol=symbol, direction=direction, closed=not still_open, order_id=None, reason=f"خطا در بستن؛ بعد از تایید وضعیت بررسی شد: {exc}")
+            return ClosePositionResult(symbol=symbol, direction=direction, closed=not still_open, order_id=None, reason=f"خطا در بستن AI؛ بعد از تایید کوتاه وضعیت بررسی شد: {exc}")
 
     def get_mark_price(self, symbol: str) -> float:
         payload = self._request("GET", self.path_mark_price, params={"symbol": symbol.upper()}, signed=False)

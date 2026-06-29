@@ -89,14 +89,32 @@ class BotUI:
         self.storage.update_message_id(created.signal_id, int(msg.message_id))
         return int(msg.message_id)
 
-    async def send_result(self, signal: StoredSignal, status: str, approx_pnl: float, real_pnl: float | None, result_source: str | None = None) -> int | None:
+    async def send_result(self, signal: StoredSignal, status: str, approx_pnl: float, real_pnl: float | None, result_source: str | None = None, exit_reason: str | None = None, exit_price: float | None = None) -> int | None:
         if self.app is None:
             return None
         direction_fa = "لانگ" if signal.direction == "LONG" else "شورت"
-        result_fa = "تیپی خورد" if status == "TP" else "استاپ خورد" if status == "SL" else "خروج هوشمند AI"
-        icon = "🟢" if status == "TP" else "🔴" if status == "SL" else "🟡"
+        result_map = {
+            "TP": ("🟢", "تیپی ثابت/ذهنی خورد"),
+            "SL": ("🔴", "استاپ محافظ خورد"),
+            "AI_EXIT_PROFIT": ("🟢", "خروج AI با سود"),
+            "AI_EXIT_BREAKEVEN": ("🟡", "خروج AI نزدیک سربه‌سر"),
+            "AI_EXIT_DAMAGE_CONTROL": ("🟠", "خروج AI قبل از استاپ"),
+            "AI_EXIT_REVERSAL": ("🟠", "خروج AI با برگشت/ضعف"),
+            "EXIT": ("🟡", "خروج هوشمند AI"),
+        }
+        icon, result_fa = result_map.get(status, ("🟡", "خروج هوشمند AI"))
         source_fa = {"toobit_real": "واقعی توبیت", "normal_on_real": "عادی روی سیگنال واقعی", "normal": "عادی ربات", "ghost_or_failed": "Ghost/Failed"}.get(result_source or signal.result_source or "", "عادی ربات")
-        text = f"{icon} نتیجه {direction_fa}: {result_fa}\nارز: {signal.symbol_name or signal.toobit_symbol}\nنوع نتیجه: {source_fa}\nنوع سیگنال: {signal.hunter_type} / {signal.signal_type}\nکیفیت AI: {signal.entry_quality or '-'}\nسود/ضرر تقریبی: {fmt_money(approx_pnl)}"
+        text = (
+            f"{icon} نتیجه {direction_fa}: {result_fa}\n"
+            f"ارز: {signal.symbol_name or signal.toobit_symbol}\n"
+            f"نوع نتیجه: {source_fa}\n"
+            f"نوع سیگنال: {signal.hunter_type} / {signal.signal_type}\n"
+            f"کیفیت AI: {signal.entry_quality or '-'}\n"
+            f"Exit: {fmt_price(exit_price)}\n"
+            f"سود/ضرر تقریبی: {fmt_money(approx_pnl)}"
+        )
+        if exit_reason:
+            text += f"\nدلیل خروج AI: {exit_reason[:700]}"
         if signal.signal_type == "real":
             text += f"\nسود/ضرر واقعی Toobit: {fmt_money(real_pnl)}"
         msg = await self.app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, reply_to_message_id=signal.message_id)
@@ -126,8 +144,8 @@ class BotUI:
             f"نماد Toobit real غیرفعال: {data.symbol_health.get('toobit_real_disabled', 0)}\n\n"
             f"PnL واقعی Toobit/ربات: {fmt_money(data.today_real_pnl)}\n"
             f"PnL تقریبی عادی: {fmt_money(data.today_approx_pnl)}\n"
-            f"TP/SL واقعی Toobit: TP {real_tpsl.get('tp', 0)} / SL {real_tpsl.get('sl', 0)} / WR {real_tpsl.get('win_rate', 0):.1f}%\n"
-            f"TP/SL عادی ربات: TP {normal_tpsl.get('tp', 0)} / SL {normal_tpsl.get('sl', 0)} / WR {normal_tpsl.get('win_rate', 0):.1f}%"
+            f"TP/SL/AI واقعی Toobit: برد {real_tpsl.get('tp', 0)} / باخت {real_tpsl.get('sl', 0)} / AI Exit {real_tpsl.get('exit', 0)} / WR {real_tpsl.get('win_rate', 0):.1f}%\n"
+            f"TP/SL/AI عادی ربات: برد {normal_tpsl.get('tp', 0)} / باخت {normal_tpsl.get('sl', 0)} / AI Exit {normal_tpsl.get('exit', 0)} / WR {normal_tpsl.get('win_rate', 0):.1f}%"
         )
 
     async def handle_text(self, update: Any, context: Any) -> None:
@@ -193,7 +211,7 @@ class BotUI:
             f"میانگین اعتماد AI: {data['avg_ai_confidence']:.1f}%\n"
             f"بهترین ارز/جهت: {data['best_symbol_side']}\n"
             f"ضعیف‌ترین ارز/جهت: {data['worst_symbol_side']}\n\n"
-            f"الگوهای قوی:\n{data['patterns']}\n\n"
+            f"الگوهای پرتکرار/در حال بررسی:\n{data['patterns']}\n\n"
             f"بازه‌های اندیکاتوری:\n{data['best_indicator_ranges']}\n\n"
             f"پیشنهادها:\n{data['suggestions']}"
         )

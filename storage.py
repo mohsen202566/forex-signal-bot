@@ -14,6 +14,14 @@ from config import (
 from scorer import SignalDecision
 
 
+AI_SUCCESS_STATUSES = {"TP", "AI_EXIT_PROFIT"}
+AI_PROTECT_STATUSES = {"AI_EXIT_BREAKEVEN"}
+AI_LOSS_STATUSES = {"SL", "AI_EXIT_DAMAGE_CONTROL", "AI_EXIT_REVERSAL"}
+AI_EXIT_STATUSES = {"AI_EXIT_PROFIT", "AI_EXIT_BREAKEVEN", "AI_EXIT_DAMAGE_CONTROL", "AI_EXIT_REVERSAL"}
+AI_CLOSED_STATUSES = AI_SUCCESS_STATUSES | AI_PROTECT_STATUSES | AI_LOSS_STATUSES
+AI_CLOSED_SQL = "'TP','SL','AI_EXIT_PROFIT','AI_EXIT_BREAKEVEN','AI_EXIT_DAMAGE_CONTROL','AI_EXIT_REVERSAL'"
+
+
 @dataclass(frozen=True)
 class StoredSignal:
     id: int
@@ -50,6 +58,15 @@ class StoredSignal:
     indicator_profile: str | None = None
     mfe_pct: float = 0.0
     mae_pct: float = 0.0
+    exit_price: float | None = None
+    ai_exit_reason: str | None = None
+    ai_exit_status: str | None = None
+    ai_exit_score: int = 0
+    target_zone_reached: bool = False
+    giveback_pct: float = 0.0
+    market_mode: str | None = None
+    candle_pattern: str | None = None
+    entry_precision_pct: float = 0.0
 
 
 class Storage:
@@ -104,6 +121,12 @@ class Storage:
                     approx_pnl REAL,
                     real_pnl REAL,
                     result_source TEXT,
+                    exit_price REAL,
+                    ai_exit_reason TEXT,
+                    ai_exit_status TEXT,
+                    ai_exit_score INTEGER DEFAULT 0,
+                    target_zone_reached INTEGER DEFAULT 0,
+                    giveback_pct REAL DEFAULT 0,
                     margin_usdt REAL,
                     leverage INTEGER,
                     result_at TEXT,
@@ -201,6 +224,7 @@ class Storage:
             conn.execute("CREATE TABLE IF NOT EXISTS ai_shadow_tests (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER NOT NULL, plan_name TEXT NOT NULL, tp REAL NOT NULL, sl REAL NOT NULL, result TEXT DEFAULT 'pending', created_at TEXT NOT NULL, updated_at TEXT)")
             conn.execute("CREATE TABLE IF NOT EXISTS ai_judgements (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER NOT NULL, entry_quality TEXT, tp_quality TEXT, sl_quality TEXT, failure_reason TEXT, score_delta INTEGER, reasons TEXT, created_at TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS ai_second_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER NOT NULL, created_at TEXT NOT NULL, price REAL NOT NULL, mfe_pct REAL DEFAULT 0, mae_pct REAL DEFAULT 0)")
+            conn.execute("CREATE TABLE IF NOT EXISTS ai_exit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL, price REAL NOT NULL, profit_pct REAL DEFAULT 0, mfe_pct REAL DEFAULT 0, mae_pct REAL DEFAULT 0, giveback_pct REAL DEFAULT 0, exit_score INTEGER DEFAULT 0, reason TEXT)")
             conn.execute("CREATE TABLE IF NOT EXISTS ai_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, level TEXT, message TEXT, status TEXT DEFAULT 'open')")
             conn.execute("CREATE TABLE IF NOT EXISTS toobit_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER, symbol TEXT, action TEXT, order_id TEXT, status TEXT, reason TEXT, created_at TEXT)")
             self._migrate_columns(conn)
@@ -217,6 +241,8 @@ class Storage:
             "real_allowed": "INTEGER DEFAULT 0", "real_block_reason": "TEXT", "real_threshold": "INTEGER DEFAULT 78", "threshold_source": "TEXT DEFAULT 'BOOT'", "score_entry_precision": "INTEGER DEFAULT 0", "score_tp_sl": "INTEGER DEFAULT 0",
             "score_market_mode": "INTEGER DEFAULT 0", "score_net_sync": "INTEGER DEFAULT 0", "entry_precision_pct": "REAL DEFAULT 0", "pattern_id": "TEXT",
             "estimated_net_profit_usdt": "REAL DEFAULT 0", "market_mode": "TEXT", "best_price": "REAL", "worst_price": "REAL",
+            "exit_price": "REAL", "ai_exit_reason": "TEXT", "ai_exit_status": "TEXT", "ai_exit_score": "INTEGER DEFAULT 0",
+            "target_zone_reached": "INTEGER DEFAULT 0", "giveback_pct": "REAL DEFAULT 0",
         }
         for name, spec in columns.items():
             if name not in existing:
@@ -360,10 +386,42 @@ class Storage:
             conn.execute("INSERT INTO ai_second_snapshots(signal_id, created_at, price, mfe_pct, mae_pct) VALUES(?, ?, ?, ?, ?)", (signal_id, datetime.now(timezone.utc).isoformat(), price, mfe, mae))
             return mfe, mae
 
-    def finish_signal(self, signal_id: int, *, status: str, approx_pnl: float, real_pnl: float | None, result_message_id: int | None, mfe_pct: float, mae_pct: float, result_source: str | None = None) -> bool:
+    def recent_second_snapshots(self, signal_id: int, limit: int = 18) -> list[dict[str, Any]]:
+        limit = max(2, min(int(limit), 120))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT created_at, price, mfe_pct, mae_pct FROM ai_second_snapshots WHERE signal_id=? ORDER BY id DESC LIMIT ?",
+                (signal_id, limit),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def record_ai_exit_event(self, signal_id: int, *, status: str, price: float, reason: str | None, profit_pct: float, mfe_pct: float, mae_pct: float, giveback_pct: float, exit_score: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO ai_exit_events(signal_id, created_at, status, price, profit_pct, mfe_pct, mae_pct, giveback_pct, exit_score, reason) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (signal_id, datetime.now(timezone.utc).isoformat(), status, price, profit_pct, mfe_pct, mae_pct, giveback_pct, int(exit_score or 0), reason),
+            )
+
+    def finish_signal(self, signal_id: int, *, status: str, approx_pnl: float, real_pnl: float | None, result_message_id: int | None, mfe_pct: float, mae_pct: float, result_source: str | None = None, exit_price: float | None = None, ai_exit_reason: str | None = None, ai_exit_status: str | None = None, ai_exit_score: int = 0, target_zone_reached: bool = False, giveback_pct: float = 0.0) -> bool:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
-            cur = conn.execute("UPDATE signals SET status=?, approx_pnl=?, real_pnl=?, result_message_id=?, result_at=?, mfe_pct=?, mae_pct=?, result_source=?, result_5m=?, result_10m=?, result_15m=? WHERE id=? AND status='OPEN'", (status, approx_pnl, real_pnl, result_message_id, now, mfe_pct, mae_pct, result_source, status, status, status, signal_id))
+            cur = conn.execute(
+                """
+                UPDATE signals
+                SET status=?, approx_pnl=?, real_pnl=?, result_message_id=?, result_at=?, mfe_pct=?, mae_pct=?,
+                    result_source=?, exit_price=?, ai_exit_reason=?, ai_exit_status=?, ai_exit_score=?,
+                    target_zone_reached=?, giveback_pct=?,
+                    real_status=CASE WHEN signal_type='real' THEN 'closed' ELSE real_status END,
+                    result_5m=?, result_10m=?, result_15m=?
+                WHERE id=? AND status='OPEN'
+                """,
+                (
+                    status, approx_pnl, real_pnl, result_message_id, now, mfe_pct, mae_pct,
+                    result_source, exit_price, ai_exit_reason, ai_exit_status, int(ai_exit_score or 0),
+                    1 if target_zone_reached else 0, float(giveback_pct or 0.0),
+                    status, status, status, signal_id,
+                ),
+            )
             return cur.rowcount > 0
 
     def open_signals(self) -> list[StoredSignal]:
@@ -443,22 +501,22 @@ class Storage:
     def ai_pattern_stats(self, symbol_name: str, direction: str, pattern_id: str) -> dict[str, Any]:
         start = datetime.now(timezone.utc) - timedelta(days=LEARNING_DAYS)
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND pattern_id=? AND status IN ('TP','SL')", (start.isoformat(), symbol_name, direction, pattern_id)).fetchall()
+            rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND pattern_id=? AND status IN ('TP','SL','AI_EXIT_PROFIT','AI_EXIT_BREAKEVEN','AI_EXIT_DAMAGE_CONTROL','AI_EXIT_REVERSAL')", (start.isoformat(), symbol_name, direction, pattern_id)).fetchall()
         return self._learning_summary(rows)
 
     def indicator_range_stats(self, *, symbol_name: str, direction: str, entry_quality: str, rsi_5m: float, rsi_15m: float, adx_15m: float, volume_ratio_5m: float, volume_ratio_15m: float) -> dict[str, Any]:
         start = datetime.now(timezone.utc) - timedelta(days=LEARNING_DAYS)
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND status IN ('TP','SL') AND ABS(rsi_5m - ?) <= 5 AND ABS(rsi_15m - ?) <= 6 AND ABS(adx_15m - ?) <= 5 AND volume_ratio_5m BETWEEN ? AND ? AND volume_ratio_15m BETWEEN ? AND ?", (start.isoformat(), symbol_name, direction, rsi_5m, rsi_15m, adx_15m, max(0.0, volume_ratio_5m - 0.55), volume_ratio_5m + 0.55, max(0.0, volume_ratio_15m - 0.55), volume_ratio_15m + 0.55)).fetchall()
+            rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND status IN ('TP','SL','AI_EXIT_PROFIT','AI_EXIT_BREAKEVEN','AI_EXIT_DAMAGE_CONTROL','AI_EXIT_REVERSAL') AND ABS(rsi_5m - ?) <= 5 AND ABS(rsi_15m - ?) <= 6 AND ABS(adx_15m - ?) <= 5 AND volume_ratio_5m BETWEEN ? AND ? AND volume_ratio_15m BETWEEN ? AND ?", (start.isoformat(), symbol_name, direction, rsi_5m, rsi_15m, adx_15m, max(0.0, volume_ratio_5m - 0.55), volume_ratio_5m + 0.55, max(0.0, volume_ratio_15m - 0.55), volume_ratio_15m + 0.55)).fetchall()
         if len(rows) < 5 and entry_quality:
             with self._connect() as conn:
-                rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND entry_quality=? AND status IN ('TP','SL')", (start.isoformat(), symbol_name, direction, entry_quality)).fetchall()
+                rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND entry_quality=? AND status IN ('TP','SL','AI_EXIT_PROFIT','AI_EXIT_BREAKEVEN','AI_EXIT_DAMAGE_CONTROL','AI_EXIT_REVERSAL')", (start.isoformat(), symbol_name, direction, entry_quality)).fetchall()
         return self._learning_summary(rows)
 
     def session_stats(self, symbol_name: str, direction: str, bucket: str) -> dict[str, Any]:
         start = datetime.now(timezone.utc) - timedelta(days=LEARNING_DAYS)
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND session_bucket=? AND status IN ('TP','SL')", (start.isoformat(), symbol_name, direction, bucket)).fetchall()
+            rows = conn.execute("SELECT * FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND session_bucket=? AND status IN ('TP','SL','AI_EXIT_PROFIT','AI_EXIT_BREAKEVEN','AI_EXIT_DAMAGE_CONTROL','AI_EXIT_REVERSAL')", (start.isoformat(), symbol_name, direction, bucket)).fetchall()
         return self._learning_summary(rows)
 
     def symbol_direction_profile(self, symbol_name: str, direction: str) -> dict[str, Any]:
@@ -470,7 +528,7 @@ class Storage:
         start = datetime.now(timezone.utc) - timedelta(days=LEARNING_DAYS)
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT score, status, mfe_pct, mae_pct FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND status IN ('TP','SL')",
+                "SELECT score, status, mfe_pct, mae_pct, approx_pnl FROM signals WHERE created_at>=? AND symbol_name=? AND direction=? AND status IN ('TP','SL','AI_EXIT_PROFIT','AI_EXIT_BREAKEVEN','AI_EXIT_DAMAGE_CONTROL','AI_EXIT_REVERSAL')",
                 (start.isoformat(), symbol_name, direction),
             ).fetchall()
         buckets: dict[int, list[sqlite3.Row]] = {}
@@ -479,8 +537,8 @@ class Storage:
             buckets.setdefault(bucket_low, []).append(row)
         result: list[dict[str, Any]] = []
         for bucket_low, items in sorted(buckets.items()):
-            tp = sum(1 for r in items if r["status"] == "TP")
-            sl = sum(1 for r in items if r["status"] == "SL")
+            tp = sum(1 for r in items if self._is_win_row(r))
+            sl = sum(1 for r in items if self._is_loss_row(r))
             samples = len(items)
             result.append({
                 "bucket_low": bucket_low,
@@ -543,12 +601,12 @@ class Storage:
             for label, extra_where, params in contexts:
                 rows = conn.execute(
                     f"""
-                    SELECT status, mfe_pct, mae_pct, signal_type, real_status
+                    SELECT status, mfe_pct, mae_pct, approx_pnl, signal_type, real_status
                     FROM signals
                     WHERE created_at>=?
                       AND symbol_name=?
                       AND direction=?
-                      AND status IN ('TP','SL')
+                      AND status IN ('TP','SL','AI_EXIT_PROFIT','AI_EXIT_BREAKEVEN','AI_EXIT_DAMAGE_CONTROL','AI_EXIT_REVERSAL')
                       AND {extra_where}
                     """,
                     (start.isoformat(), symbol_name, direction, *params),
@@ -556,11 +614,11 @@ class Storage:
                 samples = len(rows)
                 if samples <= 0:
                     continue
-                tp = sum(1 for r in rows if r["status"] == "TP")
-                sl = sum(1 for r in rows if r["status"] == "SL")
+                tp = sum(1 for r in rows if self._is_win_row(r))
+                sl = sum(1 for r in rows if self._is_loss_row(r))
                 real_rows = [r for r in rows if str(r["signal_type"] or "") == "real" or str(r["real_status"] or "") in {"opened", "closed"}]
-                real_tp = sum(1 for r in real_rows if r["status"] == "TP")
-                real_sl = sum(1 for r in real_rows if r["status"] == "SL")
+                real_tp = sum(1 for r in real_rows if self._is_win_row(r))
+                real_sl = sum(1 for r in real_rows if self._is_loss_row(r))
                 result.append({
                     "label": label,
                     "samples": samples,
@@ -637,17 +695,17 @@ class Storage:
         status = str(signal["status"])
         pattern_id = str(signal.get("pattern_id") or "")
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM signals WHERE symbol_name=? AND direction=? AND status IN ('TP','SL','EXIT')", (symbol, direction)).fetchall()
+            rows = conn.execute("SELECT * FROM signals WHERE symbol_name=? AND direction=? AND status IN ('TP','SL','AI_EXIT_PROFIT','AI_EXIT_BREAKEVEN','AI_EXIT_DAMAGE_CONTROL','AI_EXIT_REVERSAL')", (symbol, direction)).fetchall()
             total = len(rows)
-            tp = sum(1 for r in rows if r["status"] == "TP")
-            sl = sum(1 for r in rows if r["status"] == "SL")
-            exit_count = sum(1 for r in rows if r["status"] == "EXIT")
+            tp = sum(1 for r in rows if self._is_win_row(r))
+            sl = sum(1 for r in rows if self._is_loss_row(r))
+            exit_count = sum(1 for r in rows if str(r["status"] or "").startswith("AI_EXIT"))
             wr = tp / max(1, tp + sl) * 100.0 if tp + sl else 0.0
             avg_mfe = sum(float(r["mfe_pct"] or 0.0) for r in rows) / max(1, total)
             avg_mae = sum(float(r["mae_pct"] or 0.0) for r in rows) / max(1, total)
             consecutive_sl = 0
             for r in reversed(rows):
-                if r["status"] == "SL":
+                if self._is_loss_row(r):
                     consecutive_sl += 1
                 else:
                     break
@@ -655,17 +713,40 @@ class Storage:
             if pattern_id:
                 pattern_rows = [r for r in rows if str(r["pattern_id"] or "") == pattern_id]
                 p_total = len(pattern_rows)
-                p_tp = sum(1 for r in pattern_rows if r["status"] == "TP")
-                p_sl = sum(1 for r in pattern_rows if r["status"] == "SL")
+                p_tp = sum(1 for r in pattern_rows if self._is_win_row(r))
+                p_sl = sum(1 for r in pattern_rows if self._is_loss_row(r))
                 p_wr = p_tp / max(1, p_tp + p_sl) * 100.0 if p_tp + p_sl else 0.0
                 verdict = "POSITIVE" if p_total >= 10 and p_wr >= 60 else "NEGATIVE" if p_total >= 10 and p_wr <= 40 else "NEUTRAL"
                 conn.execute("INSERT INTO ai_patterns(symbol_name, direction, pattern_id, total, tp, sl, win_rate, avg_mfe, avg_mae, verdict, last_updated) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(symbol_name, direction, pattern_id) DO UPDATE SET total=excluded.total, tp=excluded.tp, sl=excluded.sl, win_rate=excluded.win_rate, avg_mfe=excluded.avg_mfe, avg_mae=excluded.avg_mae, verdict=excluded.verdict, last_updated=excluded.last_updated", (symbol, direction, pattern_id, p_total, p_tp, p_sl, p_wr, sum(float(r["mfe_pct"] or 0.0) for r in pattern_rows) / max(1, p_total), sum(float(r["mae_pct"] or 0.0) for r in pattern_rows) / max(1, p_total), verdict, datetime.now(timezone.utc).isoformat()))
                 conn.execute("INSERT INTO ai_pattern_results(signal_id, symbol_name, direction, pattern_id, status, mfe_pct, mae_pct, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)", (signal_id, symbol, direction, pattern_id, status, signal.get("mfe_pct") or 0.0, signal.get("mae_pct") or 0.0, datetime.now(timezone.utc).isoformat()))
 
+    @staticmethod
+    def _row_value(row: sqlite3.Row | dict[str, Any], key: str, default: Any = None) -> Any:
+        try:
+            return row[key]  # type: ignore[index]
+        except Exception:
+            if isinstance(row, dict):
+                return row.get(key, default)
+            return default
+
+    @classmethod
+    def _is_win_row(cls, row: sqlite3.Row | dict[str, Any]) -> bool:
+        status = str(cls._row_value(row, "status", "") or "")
+        pnl = float(cls._row_value(row, "approx_pnl", 0.0) or 0.0)
+        return status in AI_SUCCESS_STATUSES or (status == "AI_EXIT_BREAKEVEN" and pnl > 0)
+
+    @classmethod
+    def _is_loss_row(cls, row: sqlite3.Row | dict[str, Any]) -> bool:
+        status = str(cls._row_value(row, "status", "") or "")
+        pnl = float(cls._row_value(row, "approx_pnl", 0.0) or 0.0)
+        if status in {"SL", "AI_EXIT_DAMAGE_CONTROL", "AI_EXIT_REVERSAL"}:
+            return True
+        return status == "AI_EXIT_BREAKEVEN" and pnl < 0
+
     def _learning_summary(self, rows: list[sqlite3.Row]) -> dict[str, Any]:
         samples = len(rows)
-        tp = sum(1 for row in rows if row["status"] == "TP")
-        sl = sum(1 for row in rows if row["status"] == "SL")
+        tp = sum(1 for row in rows if self._is_win_row(row))
+        sl = sum(1 for row in rows if self._is_loss_row(row))
         avg_mfe = sum(float(row["mfe_pct"] or 0.0) for row in rows) / samples if samples else 0.0
         avg_mae = sum(float(row["mae_pct"] or 0.0) for row in rows) / samples if samples else 0.0
         return {"samples": samples, "tp": tp, "sl": sl, "win_rate": (tp / max(1, tp + sl) * 100.0) if tp + sl else 0.0, "avg_mfe": avg_mfe, "avg_mae": avg_mae}
@@ -693,13 +774,13 @@ class Storage:
             rows = conn.execute("SELECT * FROM signals WHERE created_at >= ?", (start.isoformat(),)).fetchall()
             patterns = conn.execute("SELECT * FROM ai_patterns ORDER BY total DESC, win_rate DESC LIMIT 5").fetchall()
             suggestions = conn.execute("SELECT * FROM ai_suggestions WHERE status='open' ORDER BY id DESC LIMIT 5").fetchall()
-        closed = [r for r in rows if r["status"] in ("TP", "SL", "EXIT")]
+        closed = [r for r in rows if str(r["status"] or "") in AI_CLOSED_STATUSES]
         return {
             "learning_days": LEARNING_DAYS,
             "stored_patterns": len(patterns),
             "active_patterns": len(rows),
-            "analysis_right": sum(1 for r in closed if r["status"] == "TP"),
-            "analysis_wrong": sum(1 for r in closed if r["status"] == "SL"),
+            "analysis_right": sum(1 for r in closed if self._is_win_row(r)),
+            "analysis_wrong": sum(1 for r in closed if self._is_loss_row(r)),
             "avg_ai_confidence": sum(float(r["ai_confidence"] or 0) for r in rows) / len(rows) if rows else 0.0,
             "best_symbol_side": self._best_worst_symbol_side(closed, True),
             "worst_symbol_side": self._best_worst_symbol_side(closed, False),
@@ -714,8 +795,8 @@ class Storage:
             groups.setdefault(f"{row['symbol_name']} {row['direction']}", []).append(row)
         scored = []
         for key, items in groups.items():
-            tp = sum(1 for x in items if x["status"] == "TP")
-            sl = sum(1 for x in items if x["status"] == "SL")
+            tp = sum(1 for x in items if self._is_win_row(x))
+            sl = sum(1 for x in items if self._is_loss_row(x))
             if tp + sl >= 3:
                 scored.append((tp / (tp + sl) * 100.0, key, tp + sl))
         if not scored:
@@ -731,8 +812,8 @@ class Storage:
             groups.setdefault(key, []).append(row)
         best = []
         for key, subset in groups.items():
-            tp = sum(1 for r in subset if r["status"] == "TP")
-            sl = sum(1 for r in subset if r["status"] == "SL")
+            tp = sum(1 for r in subset if self._is_win_row(r))
+            sl = sum(1 for r in subset if self._is_loss_row(r))
             if tp + sl >= 3:
                 best.append((tp / (tp + sl) * 100.0, key, tp + sl))
         if not best:
@@ -746,6 +827,7 @@ class Storage:
             conn.execute("DELETE FROM rejection_log")
             conn.execute("DELETE FROM watchlist")
             conn.execute("DELETE FROM ai_second_snapshots")
+            conn.execute("DELETE FROM ai_exit_events")
             conn.execute("DELETE FROM ai_shadow_tests")
             conn.execute("DELETE FROM ai_judgements")
 
@@ -757,7 +839,8 @@ class Storage:
             conn.execute("DELETE FROM ai_sensor_weights")
             conn.execute("DELETE FROM ai_shadow_tests")
             conn.execute("DELETE FROM ai_judgements")
-            conn.execute("UPDATE signals SET ai_confidence=0, ai_experience=0, ai_adjustment=0, ai_effect='NEUTRAL', mfe_pct=0, mae_pct=0")
+            conn.execute("DELETE FROM ai_exit_events")
+            conn.execute("UPDATE signals SET ai_confidence=0, ai_experience=0, ai_adjustment=0, ai_effect='NEUTRAL', mfe_pct=0, mae_pct=0, ai_exit_reason=NULL, ai_exit_status=NULL, ai_exit_score=0, target_zone_reached=0, giveback_pct=0")
 
     def _build_stats(self, rows: list[sqlite3.Row]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -774,10 +857,65 @@ class Storage:
         return result
 
     def _summarize(self, subset: list[sqlite3.Row], *, pnl_key: str) -> dict[str, Any]:
-        closed = [row for row in subset if row["status"] in ("TP", "SL")]
-        tp_count = sum(1 for row in subset if row["status"] == "TP")
-        sl_count = sum(1 for row in subset if row["status"] == "SL")
-        return {"total": len(subset), "tp": tp_count, "sl": sl_count, "open": sum(1 for row in subset if row["status"] == "OPEN"), "exit": sum(1 for row in subset if row["status"] == "EXIT"), "failed": sum(1 for row in subset if row["status"] == "FAILED"), "win_rate": (tp_count / len(closed) * 100.0) if closed else 0.0, "pnl": sum(float(row[pnl_key] or 0.0) for row in subset), "avg_score": sum(float(row["score"] or 0) for row in subset) / len(subset) if subset else 0.0}
+        closed = [row for row in subset if str(row["status"] or "") in AI_CLOSED_STATUSES]
+        tp_count = sum(1 for row in subset if self._is_win_row(row))
+        sl_count = sum(1 for row in subset if self._is_loss_row(row))
+        exit_count = sum(1 for row in subset if str(row["status"] or "").startswith("AI_EXIT"))
+        return {
+            "total": len(subset),
+            "tp": tp_count,
+            "sl": sl_count,
+            "open": sum(1 for row in subset if row["status"] == "OPEN"),
+            "exit": exit_count,
+            "failed": sum(1 for row in subset if row["status"] == "FAILED"),
+            "win_rate": (tp_count / max(1, tp_count + sl_count) * 100.0) if closed else 0.0,
+            "pnl": sum(float(row[pnl_key] or 0.0) for row in subset),
+            "avg_score": sum(float(row["score"] or 0) for row in subset) / len(subset) if subset else 0.0,
+        }
 
     def _row_to_signal(self, row: sqlite3.Row) -> StoredSignal:
-        return StoredSignal(id=int(row["id"]), created_at=str(row["created_at"]), okx_symbol=str(row["okx_symbol"]), toobit_symbol=str(row["toobit_symbol"]), symbol_name=str(row["symbol_name"] or ""), direction=str(row["direction"]), entry=float(row["entry"]), tp=float(row["tp"]), sl=float(row["sl"]), score=int(row["score"]), ai_confidence=int(row["ai_confidence"] or 0), ai_experience=int(row["ai_experience"] or 0), signal_type=str(row["signal_type"]), hunter_type=str(row["hunter_type"] or "ordinary"), status=str(row["status"]), real_status=str(row["real_status"]), message_id=int(row["message_id"]) if row["message_id"] is not None else None, result_message_id=int(row["result_message_id"]) if row["result_message_id"] is not None else None, order_id=str(row["order_id"]) if row["order_id"] is not None else None, approx_pnl=float(row["approx_pnl"]) if row["approx_pnl"] is not None else None, real_pnl=float(row["real_pnl"]) if row["real_pnl"] is not None else None, margin_usdt=float(row["margin_usdt"] or 0.0), leverage=int(row["leverage"] or 1), net_edge=float(row["net_edge"] or 0.0), estimated_profit_usdt=float(row["estimated_profit_usdt"] or 0.0), estimated_net_profit_usdt=float(row["estimated_net_profit_usdt"] or 0.0), estimated_profit_pct=float(row["estimated_profit_pct"] or 0.0), risk_reward=float(row["risk_reward"] or 0.0), reason=str(row["reason"]) if row["reason"] is not None else None, result_source=str(row["result_source"]) if row["result_source"] is not None else None, entry_quality=str(row["entry_quality"]) if row["entry_quality"] is not None else None, indicator_profile=str(row["indicator_profile"]) if row["indicator_profile"] is not None else None, mfe_pct=float(row["mfe_pct"] or 0.0), mae_pct=float(row["mae_pct"] or 0.0))
+        return StoredSignal(
+            id=int(row["id"]),
+            created_at=str(row["created_at"]),
+            okx_symbol=str(row["okx_symbol"]),
+            toobit_symbol=str(row["toobit_symbol"]),
+            symbol_name=str(row["symbol_name"] or ""),
+            direction=str(row["direction"]),
+            entry=float(row["entry"]),
+            tp=float(row["tp"]),
+            sl=float(row["sl"]),
+            score=int(row["score"]),
+            ai_confidence=int(row["ai_confidence"] or 0),
+            ai_experience=int(row["ai_experience"] or 0),
+            signal_type=str(row["signal_type"]),
+            hunter_type=str(row["hunter_type"] or "ordinary"),
+            status=str(row["status"]),
+            real_status=str(row["real_status"]),
+            message_id=int(row["message_id"]) if row["message_id"] is not None else None,
+            result_message_id=int(row["result_message_id"]) if row["result_message_id"] is not None else None,
+            order_id=str(row["order_id"]) if row["order_id"] is not None else None,
+            approx_pnl=float(row["approx_pnl"]) if row["approx_pnl"] is not None else None,
+            real_pnl=float(row["real_pnl"]) if row["real_pnl"] is not None else None,
+            margin_usdt=float(row["margin_usdt"] or 0.0),
+            leverage=int(row["leverage"] or 1),
+            net_edge=float(row["net_edge"] or 0.0),
+            estimated_profit_usdt=float(row["estimated_profit_usdt"] or 0.0),
+            estimated_net_profit_usdt=float(row["estimated_net_profit_usdt"] or 0.0),
+            estimated_profit_pct=float(row["estimated_profit_pct"] or 0.0),
+            risk_reward=float(row["risk_reward"] or 0.0),
+            reason=str(row["reason"]) if row["reason"] is not None else None,
+            result_source=str(row["result_source"]) if row["result_source"] is not None else None,
+            entry_quality=str(row["entry_quality"]) if row["entry_quality"] is not None else None,
+            indicator_profile=str(row["indicator_profile"]) if row["indicator_profile"] is not None else None,
+            mfe_pct=float(row["mfe_pct"] or 0.0),
+            mae_pct=float(row["mae_pct"] or 0.0),
+            exit_price=float(row["exit_price"]) if row["exit_price"] is not None else None,
+            ai_exit_reason=str(row["ai_exit_reason"]) if row["ai_exit_reason"] is not None else None,
+            ai_exit_status=str(row["ai_exit_status"]) if row["ai_exit_status"] is not None else None,
+            ai_exit_score=int(row["ai_exit_score"] or 0),
+            target_zone_reached=bool(row["target_zone_reached"] or 0),
+            giveback_pct=float(row["giveback_pct"] or 0.0),
+            market_mode=str(row["market_mode"]) if row["market_mode"] is not None else None,
+            candle_pattern=str(row["candle_pattern"]) if row["candle_pattern"] is not None else None,
+            entry_precision_pct=float(row["entry_precision_pct"] or 0.0),
+        )

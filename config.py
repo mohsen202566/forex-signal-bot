@@ -117,6 +117,22 @@ MIN_SCALP_SL_PCT = _env_float("MIN_SCALP_SL_PCT", default=0.0012)
 MIN_SCALP_TP_PCT = _env_float("MIN_SCALP_TP_PCT", default=0.0018)
 MAX_SCALP_SL_PCT = _env_float("MAX_SCALP_SL_PCT", default=0.0200)
 
+# AI Exit / Hold Wave: SL is hard protection; TP is a mental target zone.
+AI_EXIT_ENABLED = _env_bool("AI_EXIT_ENABLED", default=True)
+AI_EXIT_MIN_ACTIVE_SECONDS = _env_int("AI_EXIT_MIN_ACTIVE_SECONDS", default=8)
+AI_EXIT_TARGET_ZONE_RATIO = _env_float("AI_EXIT_TARGET_ZONE_RATIO", default=0.72)
+AI_EXIT_MIN_PROFIT_PCT = _env_float("AI_EXIT_MIN_PROFIT_PCT", default=0.0010)
+AI_EXIT_MIN_GIVEBACK_PCT = _env_float("AI_EXIT_MIN_GIVEBACK_PCT", default=0.00045)
+AI_EXIT_GIVEBACK_RATIO = _env_float("AI_EXIT_GIVEBACK_RATIO", default=0.32)
+AI_EXIT_RISKY_GIVEBACK_RATIO = _env_float("AI_EXIT_RISKY_GIVEBACK_RATIO", default=0.24)
+AI_EXIT_BREAKEVEN_BUFFER_PCT = _env_float("AI_EXIT_BREAKEVEN_BUFFER_PCT", default=0.00012)
+AI_EXIT_DAMAGE_CONTROL_ADVERSE_RATIO = _env_float("AI_EXIT_DAMAGE_CONTROL_ADVERSE_RATIO", default=0.42)
+AI_EXIT_REVERSAL_TICKS = _env_int("AI_EXIT_REVERSAL_TICKS", default=3)
+AI_EXIT_RECENT_TICKS = _env_int("AI_EXIT_RECENT_TICKS", default=12)
+
+# Real Toobit protection: SL stays on exchange. TP is normally AI-managed, not fixed on exchange.
+TOOBIT_PLACE_REAL_TP = _env_bool("TOOBIT_PLACE_REAL_TP", default=False)
+
 LEARNING_DAYS = _env_int("LEARNING_DAYS", default=10)
 AI_MIN_SAMPLES_SOFT = 5
 AI_MIN_SAMPLES_MEDIUM = 10

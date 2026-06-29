@@ -63,3 +63,33 @@ python3 -m py_compile *.py
 sudo systemctl restart forex-bot.service
 journalctl -u forex-bot.service -f
 ```
+
+## AI Exit / Hold Wave
+
+در این نسخه TP دیگر خروج اجباری نیست؛ TP به عنوان Target Zone ذهنی استفاده می‌شود. ربات پوزیشن باز را ثانیه‌به‌ثانیه با قیمت OKX تماشا می‌کند:
+
+- اگر موج سالم باشد، حتی بعد از عبور از Target Zone هیچ کاری نمی‌کند.
+- اگر ضعف واقعی، برگشت چندثانیه‌ای، giveback سنگین یا تغییر جهت ببیند، خروج AI می‌زند.
+- SL محافظ واقعی باقی می‌ماند.
+- برای Real، به صورت پیش‌فرض فقط SL روی Toobit ثبت می‌شود و TP ثابت ثبت نمی‌شود تا AI بتواند موج را نگه دارد.
+
+وضعیت‌های جدید نتیجه:
+
+- `AI_EXIT_PROFIT`
+- `AI_EXIT_BREAKEVEN`
+- `AI_EXIT_DAMAGE_CONTROL`
+- `AI_EXIT_REVERSAL`
+
+تنظیمات مهم `.env`:
+
+```env
+AI_EXIT_ENABLED=true
+AI_EXIT_MIN_ACTIVE_SECONDS=8
+AI_EXIT_TARGET_ZONE_RATIO=0.72
+AI_EXIT_MIN_PROFIT_PCT=0.0010
+AI_EXIT_GIVEBACK_RATIO=0.32
+AI_EXIT_RISKY_GIVEBACK_RATIO=0.24
+AI_EXIT_DAMAGE_CONTROL_ADVERSE_RATIO=0.42
+TOOBIT_PLACE_REAL_TP=false
+TOOBIT_CLOSE_VERIFY_SECONDS=2
+```
