@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Callable
+
+import requests
 
 import config
 import messages_fa
@@ -11,6 +14,8 @@ from storage import JsonStorage, StoredSignal
 from strategy import Signal
 from toobit_client import ClosePositionResult, ToobitClient, get_client
 from utils import estimate_pnl_usdt, pct_change
+
+logger = logging.getLogger("forex-bot")
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,7 @@ class TradeManager:
     def __init__(self, storage: JsonStorage, toobit: ToobitClient | None = None) -> None:
         self.storage = storage
         self.toobit = toobit or get_client()
+        self._smart_exit_confirmations: dict[str, int] = {}
 
     def open_from_signal(self, signal: Signal) -> TradeOpenResult:
         """Register every signal for performance tracking.
@@ -82,37 +88,134 @@ class TradeManager:
         return TradeOpenResult(True, sig.signal_id, result.reason, sig.execution_mode)
 
     def monitor_open_positions(self, send_reply: Callable[[StoredSignal, str], None] | None = None) -> None:
-        for sig in list(self.storage.open_signals()):
-            try:
-                price = self.toobit.get_mark_price(sig.toobit_symbol)
-            except Exception:
+        """Check every open signal and send TP/SL/smart-exit results.
+
+        ریشه مشکل قبلی این بود که برای هر سیگنال باز، قیمت از Toobit گرفته می‌شد.
+        وقتی تعداد سیگنال‌ها زیاد می‌شد یا Toobit خطای 429/اتصال می‌داد، exception خورده می‌شد
+        و مانیتور بی‌صدا از روی سیگنال رد می‌شد؛ برای همین همه سیگنال‌ها OPEN می‌ماندند.
+
+        این نسخه قیمت‌های OKX SWAP را یک‌جا می‌گیرد و فقط اگر OKX قیمت نداد، سراغ Toobit می‌رود.
+        """
+        signals = list(self.storage.open_signals())
+        if not signals:
+            return
+
+        okx_prices = self._fetch_okx_swap_prices()
+        logger.info("مانیتور نتیجه: %s سیگنال باز | قیمت‌های OKX: %s", len(signals), len(okx_prices))
+
+        for sig in signals:
+            price = okx_prices.get(str(sig.base_symbol).upper())
+            if price is None:
+                try:
+                    price = float(self.toobit.get_mark_price(sig.toobit_symbol))
+                except Exception as exc:
+                    logger.warning("مانیتور نتیجه: قیمت %s دریافت نشد: %s", sig.base_symbol, exc)
+                    continue
+
+            if price <= 0:
+                logger.warning("مانیتور نتیجه: قیمت نامعتبر برای %s: %s", sig.base_symbol, price)
                 continue
-            pnl_pct = pct_change(sig.entry_price, price, sig.direction)
-            pnl_usdt = estimate_pnl_usdt(sig.margin_usdt, sig.leverage, pnl_pct)
+
+            logger.info(
+                "مانیتور نتیجه %s %s: price=%s entry=%s tp=%s sl=%s",
+                sig.base_symbol,
+                sig.direction,
+                price,
+                sig.entry_price,
+                sig.tp_price,
+                sig.sl_price,
+            )
 
             if self._hit_tp(sig, price):
+                exit_price = float(sig.tp_price)
+                pnl_pct = pct_change(sig.entry_price, exit_price, sig.direction)
+                pnl_usdt = estimate_pnl_usdt(sig.margin_usdt, sig.leverage, pnl_pct)
                 self.storage.close_signal(sig.signal_id, "tp", pnl_usdt)
+                self._smart_exit_confirmations.pop(sig.signal_id, None)
+                logger.info("نتیجه سیگنال %s: TP", sig.signal_id)
                 if send_reply:
-                    send_reply(sig, messages_fa.result_tp(sig, price, pnl_pct, pnl_usdt))
+                    send_reply(sig, messages_fa.result_tp(sig, exit_price, pnl_pct, pnl_usdt))
                 continue
 
             if self._hit_sl(sig, price):
+                exit_price = float(sig.sl_price)
+                pnl_pct = pct_change(sig.entry_price, exit_price, sig.direction)
+                pnl_usdt = estimate_pnl_usdt(sig.margin_usdt, sig.leverage, pnl_pct)
                 stop_reason = self._stop_reason(sig)
                 self.storage.close_signal(sig.signal_id, "sl", pnl_usdt)
+                self._smart_exit_confirmations.pop(sig.signal_id, None)
+                logger.info("نتیجه سیگنال %s: SL", sig.signal_id)
                 if send_reply:
-                    send_reply(sig, messages_fa.result_sl(sig, price, pnl_pct, pnl_usdt, stop_reason))
+                    send_reply(sig, messages_fa.result_sl(sig, exit_price, pnl_pct, pnl_usdt, stop_reason))
                 continue
+
+            pnl_pct = pct_change(sig.entry_price, price, sig.direction)
+            pnl_usdt = estimate_pnl_usdt(sig.margin_usdt, sig.leverage, pnl_pct)
 
             if config.SMART_EXIT_ENABLED:
                 smart_reason = self._smart_exit_reason(sig, price, pnl_pct)
-                if smart_reason:
-                    if sig.execution_mode == "real":
-                        close_result = self.close_position_with_toobit_confirm(sig)
-                        if not close_result.closed:
-                            continue
-                    self.storage.close_signal(sig.signal_id, "smart_exit", pnl_usdt)
-                    if send_reply:
-                        send_reply(sig, messages_fa.result_smart_exit(sig, price, pnl_pct, pnl_usdt, smart_reason))
+                if not smart_reason:
+                    self._smart_exit_confirmations.pop(sig.signal_id, None)
+                    continue
+
+                confirmations = self._smart_exit_confirmations.get(sig.signal_id, 0) + 1
+                self._smart_exit_confirmations[sig.signal_id] = confirmations
+                required = max(1, int(config.SMART_EXIT_CONFIRMATIONS_REQUIRED))
+                logger.info(
+                    "خروج هوشمند %s تایید %s/%s | pnl=%s",
+                    sig.signal_id,
+                    confirmations,
+                    required,
+                    pnl_pct,
+                )
+                if confirmations < required:
+                    continue
+
+                if sig.execution_mode == "real":
+                    close_result = self.close_position_with_toobit_confirm(sig)
+                    if not close_result.closed:
+                        logger.warning("خروج هوشمند واقعی %s انجام نشد: %s", sig.signal_id, close_result.reason)
+                        continue
+
+                self.storage.close_signal(sig.signal_id, "smart_exit", pnl_usdt)
+                self._smart_exit_confirmations.pop(sig.signal_id, None)
+                logger.info("نتیجه سیگنال %s: SMART_EXIT", sig.signal_id)
+                if send_reply:
+                    send_reply(sig, messages_fa.result_smart_exit(sig, price, pnl_pct, pnl_usdt, smart_reason))
+
+    def _fetch_okx_swap_prices(self) -> dict[str, float]:
+        """Return latest OKX USDT-SWAP prices as {BASE: last_price}."""
+        url = f"{config.OKX_BASE_URL}/api/v5/market/tickers"
+        try:
+            response = requests.get(
+                url,
+                params={"instType": "SWAP"},
+                timeout=config.OKX_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            logger.warning("مانیتور نتیجه: دریافت قیمت‌های OKX ناموفق بود: %s", exc)
+            return {}
+
+        if str(payload.get("code", "0")) != "0":
+            logger.warning("مانیتور نتیجه: پاسخ OKX نامعتبر بود: %s", payload)
+            return {}
+
+        prices: dict[str, float] = {}
+        for item in payload.get("data", []):
+            inst_id = str(item.get("instId") or "").upper()
+            if not inst_id.endswith("-USDT-SWAP"):
+                continue
+            try:
+                last = float(item.get("last") or item.get("markPx") or 0)
+            except (TypeError, ValueError):
+                continue
+            if last <= 0:
+                continue
+            base = inst_id.removesuffix("-USDT-SWAP")
+            prices[base] = last
+        return prices
 
     def close_position_with_toobit_confirm(self, sig: StoredSignal) -> ClosePositionResult:
         result = self.toobit.close_position_market(symbol=sig.toobit_symbol, direction=sig.direction)  # uploaded client stays unchanged
