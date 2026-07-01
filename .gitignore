@@ -1,6 +1,4 @@
-# =========================
 # Python
-# =========================
 __pycache__/
 *.py[cod]
 *.pyo
@@ -8,66 +6,49 @@ __pycache__/
 *.so
 .Python
 
-# =========================
 # Virtual environment
-# =========================
 venv/
 .env/
 env/
 ENV/
 
-# =========================
 # Secrets
-# =========================
 .env
 .env.local
 .env.production
 .env.*
-
-# Keep example env file
 !.env.example
 
-# =========================
 # Logs
-# =========================
 *.log
 logs/
 log/
 
-# =========================
 # Runtime state / local data
-# =========================
+data/
 runtime_state.json
 signals.json
 trades.json
 learning_memory.json
 users.json
 
-# =========================
 # Database files
-# =========================
 *.db
 *.sqlite
 *.sqlite3
 *.db-journal
 
-# =========================
 # Backups / archives
-# =========================
 *.zip
 *.tar
 *.tar.gz
 *.bak
 *.backup
 
-# =========================
 # IDE / editor
-# =========================
 .idea/
 .vscode/
 
-# =========================
 # OS files
-# =========================
 .DS_Store
 Thumbs.db
