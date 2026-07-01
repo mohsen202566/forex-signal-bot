@@ -176,10 +176,8 @@ class ForexBotApp:
         if message_id:
             self.storage.set_signal_message_id(open_result.signal_id, message_id)
 
-        stored = self.storage.state.signals.get(open_result.signal_id)
-        if stored:
-            stored.telegram_message_id = message_id
-            await self.telegram.reply_to_signal(stored, messages_fa.execution_status(stored, open_result.message))
+        # پیام وضعیت اجرا ارسال نمی‌شود؛ فقط سیگنال اصلی و نتیجه نهایی ریپلای می‌شوند.
+        # سیگنال همچنان در storage ثبت و مانیتور می‌شود.
 
     async def monitor_loop(self) -> None:
         loop = asyncio.get_running_loop()
