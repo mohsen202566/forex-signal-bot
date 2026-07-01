@@ -2,15 +2,8 @@ from __future__ import annotations
 
 import re
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 import config
 import messages_fa
@@ -46,6 +39,11 @@ def _first_int_from_text(text: str) -> int | None:
 
 
 class TelegramBot:
+    """Telegram text-command interface only.
+
+    هیچ دکمه/InlineKeyboard در این نسخه وجود ندارد. همه چیز فقط با متن فارسی کار می‌کند.
+    """
+
     def __init__(self, storage: JsonStorage, stats: StatsManager) -> None:
         self.storage = storage
         self.stats = stats
@@ -65,7 +63,6 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("stats", self.stats_cmd))
         self.app.add_handler(CommandHandler("reset_stats", self.reset_stats))
         self.app.add_handler(CommandHandler("delete_stats", self.delete_stats))
-        self.app.add_handler(CallbackQueryHandler(self.callback))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_message))
 
     def _panel_text(self) -> str:
@@ -73,25 +70,11 @@ class TelegramBot:
         paper_open = len(self.storage.paper_open_signals())
         return messages_fa.trade_panel(self.storage.state.settings, real_open=real_open, paper_open=paper_open)
 
-    @staticmethod
-    def _panel_keyboard() -> InlineKeyboardMarkup:
-        keyboard = [
-            [
-                InlineKeyboardButton("ترید فعال ✅", callback_data="trade_on"),
-                InlineKeyboardButton("ترید خاموش ⛔️", callback_data="trade_off"),
-            ],
-            [
-                InlineKeyboardButton("آمار 📊", callback_data="stats"),
-                InlineKeyboardButton("پنل ترید ⚙️", callback_data="panel"),
-            ],
-        ]
-        return InlineKeyboardMarkup(keyboard)
-
     async def _send_panel(self, update: Update, prefix: str | None = None) -> None:
         text = self._panel_text()
         if prefix:
             text = prefix + "\n\n" + text
-        await update.effective_chat.send_message(text, reply_markup=self._panel_keyboard())
+        await update.effective_chat.send_message(text)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_chat.send_message(messages_fa.start_message())
@@ -162,18 +145,15 @@ class TelegramBot:
         text = _norm_text(update.message.text if update.message else "")
         t = text.lower()
 
-        panel_words = {"ترید", "پنل", "پنل ترید", "وضعیت", "وضعیت ترید"}
-        stats_words = {"آمار", "امار", "گزارش", "استات", "stats"}
-        on_words = {"ترید فعال", "ترید روشن", "روشن کردن ترید", "فعال کردن ترید", "ترید رو روشن کن", "فعال"}
-        off_words = {"ترید خاموش", "خاموش کردن ترید", "غیرفعال کردن ترید", "ترید رو خاموش کن", "خاموش", "غیرفعال"}
+        panel_words = {"ترید", "پنل", "پنل ترید", "وضعیت", "وضعیت ترید", "پنل ترید من"}
+        stats_words = {"آمار", "امار", "گزارش", "استات", "stats", "آمار ربات", "امار ربات"}
+        on_words = {"ترید فعال", "ترید روشن", "روشن کردن ترید", "فعال کردن ترید", "ترید رو روشن کن", "ترید را روشن کن"}
+        off_words = {"ترید خاموش", "خاموش کردن ترید", "غیرفعال کردن ترید", "ترید رو خاموش کن", "ترید را خاموش کن"}
         reset_words = {"ریست آمار", "ریست امار", "صفر کردن آمار", "صفر کردن امار"}
         delete_words = {"حذف آمار", "حذف امار", "پاک کردن آمار", "پاک کردن امار"}
 
         if t in panel_words:
             await self._send_panel(update)
-            return
-        if t in stats_words:
-            await update.effective_chat.send_message(self.stats.summary_text())
             return
         if t in on_words:
             self.storage.update_settings(trade_enabled=True)
@@ -182,6 +162,9 @@ class TelegramBot:
         if t in off_words:
             self.storage.update_settings(trade_enabled=False)
             await self._send_panel(update, "⛔️ ترید خاموش شد.")
+            return
+        if t in stats_words:
+            await update.effective_chat.send_message(self.stats.summary_text())
             return
         if t in reset_words:
             self.stats.reset()
@@ -204,32 +187,17 @@ class TelegramBot:
 
         await update.effective_chat.send_message(
             "دستور نامشخص است.\n\n"
-            "دستورهای اصلی:\n"
+            "دستورهای اصلی متنی:\n"
             "ترید\n"
             "ترید فعال\n"
             "ترید خاموش\n"
             "آمار\n"
             "تنظیم مبلغ 10\n"
             "تنظیم لوریج 10\n"
-            "تنظیم حداکثر پوزیشن 3"
+            "تنظیم حداکثر پوزیشن 3\n"
+            "ریست آمار\n"
+            "حذف آمار"
         )
-
-    async def callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        query = update.callback_query
-        if not query:
-            return
-        await query.answer()
-        data = query.data
-        if data == "trade_on":
-            self.storage.update_settings(trade_enabled=True)
-            await query.edit_message_text(self._panel_text(), reply_markup=self._panel_keyboard())
-        elif data == "trade_off":
-            self.storage.update_settings(trade_enabled=False)
-            await query.edit_message_text(self._panel_text(), reply_markup=self._panel_keyboard())
-        elif data == "panel":
-            await query.edit_message_text(self._panel_text(), reply_markup=self._panel_keyboard())
-        elif data == "stats" and query.message:
-            await query.message.reply_text(self.stats.summary_text())
 
     async def send_signal(self, text: str) -> int | None:
         if not config.TELEGRAM_CHAT_ID:

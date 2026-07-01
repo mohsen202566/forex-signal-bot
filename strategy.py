@@ -83,13 +83,6 @@ class SimpleStrangeStrategy:
         if symbol_bias.direction is None:
             return NoSignal(base_symbol, "جهت روزانه ارز نامشخص است.")
 
-        btc_bias = self.daily_bias(btc_1d)
-        eth_bias = self.daily_bias(eth_1d)
-        if btc_bias.direction != symbol_bias.direction:
-            return NoSignal(base_symbol, "بیتکوین با جهت روزانه ارز هم‌جهت نیست.")
-        if eth_bias.direction != symbol_bias.direction:
-            return NoSignal(base_symbol, "اتریوم با جهت روزانه ارز هم‌جهت نیست.")
-
         entry = float(candles_5m[-1].close if candles_5m else candles_15m[-1].close)
         if entry <= 0:
             return NoSignal(base_symbol, "قیمت ورود معتبر نیست.")
@@ -114,7 +107,7 @@ class SimpleStrangeStrategy:
         # وقتی همه قفل‌های اصلی پاس شده‌اند، امتیاز فقط برای نمایش است و نباید دوباره سیگنال را کورکورانه رد کند.
         score = min(100, max(int(config.SIGNAL_THRESHOLD), raw_score))
 
-        reasons = symbol_bias.reasons + ["BTC و ETH روی 1D هم‌جهت هستند."] + entry_decision.reasons
+        reasons = symbol_bias.reasons + entry_decision.reasons
         reasons.append(f"تا TP روزانه {fmt_pct(tp_pct)} فضا وجود دارد و RR برابر {rr_value:.2f} است.")
         return Signal(
             base_symbol=base_symbol,

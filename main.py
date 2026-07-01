@@ -125,14 +125,8 @@ class ForexBotApp:
         logger.info("شروع اسکن: %s نماد", len(self.symbols))
         report = ScanReport()
 
-        try:
-            btc_1d = self.okx.get_candles("BTC-USDT-SWAP", "1D", 220)
-            eth_1d = self.okx.get_candles("ETH-USDT-SWAP", "1D", 220)
-        except Exception as exc:
-            logger.warning("دریافت BTC/ETH ناموفق بود: %s", exc)
-            report.errors += 1
-            report.reasons["دریافت BTC/ETH ناموفق بود."] += 1
-            return report
+        btc_1d: list = []
+        eth_1d: list = []
 
         for base in self.symbols:
             try:
