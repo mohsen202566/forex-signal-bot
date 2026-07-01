@@ -2,19 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
+from dataclasses import dataclass, field
 
 import config
 import messages_fa
 from okx_client import OKXClient
 from stats_manager import StatsManager
 from storage import JsonStorage
-from strategy import Signal, SimpleStrangeStrategy
+from strategy import NoSignal, Signal, SimpleStrangeStrategy
 from telegram_bot import TelegramBot
 from trade_manager import TradeManager
 from utils import normalize_base_symbol, okx_symbol, toobit_symbol
 
-logging.basicConfig(level=getattr(logging, config.LOG_LEVEL, logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
 logger = logging.getLogger("forex-bot")
+
+
+@dataclass
+class ScanReport:
+    signals: list[Signal] = field(default_factory=list)
+    rejected: int = 0
+    errors: int = 0
+    reasons: Counter[str] = field(default_factory=Counter)
 
 
 class ForexBotApp:
@@ -27,15 +40,19 @@ class ForexBotApp:
         self.telegram = TelegramBot(self.storage, self.stats)
         self.symbols: list[str] = []
         self._tasks_started = False
+        self._scanner_task: asyncio.Task | None = None
+        self._monitor_task: asyncio.Task | None = None
 
     def build_symbol_universe(self) -> list[str]:
         okx_symbols = self.okx.get_swap_symbols()
         toobit_symbols = self._get_toobit_symbols()
         final: list[str] = []
+
         for base in config.BASE_SYMBOL_WHITELIST:
             base = normalize_base_symbol(base)
             if okx_symbol(base) in okx_symbols and toobit_symbol(base) in toobit_symbols:
                 final.append(base)
+
         if len(final) < config.MIN_SYMBOLS_COUNT:
             logger.warning("تعداد نمادهای مشترک معتبر کمتر از حداقل است: %s", len(final))
         return final
@@ -47,6 +64,7 @@ class ForexBotApp:
         except Exception as exc:
             logger.warning("خواندن لیست نمادهای Toobit ناموفق بود؛ از whitelist تبدیل‌شده استفاده می‌شود: %s", exc)
             return {toobit_symbol(base) for base in config.BASE_SYMBOL_WHITELIST}
+
         symbols: set[str] = set()
         stack = [payload]
         while stack:
@@ -60,47 +78,62 @@ class ForexBotApp:
                 stack.extend(item)
         return symbols or {toobit_symbol(base) for base in config.BASE_SYMBOL_WHITELIST}
 
-    async def post_init(self, application) -> None:
-        """Start scanner/monitor inside Telegram's own event loop.
+    async def post_init(self, application) -> None:  # noqa: ANN001
+        """Start background loops in Telegram's active asyncio loop.
 
-        This avoids the classic python-telegram-bot error:
-        RuntimeError: This event loop is already running
+        مهم: از application.create_task استفاده نمی‌کنیم، چون روی بعضی نسخه‌های
+        python-telegram-bot قبل از run شدن Application هشدار می‌دهد و تسک‌ها
+        درست اجرا نمی‌شوند. asyncio.create_task روی loop فعال همین run_polling
+        پایدارتر است.
         """
         if self._tasks_started:
             return
         self._tasks_started = True
-        application.create_task(self.scan_loop())
-        application.create_task(self.monitor_loop())
+        self._scanner_task = asyncio.create_task(self.scan_loop(), name="forex-scan-loop")
+        self._monitor_task = asyncio.create_task(self.monitor_loop(), name="forex-monitor-loop")
         logger.info("Forex background loops started.")
 
     async def scan_loop(self) -> None:
-        try:
-            self.symbols = await asyncio.to_thread(self.build_symbol_universe)
-            logger.info("نمادهای فعال: %s", len(self.symbols))
-        except Exception as exc:
-            logger.warning("ساخت لیست نمادها ناموفق بود: %s", exc)
-            self.symbols = []
-
         while True:
             try:
-                signals = await asyncio.to_thread(self.scan_once_collect)
-                for signal in signals:
+                if not self.symbols:
+                    self.symbols = await asyncio.to_thread(self.build_symbol_universe)
+                    logger.info("نمادهای فعال: %s", len(self.symbols))
+
+                report = await asyncio.to_thread(self.scan_once_collect)
+                logger.info(
+                    "پایان اسکن | سیگنال: %s | رد شده: %s | خطا: %s",
+                    len(report.signals),
+                    report.rejected,
+                    report.errors,
+                )
+                for reason, count in report.reasons.most_common(10):
+                    logger.info("دلیل رد %s نماد: %s", count, reason)
+
+                for signal in report.signals:
                     await self.handle_signal(signal)
+
             except Exception as exc:
-                logger.warning("خطا در حلقه اسکن: %s", exc)
+                logger.exception("خطا در حلقه اسکن: %s", exc)
+
             await asyncio.sleep(config.FULL_SCAN_SECONDS)
 
-    def scan_once_collect(self) -> list[Signal]:
+    def scan_once_collect(self) -> ScanReport:
         if not self.symbols:
             self.symbols = self.build_symbol_universe()
+
+        logger.info("شروع اسکن: %s نماد", len(self.symbols))
+        report = ScanReport()
+
         try:
             btc_1d = self.okx.get_candles("BTC-USDT-SWAP", "1D", 220)
             eth_1d = self.okx.get_candles("ETH-USDT-SWAP", "1D", 220)
         except Exception as exc:
             logger.warning("دریافت BTC/ETH ناموفق بود: %s", exc)
-            return []
+            report.errors += 1
+            report.reasons["دریافت BTC/ETH ناموفق بود."] += 1
+            return report
 
-        signals: list[Signal] = []
         for base in self.symbols:
             try:
                 c1d = self.okx.get_candles(okx_symbol(base), "1D", 220)
@@ -115,14 +148,31 @@ class ForexBotApp:
                     eth_1d=eth_1d,
                 )
                 if isinstance(result, Signal):
-                    signals.append(result)
+                    report.signals.append(result)
+                    logger.info(
+                        "سیگنال پیدا شد: %s %s entry=%s tp=%s sl=%s score=%s",
+                        result.base_symbol,
+                        result.direction,
+                        result.entry_price,
+                        result.tp_price,
+                        result.sl_price,
+                        result.score,
+                    )
+                else:
+                    report.rejected += 1
+                    reason = result.reason if isinstance(result, NoSignal) else "رد شد."
+                    report.reasons[reason] += 1
             except Exception as exc:
-                logger.debug("خطا در بررسی %s: %s", base, exc)
-        return signals
+                report.errors += 1
+                logger.warning("خطا در بررسی %s: %s", base, exc)
+
+        return report
 
     async def handle_signal(self, signal: Signal) -> None:
-        # Prevent repeated signals for the same symbol while an older signal is still waiting for TP/SL/smart-exit.
+        # تا وقتی سیگنال قبلی همان ارز باز است، سیگنال تکراری نده.
+        # نتیجه همان سیگنال قبلی همچنان مانیتور و ریپلای می‌شود.
         if self.storage.has_open_signal(signal.base_symbol):
+            logger.info("سیگنال %s رد شد؛ یک سیگنال باز برای همین ارز وجود دارد.", signal.base_symbol)
             return
 
         settings = self.storage.state.settings
@@ -145,16 +195,14 @@ class ForexBotApp:
     async def monitor_loop(self) -> None:
         loop = asyncio.get_running_loop()
 
-        def send_reply(sig, text):
-            loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(self.telegram.reply_to_signal(sig, text))
-            )
+        def send_reply(sig, text):  # noqa: ANN001
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(self.telegram.reply_to_signal(sig, text)))
 
         while True:
             try:
                 await asyncio.to_thread(self.trade_manager.monitor_open_positions, send_reply)
             except Exception as exc:
-                logger.warning("خطا در مانیتور پوزیشن: %s", exc)
+                logger.exception("خطا در مانیتور پوزیشن: %s", exc)
             await asyncio.sleep(config.MONITOR_INTERVAL_SECONDS)
 
     def run(self) -> None:
