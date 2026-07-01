@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 
 import config
 import messages_fa
@@ -27,6 +26,7 @@ class ForexBotApp:
         self.trade_manager = TradeManager(self.storage)
         self.telegram = TelegramBot(self.storage, self.stats)
         self.symbols: list[str] = []
+        self._tasks_started = False
 
     def build_symbol_universe(self) -> list[str]:
         okx_symbols = self.okx.get_swap_symbols()
@@ -60,14 +60,37 @@ class ForexBotApp:
                 stack.extend(item)
         return symbols or {toobit_symbol(base) for base in config.BASE_SYMBOL_WHITELIST}
 
+    async def post_init(self, application) -> None:
+        """Start scanner/monitor inside Telegram's own event loop.
+
+        This avoids the classic python-telegram-bot error:
+        RuntimeError: This event loop is already running
+        """
+        if self._tasks_started:
+            return
+        self._tasks_started = True
+        application.create_task(self.scan_loop())
+        application.create_task(self.monitor_loop())
+        logger.info("Forex background loops started.")
+
     async def scan_loop(self) -> None:
-        self.symbols = self.build_symbol_universe()
-        logger.info("نمادهای فعال: %s", len(self.symbols))
+        try:
+            self.symbols = await asyncio.to_thread(self.build_symbol_universe)
+            logger.info("نمادهای فعال: %s", len(self.symbols))
+        except Exception as exc:
+            logger.warning("ساخت لیست نمادها ناموفق بود: %s", exc)
+            self.symbols = []
+
         while True:
-            await self.scan_once()
+            try:
+                signals = await asyncio.to_thread(self.scan_once_collect)
+                for signal in signals:
+                    await self.handle_signal(signal)
+            except Exception as exc:
+                logger.warning("خطا در حلقه اسکن: %s", exc)
             await asyncio.sleep(config.FULL_SCAN_SECONDS)
 
-    async def scan_once(self) -> None:
+    def scan_once_collect(self) -> list[Signal]:
         if not self.symbols:
             self.symbols = self.build_symbol_universe()
         try:
@@ -75,17 +98,27 @@ class ForexBotApp:
             eth_1d = self.okx.get_candles("ETH-USDT-SWAP", "1D", 220)
         except Exception as exc:
             logger.warning("دریافت BTC/ETH ناموفق بود: %s", exc)
-            return
+            return []
+
+        signals: list[Signal] = []
         for base in self.symbols:
             try:
                 c1d = self.okx.get_candles(okx_symbol(base), "1D", 220)
                 c15 = self.okx.get_candles(okx_symbol(base), "15m", 120)
                 c5 = self.okx.get_candles(okx_symbol(base), "5m", 120)
-                result = self.strategy.evaluate(base_symbol=base, candles_1d=c1d, candles_15m=c15, candles_5m=c5, btc_1d=btc_1d, eth_1d=eth_1d)
+                result = self.strategy.evaluate(
+                    base_symbol=base,
+                    candles_1d=c1d,
+                    candles_15m=c15,
+                    candles_5m=c5,
+                    btc_1d=btc_1d,
+                    eth_1d=eth_1d,
+                )
                 if isinstance(result, Signal):
-                    await self.handle_signal(result)
+                    signals.append(result)
             except Exception as exc:
                 logger.debug("خطا در بررسی %s: %s", base, exc)
+        return signals
 
     async def handle_signal(self, signal: Signal) -> None:
         # Prevent repeated signals for the same symbol while an older signal is still waiting for TP/SL/smart-exit.
@@ -96,7 +129,7 @@ class ForexBotApp:
         text = messages_fa.signal_message(signal, settings.margin_usdt, settings.leverage)
         message_id = await self.telegram.send_signal(text)
 
-        open_result = self.trade_manager.open_from_signal(signal)
+        open_result = await asyncio.to_thread(self.trade_manager.open_from_signal, signal)
         if not open_result.signal_id:
             logger.info("سیگنال ثبت نشد: %s", open_result.message)
             return
@@ -106,7 +139,6 @@ class ForexBotApp:
 
         stored = self.storage.state.signals.get(open_result.signal_id)
         if stored:
-            # Use the freshly assigned message id for an immediate execution-status reply.
             stored.telegram_message_id = message_id
             await self.telegram.reply_to_signal(stored, messages_fa.execution_status(stored, open_result.message))
 
@@ -120,23 +152,13 @@ class ForexBotApp:
 
         while True:
             try:
-                self.trade_manager.monitor_open_positions(send_reply=send_reply)
+                await asyncio.to_thread(self.trade_manager.monitor_open_positions, send_reply)
             except Exception as exc:
                 logger.warning("خطا در مانیتور پوزیشن: %s", exc)
             await asyncio.sleep(config.MONITOR_INTERVAL_SECONDS)
 
     def run(self) -> None:
-        background_loop = asyncio.new_event_loop()
-
-        def _run_background_loop() -> None:
-            asyncio.set_event_loop(background_loop)
-            background_loop.create_task(self.scan_loop())
-            background_loop.create_task(self.monitor_loop())
-            background_loop.run_forever()
-
-        thread = threading.Thread(target=_run_background_loop, daemon=True)
-        thread.start()
-        self.telegram.run_polling()
+        self.telegram.run_polling(post_init=self.post_init)
 
 
 if __name__ == "__main__":
