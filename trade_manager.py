@@ -90,40 +90,61 @@ class TradeManager:
     def monitor_open_positions(self, send_reply: Callable[[StoredSignal, str], None] | None = None) -> None:
         """Check every open signal and send TP/SL/smart-exit results.
 
-        ریشه مشکل قبلی این بود که برای هر سیگنال باز، قیمت از Toobit گرفته می‌شد.
-        وقتی تعداد سیگنال‌ها زیاد می‌شد یا Toobit خطای 429/اتصال می‌داد، exception خورده می‌شد
-        و مانیتور بی‌صدا از روی سیگنال رد می‌شد؛ برای همین همه سیگنال‌ها OPEN می‌ماندند.
-
-        این نسخه قیمت‌های OKX SWAP را یک‌جا می‌گیرد و فقط اگر OKX قیمت نداد، سراغ Toobit می‌رود.
+        قانون منبع قیمت:
+        - پوزیشن واقعی Toobit با قیمت Toobit مانیتور می‌شود.
+        - سیگنال عادی/نمایشی با قیمت OKX SWAP مانیتور می‌شود.
         """
         signals = list(self.storage.open_signals())
         if not signals:
             return
 
-        okx_prices = self._fetch_okx_swap_prices()
-        logger.info("مانیتور نتیجه: %s سیگنال باز | قیمت‌های OKX: %s", len(signals), len(okx_prices))
+        paper_signals = [sig for sig in signals if sig.execution_mode != "real"]
+        okx_prices = self._fetch_okx_swap_prices() if paper_signals else {}
+        logger.info(
+            "مانیتور نتیجه: %s سیگنال باز | واقعی: %s | نمایشی: %s | قیمت‌های OKX: %s",
+            len(signals),
+            len(signals) - len(paper_signals),
+            len(paper_signals),
+            len(okx_prices),
+        )
 
         for sig in signals:
-            price = okx_prices.get(str(sig.base_symbol).upper())
-            if price is None:
+            price_source = "Toobit" if sig.execution_mode == "real" else "OKX"
+            price: float | None = None
+
+            if sig.execution_mode == "real":
                 try:
                     price = float(self.toobit.get_mark_price(sig.toobit_symbol))
                 except Exception as exc:
-                    logger.warning("مانیتور نتیجه: قیمت %s دریافت نشد: %s", sig.base_symbol, exc)
+                    logger.warning(
+                        "مانیتور نتیجه: قیمت واقعی %s از Toobit دریافت نشد: %s",
+                        sig.base_symbol,
+                        exc,
+                    )
+                    continue
+            else:
+                price = okx_prices.get(str(sig.base_symbol).upper())
+                if price is None:
+                    logger.warning(
+                        "مانیتور نتیجه: قیمت نمایشی %s از OKX دریافت نشد.",
+                        sig.base_symbol,
+                    )
                     continue
 
-            if price <= 0:
-                logger.warning("مانیتور نتیجه: قیمت نامعتبر برای %s: %s", sig.base_symbol, price)
+            if price is None or price <= 0:
+                logger.warning("مانیتور نتیجه: قیمت نامعتبر برای %s از %s: %s", sig.base_symbol, price_source, price)
                 continue
 
             logger.info(
-                "مانیتور نتیجه %s %s: price=%s entry=%s tp=%s sl=%s",
+                "مانیتور نتیجه %s %s [%s]: price=%s entry=%s tp=%s sl=%s mode=%s",
                 sig.base_symbol,
                 sig.direction,
+                price_source,
                 price,
                 sig.entry_price,
                 sig.tp_price,
                 sig.sl_price,
+                sig.execution_mode,
             )
 
             if self._hit_tp(sig, price):
@@ -132,7 +153,7 @@ class TradeManager:
                 pnl_usdt = estimate_pnl_usdt(sig.margin_usdt, sig.leverage, pnl_pct)
                 self.storage.close_signal(sig.signal_id, "tp", pnl_usdt)
                 self._smart_exit_confirmations.pop(sig.signal_id, None)
-                logger.info("نتیجه سیگنال %s: TP", sig.signal_id)
+                logger.info("نتیجه سیگنال %s: TP [%s]", sig.signal_id, price_source)
                 if send_reply:
                     send_reply(sig, messages_fa.result_tp(sig, exit_price, pnl_pct, pnl_usdt))
                 continue
@@ -144,7 +165,7 @@ class TradeManager:
                 stop_reason = self._stop_reason(sig)
                 self.storage.close_signal(sig.signal_id, "sl", pnl_usdt)
                 self._smart_exit_confirmations.pop(sig.signal_id, None)
-                logger.info("نتیجه سیگنال %s: SL", sig.signal_id)
+                logger.info("نتیجه سیگنال %s: SL [%s]", sig.signal_id, price_source)
                 if send_reply:
                     send_reply(sig, messages_fa.result_sl(sig, exit_price, pnl_pct, pnl_usdt, stop_reason))
                 continue
@@ -162,11 +183,12 @@ class TradeManager:
                 self._smart_exit_confirmations[sig.signal_id] = confirmations
                 required = max(1, int(config.SMART_EXIT_CONFIRMATIONS_REQUIRED))
                 logger.info(
-                    "خروج هوشمند %s تایید %s/%s | pnl=%s",
+                    "خروج هوشمند %s تایید %s/%s | pnl=%s | source=%s",
                     sig.signal_id,
                     confirmations,
                     required,
                     pnl_pct,
+                    price_source,
                 )
                 if confirmations < required:
                     continue
@@ -179,7 +201,7 @@ class TradeManager:
 
                 self.storage.close_signal(sig.signal_id, "smart_exit", pnl_usdt)
                 self._smart_exit_confirmations.pop(sig.signal_id, None)
-                logger.info("نتیجه سیگنال %s: SMART_EXIT", sig.signal_id)
+                logger.info("نتیجه سیگنال %s: SMART_EXIT [%s]", sig.signal_id, price_source)
                 if send_reply:
                     send_reply(sig, messages_fa.result_smart_exit(sig, price, pnl_pct, pnl_usdt, smart_reason))
 
