@@ -86,7 +86,7 @@ class TelegramBot:
     async def _send_text(self, update: Update, text: str) -> None:
         if update.effective_chat is None:
             return
-        await update.effective_chat.send_message(text, reply_markup=ReplyKeyboardRemove(remove_keyboard=True))
+        await update.effective_chat.send_message(text, reply_markup=ReplyKeyboardRemove())
 
     async def _send_direct(self, text: str, *, reply_to_message_id: int | None = None) -> int | None:
         if not config.TELEGRAM_CHAT_ID:
@@ -94,7 +94,7 @@ class TelegramBot:
         kwargs = {
             "chat_id": config.TELEGRAM_CHAT_ID,
             "text": text,
-            "reply_markup": ReplyKeyboardRemove(remove_keyboard=True),
+            "reply_markup": ReplyKeyboardRemove(),
         }
         if reply_to_message_id:
             kwargs["reply_to_message_id"] = reply_to_message_id
