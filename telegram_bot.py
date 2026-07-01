@@ -125,7 +125,9 @@ class TelegramBot:
             kwargs["reply_to_message_id"] = sig.telegram_message_id
         await self.app.bot.send_message(**kwargs)
 
-    def run_polling(self) -> None:
+    def run_polling(self, post_init=None) -> None:
+        if post_init is not None:
+            self.app.post_init = post_init
         self.app.run_polling(close_loop=False)
 
     @staticmethod
