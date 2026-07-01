@@ -99,8 +99,13 @@ class ForexBotApp:
             logger.info("سیگنال بدون اجرای سفارش: %s", open_result.message)
 
     async def monitor_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+
         def send_reply(sig, text):
-            asyncio.run_coroutine_threadsafe(self.telegram.reply_to_signal(sig, text), asyncio.get_running_loop())
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self.telegram.reply_to_signal(sig, text))
+            )
+
         while True:
             try:
                 self.trade_manager.monitor_open_positions(send_reply=send_reply)
@@ -109,11 +114,15 @@ class ForexBotApp:
             await asyncio.sleep(config.MONITOR_INTERVAL_SECONDS)
 
     def run(self) -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.create_task(self.scan_loop())
-        loop.create_task(self.monitor_loop())
-        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        background_loop = asyncio.new_event_loop()
+
+        def _run_background_loop() -> None:
+            asyncio.set_event_loop(background_loop)
+            background_loop.create_task(self.scan_loop())
+            background_loop.create_task(self.monitor_loop())
+            background_loop.run_forever()
+
+        thread = threading.Thread(target=_run_background_loop, daemon=True)
         thread.start()
         self.telegram.run_polling()
 
