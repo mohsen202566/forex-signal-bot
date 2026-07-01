@@ -3,14 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import time
 
 import config
 import messages_fa
 from okx_client import OKXClient
 from stats_manager import StatsManager
 from storage import JsonStorage
-from strategy import NoSignal, Signal, SimpleStrangeStrategy
+from strategy import Signal, SimpleStrangeStrategy
 from telegram_bot import TelegramBot
 from trade_manager import TradeManager
 from utils import normalize_base_symbol, okx_symbol, toobit_symbol
@@ -89,14 +88,27 @@ class ForexBotApp:
                 logger.debug("خطا در بررسی %s: %s", base, exc)
 
     async def handle_signal(self, signal: Signal) -> None:
+        # Prevent repeated signals for the same symbol while an older signal is still waiting for TP/SL/smart-exit.
+        if self.storage.has_open_signal(signal.base_symbol):
+            return
+
         settings = self.storage.state.settings
         text = messages_fa.signal_message(signal, settings.margin_usdt, settings.leverage)
         message_id = await self.telegram.send_signal(text)
+
         open_result = self.trade_manager.open_from_signal(signal)
-        if open_result.signal_id and message_id:
+        if not open_result.signal_id:
+            logger.info("سیگنال ثبت نشد: %s", open_result.message)
+            return
+
+        if message_id:
             self.storage.set_signal_message_id(open_result.signal_id, message_id)
-        if not open_result.opened:
-            logger.info("سیگنال بدون اجرای سفارش: %s", open_result.message)
+
+        stored = self.storage.state.signals.get(open_result.signal_id)
+        if stored:
+            # Use the freshly assigned message id for an immediate execution-status reply.
+            stored.telegram_message_id = message_id
+            await self.telegram.reply_to_signal(stored, messages_fa.execution_status(stored, open_result.message))
 
     async def monitor_loop(self) -> None:
         loop = asyncio.get_running_loop()

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
@@ -34,24 +31,33 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("delete_stats", self.delete_stats))
         self.app.add_handler(CallbackQueryHandler(self.callback))
 
+    def _panel_text(self) -> str:
+        real_open = len(self.storage.real_open_signals())
+        paper_open = len(self.storage.paper_open_signals())
+        return messages_fa.trade_panel(self.storage.state.settings, real_open=real_open, paper_open=paper_open)
+
+    @staticmethod
+    def _panel_keyboard() -> InlineKeyboardMarkup:
+        keyboard = [
+            [InlineKeyboardButton("روشن کردن ترید ✅", callback_data="trade_on"), InlineKeyboardButton("خاموش کردن ترید ⛔️", callback_data="trade_off")],
+            [InlineKeyboardButton("نمایش آمار 📊", callback_data="stats"), InlineKeyboardButton("پنل ترید ⚙️", callback_data="panel")],
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_chat.send_message(messages_fa.start_message())
         await self.panel(update, context)
 
     async def panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        keyboard = [
-            [InlineKeyboardButton("روشن کردن ترید ✅", callback_data="trade_on"), InlineKeyboardButton("خاموش کردن ترید ⛔️", callback_data="trade_off")],
-            [InlineKeyboardButton("نمایش آمار 📊", callback_data="stats")],
-        ]
-        await update.effective_chat.send_message(messages_fa.trade_panel(self.storage.state.settings), reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.effective_chat.send_message(self._panel_text(), reply_markup=self._panel_keyboard())
 
     async def trade_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self.storage.update_settings(trade_enabled=True)
-        await update.effective_chat.send_message("✅ ترید روشن شد.")
+        await update.effective_chat.send_message("✅ ترید روشن شد.\n\n" + self._panel_text(), reply_markup=self._panel_keyboard())
 
     async def trade_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self.storage.update_settings(trade_enabled=False)
-        await update.effective_chat.send_message("⛔️ ترید خاموش شد.")
+        await update.effective_chat.send_message("⛔️ ترید خاموش شد.\n\n" + self._panel_text(), reply_markup=self._panel_keyboard())
 
     async def amount(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         value = self._first_number(context.args)
@@ -59,7 +65,7 @@ class TelegramBot:
             await update.effective_chat.send_message(f"مبلغ باید بین {config.TRADE_AMOUNT_MIN:g} تا {config.TRADE_AMOUNT_MAX:g} USDT باشد.")
             return
         self.storage.update_settings(margin_usdt=float(value))
-        await update.effective_chat.send_message(f"✅ مبلغ معامله روی {value:g} USDT تنظیم شد.")
+        await update.effective_chat.send_message(f"✅ مبلغ معامله روی {value:g} USDT تنظیم شد.\n\n" + self._panel_text(), reply_markup=self._panel_keyboard())
 
     async def leverage(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         value = self._first_int(context.args)
@@ -67,7 +73,7 @@ class TelegramBot:
             await update.effective_chat.send_message(f"لوریج باید بین {config.LEVERAGE_MIN} تا {config.LEVERAGE_MAX} باشد.")
             return
         self.storage.update_settings(leverage=int(value))
-        await update.effective_chat.send_message(f"✅ لوریج روی {value}x تنظیم شد.")
+        await update.effective_chat.send_message(f"✅ لوریج روی {value}x تنظیم شد.\n\n" + self._panel_text(), reply_markup=self._panel_keyboard())
 
     async def max_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         value = self._first_int(context.args)
@@ -75,7 +81,7 @@ class TelegramBot:
             await update.effective_chat.send_message(f"حداکثر پوزیشن باید بین {config.MAX_POSITIONS_MIN} تا {config.MAX_POSITIONS_MAX} باشد.")
             return
         self.storage.update_settings(max_positions=int(value))
-        await update.effective_chat.send_message(f"✅ حداکثر پوزیشن روی {value} تنظیم شد.")
+        await update.effective_chat.send_message(f"✅ حداکثر پوزیشن روی {value} تنظیم شد.\n\n" + self._panel_text(), reply_markup=self._panel_keyboard())
 
     async def stats_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_chat.send_message(self.stats.summary_text())
@@ -96,11 +102,13 @@ class TelegramBot:
         data = query.data
         if data == "trade_on":
             self.storage.update_settings(trade_enabled=True)
-            await query.edit_message_text(messages_fa.trade_panel(self.storage.state.settings))
+            await query.edit_message_text(self._panel_text(), reply_markup=self._panel_keyboard())
         elif data == "trade_off":
             self.storage.update_settings(trade_enabled=False)
-            await query.edit_message_text(messages_fa.trade_panel(self.storage.state.settings))
-        elif data == "stats":
+            await query.edit_message_text(self._panel_text(), reply_markup=self._panel_keyboard())
+        elif data == "panel":
+            await query.edit_message_text(self._panel_text(), reply_markup=self._panel_keyboard())
+        elif data == "stats" and query.message:
             await query.message.reply_text(self.stats.summary_text())
 
     async def send_signal(self, text: str) -> int | None:
@@ -112,7 +120,10 @@ class TelegramBot:
     async def reply_to_signal(self, sig: StoredSignal, text: str) -> None:
         if not config.TELEGRAM_CHAT_ID:
             return
-        await self.app.bot.send_message(chat_id=config.TELEGRAM_CHAT_ID, text=text, reply_to_message_id=sig.telegram_message_id)
+        kwargs = {"chat_id": config.TELEGRAM_CHAT_ID, "text": text}
+        if sig.telegram_message_id:
+            kwargs["reply_to_message_id"] = sig.telegram_message_id
+        await self.app.bot.send_message(**kwargs)
 
     def run_polling(self) -> None:
         self.app.run_polling(close_loop=False)

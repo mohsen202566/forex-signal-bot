@@ -31,6 +31,10 @@ class StoredSignal:
     telegram_message_id: int | None = None
     opened_at_ms: int | None = None
     status: str = "open"
+    # real = opened on Toobit. Everything else is tracked as paper/virtual so the bot performance is still measurable.
+    execution_mode: str = "real"
+    execution_reason: str = ""
+    order_id: str | None = None
 
 
 @dataclass
@@ -73,6 +77,11 @@ class JsonStorage:
     def _init_stats(self) -> None:
         defaults = {
             "signals": 0,
+            "real_signals": 0,
+            "paper_signals": 0,
+            "trade_off_signals": 0,
+            "blocked_slot_signals": 0,
+            "order_failed_signals": 0,
             "tp": 0,
             "sl": 0,
             "smart_exit": 0,
@@ -95,6 +104,17 @@ class JsonStorage:
         with self._lock:
             self.state.signals[signal.signal_id] = signal
             self.state.stats["signals"] = int(self.state.stats.get("signals", 0)) + 1
+            if signal.execution_mode == "real":
+                self.state.stats["real_signals"] = int(self.state.stats.get("real_signals", 0)) + 1
+            else:
+                self.state.stats["paper_signals"] = int(self.state.stats.get("paper_signals", 0)) + 1
+                if signal.execution_mode == "paper_trade_off":
+                    self.state.stats["trade_off_signals"] = int(self.state.stats.get("trade_off_signals", 0)) + 1
+                elif signal.execution_mode == "paper_slots_full":
+                    self.state.stats["blocked_slot_signals"] = int(self.state.stats.get("blocked_slot_signals", 0)) + 1
+                elif signal.execution_mode == "paper_order_failed":
+                    self.state.stats["order_failed_signals"] = int(self.state.stats.get("order_failed_signals", 0)) + 1
+
             by_symbol = self.state.stats.setdefault("by_symbol", {})
             by_symbol.setdefault(signal.base_symbol, {"signals": 0, "tp": 0, "sl": 0, "smart_exit": 0})
             by_symbol[signal.base_symbol]["signals"] += 1
@@ -109,8 +129,8 @@ class JsonStorage:
     def close_signal(self, signal_id: str, status: str, pnl_usdt: float = 0.0) -> StoredSignal | None:
         with self._lock:
             sig = self.state.signals.get(signal_id)
-            if not sig:
-                return None
+            if not sig or sig.status != "open":
+                return sig
             sig.status = status
             if status in {"tp", "sl", "smart_exit", "manual_close"}:
                 self.state.stats[status] = int(self.state.stats.get(status, 0)) + 1
@@ -124,6 +144,29 @@ class JsonStorage:
 
     def open_signals(self) -> list[StoredSignal]:
         return [s for s in self.state.signals.values() if s.status == "open"]
+
+    def real_open_signals(self) -> list[StoredSignal]:
+        return [s for s in self.open_signals() if s.execution_mode == "real"]
+
+    def paper_open_signals(self) -> list[StoredSignal]:
+        return [s for s in self.open_signals() if s.execution_mode != "real"]
+
+    def slot_status(self) -> tuple[int, int, int]:
+        used = len(self.real_open_signals())
+        total = int(self.state.settings.max_positions)
+        free = max(0, total - used)
+        return used, total, free
+
+    def has_open_signal(self, base_symbol: str, direction: str | None = None) -> bool:
+        base = base_symbol.upper().strip()
+        direction = direction.upper().strip() if direction else None
+        for sig in self.open_signals():
+            if sig.base_symbol.upper() != base:
+                continue
+            if direction and sig.direction.upper() != direction:
+                continue
+            return True
+        return False
 
     def reset_stats(self) -> None:
         with self._lock:
