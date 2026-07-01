@@ -27,7 +27,7 @@ def start_message() -> str:
         "بازار واقعی: Crypto Futures\n"
         "تحلیل: OKX\n"
         "اجرا: Toobit\n"
-        "دستورات و پنل ترید فارسی هستند."
+        "دکمه‌ها حذف شده‌اند؛ ربات فقط دستور متنی فارسی می‌فهمد."
     )
 
 
@@ -44,16 +44,17 @@ def trade_panel(settings: BotSettings, real_open: int = 0, paper_open: int = 0) 
         f"حداکثر پوزیشن واقعی: {settings.max_positions}\n"
         f"اسلات واقعی: {real_open}/{total_slots} | خالی: {free_slots} | وضعیت: {slot_state}\n"
         f"سیگنال‌های نمایشی باز: {paper_open}\n\n"
-        "نکته: وقتی ترید خاموش باشد یا اسلات واقعی پر باشد، سیگنال‌ها باز هم به صورت نمایشی مانیتور می‌شوند و نتیجه‌شان ثبت می‌شود.\n\n"
-        "دستورات:\n"
-        "/trade_on روشن کردن ترید\n"
-        "/trade_off خاموش کردن ترید\n"
-        "/amount 10 تنظیم مبلغ معامله\n"
-        "/leverage 10 تنظیم لوریج\n"
-        "/max_positions 3 تنظیم حداکثر پوزیشن\n"
-        "/stats نمایش آمار\n"
-        "/reset_stats ریست آمار\n"
-        "/delete_stats حذف آمار"
+        "نکته: وقتی ترید خاموش باشد یا اسلات واقعی پر باشد، سیگنال‌ها باز هم نمایشی مانیتور می‌شوند و نتیجه‌شان ثبت می‌شود.\n\n"
+        "دستورات متنی:\n"
+        "ترید\n"
+        "ترید فعال\n"
+        "ترید خاموش\n"
+        "تنظیم مبلغ 10\n"
+        "تنظیم لوریج 10\n"
+        "تنظیم حداکثر پوزیشن 3\n"
+        "آمار\n"
+        "ریست آمار\n"
+        "حذف آمار"
     )
 
 
@@ -65,7 +66,7 @@ def signal_message(signal: Signal, margin_usdt: float, leverage: int) -> str:
         "🚨 سیگنال Forex\n\n"
         f"ارز: {signal.display_symbol}\n"
         f"جهت: {direction_fa(signal.direction)}\n"
-        "تایید جهت: 1D + هم‌جهتی BTC/ETH\n"
+        "تایید جهت: 1D\n"
         "ورود: 15M / 5M\n"
         "نوع اجرا: بعد از بررسی ترید/اسلات در ریپلای همین سیگنال اعلام می‌شود.\n\n"
         f"ورود: {fmt_num(signal.entry_price, 8)}\n"
@@ -147,3 +148,19 @@ def result_smart_exit(signal: StoredSignal, exit_price: float, pnl_pct: float, p
 
 def error_message(text: str) -> str:
     return f"⚠️ {text}"
+
+
+def commands_help() -> str:
+    return (
+        "دستور نامشخص است.\n\n"
+        "دستورهای متنی ربات Forex:\n"
+        "ترید\n"
+        "ترید فعال\n"
+        "ترید خاموش\n"
+        "آمار\n"
+        "تنظیم مبلغ 10\n"
+        "تنظیم لوریج 10\n"
+        "تنظیم حداکثر پوزیشن 3\n"
+        "ریست آمار\n"
+        "حذف آمار"
+    )

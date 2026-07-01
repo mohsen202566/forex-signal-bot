@@ -125,9 +125,6 @@ class ForexBotApp:
         logger.info("شروع اسکن: %s نماد", len(self.symbols))
         report = ScanReport()
 
-        btc_1d: list = []
-        eth_1d: list = []
-
         for base in self.symbols:
             try:
                 c1d = self.okx.get_candles(okx_symbol(base), "1D", 220)
@@ -138,8 +135,6 @@ class ForexBotApp:
                     candles_1d=c1d,
                     candles_15m=c15,
                     candles_5m=c5,
-                    btc_1d=btc_1d,
-                    eth_1d=eth_1d,
                 )
                 if isinstance(result, Signal):
                     report.signals.append(result)

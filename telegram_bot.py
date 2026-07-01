@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
-from telegram import Update
+from telegram import ReplyKeyboardRemove, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 import config
@@ -10,38 +11,54 @@ import messages_fa
 from stats_manager import StatsManager
 from storage import JsonStorage, StoredSignal
 
-
 _FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
 
 def _norm_text(text: str | None) -> str:
-    text = (text or "").translate(_FA_DIGITS)
-    text = text.replace("ي", "ی").replace("ك", "ک")
-    text = re.sub(r"\s+", " ", text.strip())
-    return text
+    """Normalize Persian/Arabic text so natural commands work reliably."""
+    value = (text or "").translate(_FA_DIGITS)
+    value = value.replace("ي", "ی").replace("ك", "ک")
+    value = value.replace("‌", " ")
+    value = re.sub(r"[\t\r\n]+", " ", value)
+    value = re.sub(r"\s+", " ", value.strip())
+    return value
 
 
-def _first_number_from_text(text: str) -> float | None:
-    m = re.search(r"[-+]?\d+(?:\.\d+)?", _norm_text(text))
-    if not m:
+def _norm_key(text: str | None) -> str:
+    value = _norm_text(text).lower()
+    value = value.replace("/", " ")
+    value = value.replace("_", " ")
+    value = re.sub(r"[!؟?،,:;؛()\[\]{}]+", " ", value)
+    value = re.sub(r"\s+", " ", value.strip())
+    return value
+
+
+def _first_number_from_text(text: str | None) -> float | None:
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", _norm_text(text))
+    if not match:
         return None
     try:
-        return float(m.group(0))
+        return float(match.group(0))
     except ValueError:
         return None
 
 
-def _first_int_from_text(text: str) -> int | None:
+def _first_int_from_text(text: str | None) -> int | None:
     value = _first_number_from_text(text)
     if value is None:
         return None
     return int(value)
 
 
-class TelegramBot:
-    """Telegram text-command interface only.
+def _contains_all(text: str, words: Iterable[str]) -> bool:
+    return all(word in text for word in words)
 
-    هیچ دکمه/InlineKeyboard در این نسخه وجود ندارد. همه چیز فقط با متن فارسی کار می‌کند.
+
+class TelegramBot:
+    """Pure text Telegram interface.
+
+    این کلاس هیچ ReplyKeyboardMarkup یا InlineKeyboardMarkup نمی‌سازد.
+    برای پاک شدن دکمه‌های قدیمی، همه پیام‌ها با ReplyKeyboardRemove ارسال می‌شوند.
     """
 
     def __init__(self, storage: JsonStorage, stats: StatsManager) -> None:
@@ -50,11 +67,12 @@ class TelegramBot:
         if not config.TELEGRAM_BOT_TOKEN:
             raise RuntimeError("TELEGRAM_BOT_TOKEN تنظیم نشده است.")
         self.app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
-        self._register()
+        self._register_handlers()
 
-    def _register(self) -> None:
+    def _register_handlers(self) -> None:
         self.app.add_handler(CommandHandler("start", self.start))
         self.app.add_handler(CommandHandler("panel", self.panel))
+        self.app.add_handler(CommandHandler("trade", self.panel))
         self.app.add_handler(CommandHandler("trade_on", self.trade_on))
         self.app.add_handler(CommandHandler("trade_off", self.trade_off))
         self.app.add_handler(CommandHandler("amount", self.amount))
@@ -65,6 +83,24 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("delete_stats", self.delete_stats))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_message))
 
+    async def _send_text(self, update: Update, text: str) -> None:
+        if update.effective_chat is None:
+            return
+        await update.effective_chat.send_message(text, reply_markup=ReplyKeyboardRemove(remove_keyboard=True))
+
+    async def _send_direct(self, text: str, *, reply_to_message_id: int | None = None) -> int | None:
+        if not config.TELEGRAM_CHAT_ID:
+            return None
+        kwargs = {
+            "chat_id": config.TELEGRAM_CHAT_ID,
+            "text": text,
+            "reply_markup": ReplyKeyboardRemove(remove_keyboard=True),
+        }
+        if reply_to_message_id:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+        msg = await self.app.bot.send_message(**kwargs)
+        return msg.message_id
+
     def _panel_text(self) -> str:
         real_open = len(self.storage.real_open_signals())
         paper_open = len(self.storage.paper_open_signals())
@@ -73,11 +109,11 @@ class TelegramBot:
     async def _send_panel(self, update: Update, prefix: str | None = None) -> None:
         text = self._panel_text()
         if prefix:
-            text = prefix + "\n\n" + text
-        await update.effective_chat.send_message(text)
+            text = f"{prefix}\n\n{text}"
+        await self._send_text(update, text)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.effective_chat.send_message(messages_fa.start_message())
+        await self._send_text(update, messages_fa.start_message())
         await self._send_panel(update)
 
     async def panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -92,21 +128,31 @@ class TelegramBot:
         await self._send_panel(update, "⛔️ ترید خاموش شد.")
 
     async def amount(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        value = self._first_number(context.args)
-        await self._set_amount(update, value)
+        await self._set_amount(update, self._first_number(context.args))
 
     async def leverage(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        value = self._first_int(context.args)
-        await self._set_leverage(update, value)
+        await self._set_leverage(update, self._first_int(context.args))
 
     async def max_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        value = self._first_int(context.args)
-        await self._set_max_positions(update, value)
+        await self._set_max_positions(update, self._first_int(context.args))
+
+    async def stats_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._send_text(update, self.stats.summary_text())
+
+    async def reset_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self.stats.reset()
+        await self._send_text(update, "✅ آمار ریست شد.")
+
+    async def delete_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self.stats.delete_all()
+        await self._send_text(update, "🗑 آمار و وضعیت ذخیره‌شده حذف شد.")
 
     async def _set_amount(self, update: Update, value: float | None) -> None:
         if value is None or not (config.TRADE_AMOUNT_MIN <= value <= config.TRADE_AMOUNT_MAX):
-            await update.effective_chat.send_message(
-                f"مبلغ باید بین {config.TRADE_AMOUNT_MIN:g} تا {config.TRADE_AMOUNT_MAX:g} USDT باشد.\nمثال: تنظیم مبلغ 10"
+            await self._send_text(
+                update,
+                f"مبلغ باید بین {config.TRADE_AMOUNT_MIN:g} تا {config.TRADE_AMOUNT_MAX:g} USDT باشد.\n"
+                "مثال: تنظیم مبلغ 10",
             )
             return
         self.storage.update_settings(margin_usdt=float(value))
@@ -114,8 +160,10 @@ class TelegramBot:
 
     async def _set_leverage(self, update: Update, value: int | None) -> None:
         if value is None or not (config.LEVERAGE_MIN <= value <= config.LEVERAGE_MAX):
-            await update.effective_chat.send_message(
-                f"لوریج باید بین {config.LEVERAGE_MIN} تا {config.LEVERAGE_MAX} باشد.\nمثال: تنظیم لوریج 10"
+            await self._send_text(
+                update,
+                f"لوریج باید بین {config.LEVERAGE_MIN} تا {config.LEVERAGE_MAX} باشد.\n"
+                "مثال: تنظیم لوریج 10",
             )
             return
         self.storage.update_settings(leverage=int(value))
@@ -123,95 +171,78 @@ class TelegramBot:
 
     async def _set_max_positions(self, update: Update, value: int | None) -> None:
         if value is None or not (config.MAX_POSITIONS_MIN <= value <= config.MAX_POSITIONS_MAX):
-            await update.effective_chat.send_message(
-                f"حداکثر پوزیشن باید بین {config.MAX_POSITIONS_MIN} تا {config.MAX_POSITIONS_MAX} باشد.\nمثال: تنظیم حداکثر پوزیشن 3"
+            await self._send_text(
+                update,
+                f"حداکثر پوزیشن باید بین {config.MAX_POSITIONS_MIN} تا {config.MAX_POSITIONS_MAX} باشد.\n"
+                "مثال: تنظیم حداکثر پوزیشن 3",
             )
             return
         self.storage.update_settings(max_positions=int(value))
         await self._send_panel(update, f"✅ حداکثر پوزیشن واقعی روی {value} تنظیم شد.")
 
-    async def stats_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.effective_chat.send_message(self.stats.summary_text())
-
-    async def reset_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self.stats.reset()
-        await update.effective_chat.send_message("✅ آمار ریست شد.")
-
-    async def delete_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self.stats.delete_all()
-        await update.effective_chat.send_message("🗑 آمار و وضعیت ذخیره‌شده حذف شد.")
-
     async def text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        text = _norm_text(update.message.text if update.message else "")
-        t = text.lower()
+        raw = update.message.text if update.message else ""
+        text = _norm_text(raw)
+        key = _norm_key(raw)
 
-        panel_words = {"ترید", "پنل", "پنل ترید", "وضعیت", "وضعیت ترید", "پنل ترید من"}
-        stats_words = {"آمار", "امار", "گزارش", "استات", "stats", "آمار ربات", "امار ربات"}
-        on_words = {"ترید فعال", "ترید روشن", "روشن کردن ترید", "فعال کردن ترید", "ترید رو روشن کن", "ترید را روشن کن"}
-        off_words = {"ترید خاموش", "خاموش کردن ترید", "غیرفعال کردن ترید", "ترید رو خاموش کن", "ترید را خاموش کن"}
-        reset_words = {"ریست آمار", "ریست امار", "صفر کردن آمار", "صفر کردن امار"}
-        delete_words = {"حذف آمار", "حذف امار", "پاک کردن آمار", "پاک کردن امار"}
-
-        if t in panel_words:
+        # Exact/natural panel commands. فقط نمایش پنل، بدون تغییر تنظیمات.
+        if key in {"ترید", "پنل", "پنل ترید", "وضعیت", "وضعیت ترید", "trade", "panel", "start"}:
             await self._send_panel(update)
             return
-        if t in on_words:
+
+        # Trade on/off. ترتیب مهم است؛ «ترید خاموش» نباید با «ترید» اشتباه شود.
+        if (
+            key in {"ترید فعال", "ترید روشن", "روشن کردن ترید", "فعال کردن ترید", "trade on"}
+            or _contains_all(key, ("ترید", "روشن"))
+            or _contains_all(key, ("ترید", "فعال"))
+        ):
             self.storage.update_settings(trade_enabled=True)
             await self._send_panel(update, "✅ ترید فعال شد.")
             return
-        if t in off_words:
+
+        if (
+            key in {"ترید خاموش", "خاموش کردن ترید", "غیر فعال کردن ترید", "غیرفعال کردن ترید", "trade off"}
+            or _contains_all(key, ("ترید", "خاموش"))
+            or _contains_all(key, ("ترید", "غیر فعال"))
+            or _contains_all(key, ("ترید", "غیرفعال"))
+        ):
             self.storage.update_settings(trade_enabled=False)
             await self._send_panel(update, "⛔️ ترید خاموش شد.")
             return
-        if t in stats_words:
-            await update.effective_chat.send_message(self.stats.summary_text())
-            return
-        if t in reset_words:
-            self.stats.reset()
-            await update.effective_chat.send_message("✅ آمار ریست شد.")
-            return
-        if t in delete_words:
-            self.stats.delete_all()
-            await update.effective_chat.send_message("🗑 آمار و وضعیت ذخیره‌شده حذف شد.")
+
+        if key in {"آمار", "امار", "گزارش", "استات", "stats", "آمار ربات", "امار ربات"}:
+            await self._send_text(update, self.stats.summary_text())
             return
 
-        if t.startswith(("تنظیم مبلغ", "مبلغ", "سرمایه", "حجم معامله")):
+        if key in {"ریست آمار", "ریست امار", "صفر کردن آمار", "صفر کردن امار", "reset stats"}:
+            self.stats.reset()
+            await self._send_text(update, "✅ آمار ریست شد.")
+            return
+
+        if key in {"حذف آمار", "حذف امار", "پاک کردن آمار", "پاک کردن امار", "delete stats"}:
+            self.stats.delete_all()
+            await self._send_text(update, "🗑 آمار و وضعیت ذخیره‌شده حذف شد.")
+            return
+
+        if key.startswith(("تنظیم مبلغ", "مبلغ", "سرمایه", "حجم معامله", "amount")):
             await self._set_amount(update, _first_number_from_text(text))
             return
-        if t.startswith(("تنظیم لوریج", "لوریج", "اهرم")):
+
+        if key.startswith(("تنظیم لوریج", "لوریج", "اهرم", "leverage")):
             await self._set_leverage(update, _first_int_from_text(text))
             return
-        if t.startswith(("تنظیم حداکثر پوزیشن", "حداکثر پوزیشن", "حداکثر پوزیشن ها", "اسلات", "اسلات ها")):
+
+        if key.startswith(("تنظیم حداکثر پوزیشن", "حداکثر پوزیشن", "حداکثر پوزیشن ها", "حداکثر پوزیشنها", "اسلات", "اسلات ها", "اسلاتها", "max positions")):
             await self._set_max_positions(update, _first_int_from_text(text))
             return
 
-        await update.effective_chat.send_message(
-            "دستور نامشخص است.\n\n"
-            "دستورهای اصلی متنی:\n"
-            "ترید\n"
-            "ترید فعال\n"
-            "ترید خاموش\n"
-            "آمار\n"
-            "تنظیم مبلغ 10\n"
-            "تنظیم لوریج 10\n"
-            "تنظیم حداکثر پوزیشن 3\n"
-            "ریست آمار\n"
-            "حذف آمار"
-        )
+        await self._send_text(update, messages_fa.commands_help())
 
     async def send_signal(self, text: str) -> int | None:
-        if not config.TELEGRAM_CHAT_ID:
-            return None
-        msg = await self.app.bot.send_message(chat_id=config.TELEGRAM_CHAT_ID, text=text)
-        return msg.message_id
+        return await self._send_direct(text)
 
     async def reply_to_signal(self, sig: StoredSignal, text: str) -> None:
-        if not config.TELEGRAM_CHAT_ID:
-            return
-        kwargs = {"chat_id": config.TELEGRAM_CHAT_ID, "text": text}
-        if sig.telegram_message_id:
-            kwargs["reply_to_message_id"] = sig.telegram_message_id
-        await self.app.bot.send_message(**kwargs)
+        await self._send_direct(text, reply_to_message_id=sig.telegram_message_id)
 
     def run_polling(self, post_init=None) -> None:  # noqa: ANN001
         if post_init is not None:
@@ -222,12 +253,8 @@ class TelegramBot:
     def _first_number(args: list[str]) -> float | None:
         if not args:
             return None
-        try:
-            return float(str(args[0]).translate(_FA_DIGITS))
-        except ValueError:
-            return None
+        return _first_number_from_text(" ".join(args))
 
     @staticmethod
     def _first_int(args: list[str]) -> int | None:
-        value = TelegramBot._first_number(args)
-        return int(value) if value is not None else None
+        return _first_int_from_text(" ".join(args or []))

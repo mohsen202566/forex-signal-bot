@@ -76,8 +76,8 @@ class SimpleStrangeStrategy:
         candles_1d: list[Candle],
         candles_15m: list[Candle],
         candles_5m: list[Candle],
-        btc_1d: list[Candle],
-        eth_1d: list[Candle],
+        btc_1d: list[Candle] | None = None,
+        eth_1d: list[Candle] | None = None,
     ) -> SignalResult:
         symbol_bias = self.daily_bias(candles_1d)
         if symbol_bias.direction is None:
