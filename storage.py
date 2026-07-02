@@ -118,6 +118,7 @@ class Storage:
             self._set_default(conn, "margin_usdt", str(DEFAULT_MARGIN_USDT))
             self._set_default(conn, "leverage", str(DEFAULT_LEVERAGE))
             self._set_default(conn, "max_positions", str(DEFAULT_MAX_POSITIONS))
+            self._set_default(conn, "auto_signals_enabled", "1")
 
     def _set_default(self, conn: sqlite3.Connection, key: str, value: str) -> None:
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
@@ -136,6 +137,12 @@ class Storage:
 
     def set_trade_enabled(self, enabled: bool) -> None:
         self._set_setting("trade_enabled", "1" if enabled else "0")
+
+    def auto_signals_enabled(self) -> bool:
+        return self._get_setting("auto_signals_enabled", "1") == "1"
+
+    def set_auto_signals_enabled(self, enabled: bool) -> None:
+        self._set_setting("auto_signals_enabled", "1" if enabled else "0")
 
     def margin_usdt(self) -> float:
         return float(self._get_setting("margin_usdt", str(DEFAULT_MARGIN_USDT)))

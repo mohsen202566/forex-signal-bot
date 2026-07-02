@@ -23,6 +23,7 @@ class CreatedSignal:
 @dataclass(frozen=True)
 class PanelData:
     trade_enabled: bool
+    auto_signals_enabled: bool
     wallet_margin_usdt: float | None
     wallet_error: str | None
     exchange_open_positions: int | None
@@ -109,7 +110,7 @@ class TradeManager:
         max_positions = self.storage.max_positions()
         filled = self.storage.active_real_count()
         pending = self.storage.pending_real_count()
-        return PanelData(self.storage.trade_enabled(), wallet, wallet_error, positions, orders, exchange_error, self.storage.margin_usdt(), self.storage.leverage(), max_positions, filled, max(0, max_positions - filled), pending, real_pnl, stats)
+        return PanelData(self.storage.trade_enabled(), self.storage.auto_signals_enabled(), wallet, wallet_error, positions, orders, exchange_error, self.storage.margin_usdt(), self.storage.leverage(), max_positions, filled, max(0, max_positions - filled), pending, real_pnl, stats)
 
     async def _cached_exchange_data(self) -> tuple[float | None, str | None, int | None, int | None, str | None, float | None]:
         now = time.monotonic()

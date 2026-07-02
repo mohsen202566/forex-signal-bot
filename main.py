@@ -39,6 +39,9 @@ async def analyze_symbol(okx: OkxDataClient, brain: AIBrain, symbol: MarketSymbo
 async def scanner_loop(okx: OkxDataClient, brain: AIBrain, trade_manager: TradeManager, ui: TelegramBotUI, storage: Storage) -> None:
     while True:
         try:
+            if not storage.auto_signals_enabled():
+                await asyncio.sleep(SCANNER_SECONDS)
+                continue
             context_cache = await load_context(okx)
             items = []
             for symbol in ACTIVE_SYMBOLS:
