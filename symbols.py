@@ -39,9 +39,9 @@ MAIN_SYMBOLS: tuple[MarketSymbol, ...] = (
     MarketSymbol("ALGO", "ALGO-USDT-SWAP", "ALGO-SWAP-USDT"),
     MarketSymbol("SAND", "SAND-USDT-SWAP", "SAND-SWAP-USDT"),
     MarketSymbol("MANA", "MANA-USDT-SWAP", "MANA-SWAP-USDT"),
-    MarketSymbol("GRT", "GRT-USDT-SWAP", "GRT-SWAP-USDT"),
-    MarketSymbol("EOS", "EOS-USDT-SWAP", "EOS-SWAP-USDT"),
-    MarketSymbol("SEI", "SEI-USDT-SWAP", "SEI-SWAP-USDT"),
+    MarketSymbol("WLD", "WLD-USDT-SWAP", "WLD-SWAP-USDT"),
+    MarketSymbol("ENS", "ENS-USDT-SWAP", "ENS-SWAP-USDT"),
+    MarketSymbol("LDO", "LDO-USDT-SWAP", "LDO-SWAP-USDT"),
 )
 
 CONTEXT_SYMBOLS: tuple[MarketSymbol, ...] = (

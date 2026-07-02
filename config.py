@@ -14,6 +14,8 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 OKX_BASE_URL = os.getenv("OKX_BASE_URL", "https://www.okx.com").rstrip("/")
 OKX_CANDLE_LIMIT = int(os.getenv("OKX_CANDLE_LIMIT", "300"))
 OKX_TIMEOUT_SECONDS = int(os.getenv("OKX_TIMEOUT_SECONDS", "12"))
+MIN_ENTRY_CANDLES = int(os.getenv("MIN_ENTRY_CANDLES", "205"))
+MIN_HTF_CANDLES = int(os.getenv("MIN_HTF_CANDLES", "60"))
 
 TIMEFRAME_ENTRY = "5m"
 TIMEFRAME_1H = "1H"

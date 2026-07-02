@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from config import MIN_ENTRY_CANDLES
 from okx_data import Candle
 
 
@@ -74,8 +75,8 @@ class IndicatorSnapshot:
 
 
 def calculate_indicators(candles: list[Candle]) -> IndicatorSnapshot:
-    if len(candles) < 220:
-        raise RuntimeError("برای اندیکاتورهای 5m حداقل 220 کندل لازم است.")
+    if len(candles) < MIN_ENTRY_CANDLES:
+        raise RuntimeError(f"برای اندیکاتورهای 5m حداقل {MIN_ENTRY_CANDLES} کندل لازم است؛ دریافت شد: {len(candles)}")
     closes = [c.close for c in candles]
     highs = [c.high for c in candles]
     lows = [c.low for c in candles]

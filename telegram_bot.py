@@ -34,6 +34,10 @@ class TelegramBotUI:
                 await message.reply_text(self.stats_text())
             elif low in {"هوش", "هوش مصنوعی", "ai", "AI".lower()}:
                 await message.reply_text(self.ai_text())
+            elif low in {"اسکن", "وضعیت اسکن", "scan"}:
+                await message.reply_text(self.scan_text())
+            elif low in {"ردها", "دلایل رد", "rejects", "reject"}:
+                await message.reply_text(self.rejects_text())
             elif low in {"ترید روشن", "trade on"}:
                 self.storage.set_trade_enabled(True)
                 await message.reply_text("ترید واقعی روشن شد.")
@@ -130,7 +134,7 @@ class TelegramBotUI:
             f"ترید | اتو سیگنال روشن | اتو سیگنال خاموش\n"
             f"ترید روشن | ترید خاموش\n"
             f"ترید دلار 10 | ترید لوریج 8 | حداکثر پوزیشن 5\n"
-            f"آمار | هوش | حذف آمار"
+            f"آمار | هوش | اسکن | ردها | حذف آمار"
         )
 
     def stats_text(self) -> str:
@@ -144,6 +148,37 @@ class TelegramBotUI:
             f"WinRate: {stats['win_rate']:.1f}%\n"
             f"سود/ضرر کل: {money(stats['pnl'])}"
         )
+
+    def scan_text(self) -> str:
+        data = self.storage.scan_summary(minutes=60)
+        auto_status = "روشن 🟢" if data["auto_signals_enabled"] else "خاموش 🔴"
+        real_status = "روشن 🟢" if data["trade_enabled"] else "خاموش ⛔"
+        last = data["last_activity"] or "هنوز ثبت نشده"
+        return (
+            f"📡 وضعیت اتوسیگنال و اسکن\n"
+            f"اتوسیگنال: {auto_status}\n"
+            f"ترید واقعی: {real_status}\n"
+            f"آخرین فعالیت ثبت‌شده: {last}\n"
+            f"در 60 دقیقه اخیر:\n"
+            f"سیگنال صادرشده: {data['signals']}\n"
+            f"رد/خطای ثبت‌شده: {data['rejected']}\n"
+            f"ارزهای دارای رد/خطا: {data['symbols_with_rejects']}\n"
+            f"سیگنال‌های باز: {data['open']}\n\n"
+            f"برای دیدن دلیل‌ها بنویس: ردها"
+        )
+
+    def rejects_text(self) -> str:
+        rows = self.storage.latest_no_signals(limit=20)
+        if not rows:
+            return "📋 هنوز دلیل رد یا خطای اسکن ثبت نشده است. اگر اتوسیگنال روشن است چند دقیقه بعد دوباره بزن: ردها"
+        lines = ["📋 آخرین دلایل رد / خطای اسکن"]
+        for row in rows[:20]:
+            direction = row.get("direction") or "-"
+            symbol = row.get("symbol_name") or "-"
+            reason = str(row.get("reason") or "-").replace("\n", " ")[:220]
+            created = str(row.get("created_at") or "")[:19]
+            lines.append(f"{created} | {symbol} {direction}: {reason}")
+        return "\n".join(lines)
 
     def ai_text(self) -> str:
         data = self.storage.ai_summary()
@@ -165,4 +200,4 @@ class TelegramBotUI:
 
     @staticmethod
     def help_text() -> str:
-        return "دستورات: ترید/پنل، آمار، هوش، اتو سیگنال روشن، اتو سیگنال خاموش، ترید روشن، ترید خاموش، ترید دلار 10، ترید لوریج 8، حداکثر پوزیشن 5، حذف آمار"
+        return "دستورات: ترید/پنل، اسکن، ردها، آمار، هوش، اتو سیگنال روشن، اتو سیگنال خاموش، ترید روشن، ترید خاموش، ترید دلار 10، ترید لوریج 8، حداکثر پوزیشن 5، حذف آمار"

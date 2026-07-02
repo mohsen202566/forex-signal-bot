@@ -274,7 +274,37 @@ class Storage:
 
     def record_no_signal(self, symbol_name: str, direction: str | None, reason: str, features_key: str = "") -> None:
         with self._connect() as conn:
-            conn.execute("INSERT INTO no_signal_log(created_at, symbol_name, direction, reason, features_key) VALUES(?, ?, ?, ?, ?)", (now_utc().isoformat(), symbol_name, direction, reason, features_key))
+            conn.execute("INSERT INTO no_signal_log(created_at, symbol_name, direction, reason, features_key) VALUES(?, ?, ?, ?, ?)", (now_utc().isoformat(), symbol_name, direction, reason[:1000], features_key))
+
+    def latest_no_signals(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM no_signal_log ORDER BY id DESC LIMIT ?",
+                (int(max(1, min(limit, 100))),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def scan_summary(self, minutes: int = 60) -> dict[str, Any]:
+        since = (now_utc() - timedelta(minutes=minutes)).isoformat()
+        with self._connect() as conn:
+            rejects = conn.execute("SELECT COUNT(*) AS n FROM no_signal_log WHERE created_at>=?", (since,)).fetchone()
+            signals = conn.execute("SELECT COUNT(*) AS n FROM signals WHERE created_at>=?", (since,)).fetchone()
+            active = conn.execute("SELECT COUNT(*) AS n FROM signals WHERE status='OPEN'").fetchone()
+            last_reject = conn.execute("SELECT created_at FROM no_signal_log ORDER BY id DESC LIMIT 1").fetchone()
+            last_signal = conn.execute("SELECT created_at FROM signals ORDER BY id DESC LIMIT 1").fetchone()
+            symbols = conn.execute("SELECT COUNT(DISTINCT symbol_name) AS n FROM no_signal_log WHERE created_at>=?", (since,)).fetchone()
+        last_values = [row["created_at"] for row in (last_reject, last_signal) if row and row["created_at"]]
+        last_activity = max(last_values) if last_values else None
+        return {
+            "auto_signals_enabled": self.auto_signals_enabled(),
+            "trade_enabled": self.trade_enabled(),
+            "minutes": minutes,
+            "last_activity": last_activity,
+            "rejected": int(rejects["n"] or 0),
+            "signals": int(signals["n"] or 0),
+            "open": int(active["n"] or 0),
+            "symbols_with_rejects": int(symbols["n"] or 0),
+        }
 
     def get_range_profile(self, features_key: str) -> dict[str, Any] | None:
         with self._connect() as conn:

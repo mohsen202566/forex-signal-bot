@@ -5,7 +5,7 @@ from typing import Any
 
 import requests
 
-from config import OKX_BASE_URL, OKX_CANDLE_LIMIT, OKX_TIMEOUT_SECONDS, TIMEFRAMES
+from config import MIN_ENTRY_CANDLES, MIN_HTF_CANDLES, OKX_BASE_URL, OKX_CANDLE_LIMIT, OKX_TIMEOUT_SECONDS, TIMEFRAMES
 
 
 @dataclass(frozen=True)
@@ -28,10 +28,9 @@ class OkxDataClient:
     def get_candles(self, inst_id: str, timeframe: str, limit: int = OKX_CANDLE_LIMIT) -> list[Candle]:
         payload = self._get("/api/v5/market/candles", {"instId": inst_id, "bar": timeframe, "limit": str(limit)})
         candles = self._parse_candles(payload, inst_id, timeframe)
-        if len(candles) < 220 and timeframe == "5m":
-            raise RuntimeError(f"کندل کافی برای {inst_id} تایم {timeframe} نیست: {len(candles)}")
-        if len(candles) < 80 and timeframe != "5m":
-            raise RuntimeError(f"کندل کافی برای {inst_id} تایم {timeframe} نیست: {len(candles)}")
+        minimum = MIN_ENTRY_CANDLES if timeframe == "5m" else MIN_HTF_CANDLES
+        if len(candles) < minimum:
+            raise RuntimeError(f"کندل کافی برای {inst_id} تایم {timeframe} نیست: {len(candles)} / حداقل {minimum}")
         return candles
 
     def get_historical_candles(self, inst_id: str, timeframe: str, limit: int = 2000) -> list[Candle]:
@@ -86,6 +85,13 @@ class OkxDataClient:
         if response.status_code >= 400:
             raise RuntimeError(f"OKX HTTP {response.status_code}: {response.text[:300]}")
         payload = response.json()
-        if not isinstance(payload, dict) or str(payload.get("code", "0")) != "0":
-            raise RuntimeError(f"OKX error: {payload}")
+        if not isinstance(payload, dict):
+            raise RuntimeError("پاسخ OKX JSON معتبر نیست.")
+        code = str(payload.get("code", "0"))
+        if code != "0":
+            msg = str(payload.get("msg") or payload)
+            inst_id = params.get("instId", "")
+            if code == "51001" or "Instrument ID" in msg:
+                raise RuntimeError(f"نماد OKX نامعتبر یا غیرفعال است: {inst_id}")
+            raise RuntimeError(f"OKX error {code}: {msg}")
         return payload

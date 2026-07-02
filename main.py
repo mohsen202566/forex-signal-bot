@@ -55,6 +55,7 @@ async def scanner_loop(okx: OkxDataClient, brain: AIBrain, trade_manager: TradeM
                         storage.record_no_signal(symbol.name, decision.direction, decision.reason, decision.features_key)
                 except Exception as exc:
                     LOGGER.warning("scan error %s: %s", symbol.name, exc)
+                    storage.record_no_signal(symbol.name, None, f"خطای اسکن: {exc}", "")
             created = await trade_manager.create_signals_batch(items)
             for symbol, decision, created_signal in created:
                 await ui.send_signal(symbol_name=symbol.name, decision=decision, created=created_signal)
