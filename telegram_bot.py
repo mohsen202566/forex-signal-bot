@@ -28,7 +28,7 @@ class TelegramBotUI:
         text = normalize_digits(message.text.strip())
         low = text.lower()
         try:
-            if low in {"/start", "start", "پنل", "panel", "status"}:
+            if low in {"/start", "start", "پنل", "panel", "status", "ترید"}:
                 await message.reply_text(await self.panel_text())
             elif low in {"آمار", "stats"}:
                 await message.reply_text(self.stats_text())
@@ -39,7 +39,13 @@ class TelegramBotUI:
                 await message.reply_text("ترید واقعی روشن شد.")
             elif low in {"ترید خاموش", "trade off"}:
                 self.storage.set_trade_enabled(False)
-                await message.reply_text("ترید واقعی خاموش شد.")
+                await message.reply_text("ترید واقعی خاموش شد. اتوسیگنال طبق تنظیم خودش جداگانه کنترل می‌شود.")
+            elif low in {"اتو سیگنال روشن", "اتوسیگنال روشن", "سیگنال روشن", "auto signal on"}:
+                self.storage.set_auto_signals_enabled(True)
+                await message.reply_text("اتوسیگنال روشن شد؛ ربات اجازه دارد سیگنال Normal/Real جدید صادر کند.")
+            elif low in {"اتو سیگنال خاموش", "اتوسیگنال خاموش", "سیگنال خاموش", "auto signal off"}:
+                self.storage.set_auto_signals_enabled(False)
+                await message.reply_text("اتوسیگنال خاموش شد؛ سیگنال جدید صادر نمی‌شود، ولی پوزیشن‌ها و سیگنال‌های باز همچنان مانیتور می‌شوند.")
             elif low.startswith("ترید دلار") or low.startswith("margin"):
                 value = parse_float(text.split()[-1])
                 self.storage.set_margin_usdt(value)
@@ -105,16 +111,26 @@ class TelegramBotUI:
 
     async def panel_text(self) -> str:
         data = await self.trade_manager.panel_data()
+        auto_status = "روشن 🟢" if data.auto_signals_enabled else "خاموش 🔴"
+        real_status = "روشن 🟢" if data.trade_enabled else "خاموش ⛔"
         return (
-            f"🤖 {BOT_NAME}\n"
-            f"ترید واقعی: {'روشن' if data.trade_enabled else 'خاموش'}\n"
-            f"دلار ترید: {data.margin_usdt:.2f} USDT\n"
+            f"⚙️ پنل ترید {BOT_NAME}\n"
+            f"وضعیت اتوسیگنال: {auto_status}\n"
+            f"وضعیت ترید واقعی: {real_status}\n"
+            f"مبلغ معامله: {data.margin_usdt:.2f} USDT\n"
             f"لوریج: {data.leverage}x\n"
-            f"اسلات‌ها: {data.filled_slots}/{data.max_positions} پر | خالی {data.empty_slots} | درحال بازشدن {data.pending_slots}\n"
+            f"حداکثر پوزیشن واقعی: {data.max_positions}\n"
+            f"اسلات واقعی: {data.filled_slots}/{data.max_positions} | خالی {data.empty_slots} | درحال بازشدن {data.pending_slots}\n"
             f"موجودی Toobit: {money(data.wallet_margin_usdt)}\n"
             f"پوزیشن/سفارش صرافی: {data.exchange_open_positions}/{data.exchange_open_orders}\n"
             f"PNL امروز ربات: {money(float(data.today_stats.get('pnl', 0)))}\n"
-            f"TP/SL امروز: {data.today_stats.get('tp', 0)}/{data.today_stats.get('sl', 0)} | WinRate {data.today_stats.get('win_rate', 0):.1f}%"
+            f"TP/SL امروز: {data.today_stats.get('tp', 0)}/{data.today_stats.get('sl', 0)} | WinRate {data.today_stats.get('win_rate', 0):.1f}%\n\n"
+            f"نکته: اگر اتوسیگنال خاموش باشد سیگنال جدید صادر نمی‌شود؛ اما سیگنال‌های باز همچنان مانیتور و نتیجه‌شان ثبت می‌شود.\n\n"
+            f"دستورات مهم:\n"
+            f"ترید | اتو سیگنال روشن | اتو سیگنال خاموش\n"
+            f"ترید روشن | ترید خاموش\n"
+            f"ترید دلار 10 | ترید لوریج 8 | حداکثر پوزیشن 5\n"
+            f"آمار | هوش | حذف آمار"
         )
 
     def stats_text(self) -> str:
@@ -149,4 +165,4 @@ class TelegramBotUI:
 
     @staticmethod
     def help_text() -> str:
-        return "دستورات: پنل، آمار، هوش، ترید روشن، ترید خاموش، ترید دلار 10، ترید لوریج 8، حداکثر پوزیشن 5، حذف آمار"
+        return "دستورات: ترید/پنل، آمار، هوش، اتو سیگنال روشن، اتو سیگنال خاموش، ترید روشن، ترید خاموش، ترید دلار 10، ترید لوریج 8، حداکثر پوزیشن 5، حذف آمار"
