@@ -34,10 +34,6 @@ class TelegramBotUI:
                 await message.reply_text(self.stats_text())
             elif low in {"هوش", "هوش مصنوعی", "ai", "AI".lower()}:
                 await message.reply_text(self.ai_text())
-            elif low in {"اسکن", "وضعیت اسکن", "scan"}:
-                await message.reply_text(self.scan_text())
-            elif low in {"ردها", "دلایل رد", "rejects", "reject"}:
-                await message.reply_text(self.rejects_text())
             elif low in {"ترید روشن", "trade on"}:
                 self.storage.set_trade_enabled(True)
                 await message.reply_text("ترید واقعی روشن شد.")
@@ -75,19 +71,24 @@ class TelegramBotUI:
     async def send_signal(self, *, symbol_name: str, decision: SignalDecision, created: CreatedSignal) -> int | None:
         if self.app is None:
             return None
+
+        direction_icon = self._direction_icon(decision.direction)
+        signal_type = created.signal_type.upper()
         text = (
-            f"📌 سیگنال {created.signal_type.upper()}\n"
+            f"{direction_icon} سیگنال {signal_type}\n"
+            f"━━━━━━━━━━━━━━\n"
             f"ارز: {symbol_name}\n"
-            f"جهت: {decision.direction}\n"
-            f"ورود: {decision.entry:.8f}\n"
-            f"TP: {decision.tp:.8f} ({pct(decision.tp_distance_pct)})\n"
-            f"SL: {decision.sl:.8f} ({pct(decision.sl_distance_pct)})\n"
+            f"جهت: {direction_icon} {decision.direction}\n"
+            f"ورود: {decision.entry:.8f}\n\n"
+            f"🎯 TP: {decision.tp:.8f} ({pct(decision.tp_distance_pct)})\n"
+            f"🛑 SL: {decision.sl:.8f} ({pct(decision.sl_distance_pct)})\n"
             f"RR: {decision.risk_reward:.2f}\n"
-            f"سود خالص تخمینی: {money(decision.estimated_net_profit_usdt)}\n"
+            f"سود خالص تخمینی: {money(decision.estimated_net_profit_usdt)}\n\n"
             f"اعتماد AI: {decision.confidence}% | نمونه بازه: {decision.samples}\n"
-            f"وضعیت بازار: {decision.market_state} | تایم‌های بالا: {decision.alignment}\n"
-            f"اندیکاتورها: {decision.indicator_profile}\n"
-            f"دلیل: {decision.reason[:1200]}"
+            f"وضعیت بازار: {decision.market_state}\n"
+            f"تایم‌های بالا: {decision.alignment}\n"
+            f"اندیکاتورها:\n{decision.indicator_profile}\n\n"
+            f"دلیل:\n{decision.reason[:1200]}"
         )
         msg: Message = await self.app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
         self.storage.update_message_id(created.signal_id, msg.message_id)
@@ -96,18 +97,23 @@ class TelegramBotUI:
     async def send_result(self, signal: StoredSignal, status: str, exit_price: float, approx_pnl: float, real_pnl: float | None, result_source: str) -> int | None:
         if self.app is None:
             return None
+
+        status_icon = self._result_icon(status)
+        direction_icon = self._direction_icon(signal.direction)
+        status_label = status.upper()
         text = (
-            f"✅ نتیجه سیگنال: {status}\n"
+            f"{status_icon} نتیجه سیگنال: {status_label}\n"
+            f"━━━━━━━━━━━━━━\n"
             f"ارز: {signal.symbol_name}\n"
             f"نوع: {signal.signal_type} / {result_source}\n"
-            f"جهت: {signal.direction}\n"
+            f"جهت: {direction_icon} {signal.direction}\n\n"
             f"ورود: {signal.entry:.8f}\n"
             f"خروج: {exit_price:.8f}\n"
             f"TP: {signal.tp:.8f}\n"
-            f"SL: {signal.sl:.8f}\n"
+            f"SL: {signal.sl:.8f}\n\n"
             f"سود/ضرر تقریبی: {money(approx_pnl)}\n"
             f"سود/ضرر واقعی Toobit: {money(real_pnl)}\n"
-            f"MFE: {pct(signal.mfe_pct)} | MAE: {pct(signal.mae_pct)}\n"
+            f"MFE: {pct(signal.mfe_pct)} | MAE: {pct(signal.mae_pct)}\n\n"
             f"دلیل استاپ/نتیجه در حافظه AI ثبت شد."
         )
         msg = await self.app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, reply_to_message_id=signal.message_id)
@@ -134,7 +140,7 @@ class TelegramBotUI:
             f"ترید | اتو سیگنال روشن | اتو سیگنال خاموش\n"
             f"ترید روشن | ترید خاموش\n"
             f"ترید دلار 10 | ترید لوریج 8 | حداکثر پوزیشن 5\n"
-            f"آمار | هوش | اسکن | ردها | حذف آمار"
+            f"آمار | هوش | حذف آمار"
         )
 
     def stats_text(self) -> str:
@@ -148,37 +154,6 @@ class TelegramBotUI:
             f"WinRate: {stats['win_rate']:.1f}%\n"
             f"سود/ضرر کل: {money(stats['pnl'])}"
         )
-
-    def scan_text(self) -> str:
-        data = self.storage.scan_summary(minutes=60)
-        auto_status = "روشن 🟢" if data["auto_signals_enabled"] else "خاموش 🔴"
-        real_status = "روشن 🟢" if data["trade_enabled"] else "خاموش ⛔"
-        last = data["last_activity"] or "هنوز ثبت نشده"
-        return (
-            f"📡 وضعیت اتوسیگنال و اسکن\n"
-            f"اتوسیگنال: {auto_status}\n"
-            f"ترید واقعی: {real_status}\n"
-            f"آخرین فعالیت ثبت‌شده: {last}\n"
-            f"در 60 دقیقه اخیر:\n"
-            f"سیگنال صادرشده: {data['signals']}\n"
-            f"رد/خطای ثبت‌شده: {data['rejected']}\n"
-            f"ارزهای دارای رد/خطا: {data['symbols_with_rejects']}\n"
-            f"سیگنال‌های باز: {data['open']}\n\n"
-            f"برای دیدن دلیل‌ها بنویس: ردها"
-        )
-
-    def rejects_text(self) -> str:
-        rows = self.storage.latest_no_signals(limit=20)
-        if not rows:
-            return "📋 هنوز دلیل رد یا خطای اسکن ثبت نشده است. اگر اتوسیگنال روشن است چند دقیقه بعد دوباره بزن: ردها"
-        lines = ["📋 آخرین دلایل رد / خطای اسکن"]
-        for row in rows[:20]:
-            direction = row.get("direction") or "-"
-            symbol = row.get("symbol_name") or "-"
-            reason = str(row.get("reason") or "-").replace("\n", " ")[:220]
-            created = str(row.get("created_at") or "")[:19]
-            lines.append(f"{created} | {symbol} {direction}: {reason}")
-        return "\n".join(lines)
 
     def ai_text(self) -> str:
         data = self.storage.ai_summary()
@@ -199,5 +174,21 @@ class TelegramBotUI:
         )
 
     @staticmethod
+    def _direction_icon(direction: str | None) -> str:
+        if direction == "LONG":
+            return "🟢"
+        if direction == "SHORT":
+            return "🔴"
+        return "⚪"
+
+    @staticmethod
+    def _result_icon(status: str) -> str:
+        if status.upper() == "TP":
+            return "✅"
+        if status.upper() == "SL":
+            return "❌"
+        return "⚪"
+
+    @staticmethod
     def help_text() -> str:
-        return "دستورات: ترید/پنل، اسکن، ردها، آمار، هوش، اتو سیگنال روشن، اتو سیگنال خاموش، ترید روشن، ترید خاموش، ترید دلار 10، ترید لوریج 8، حداکثر پوزیشن 5، حذف آمار"
+        return "دستورات: ترید/پنل، آمار، هوش، اتو سیگنال روشن، اتو سیگنال خاموش، ترید روشن، ترید خاموش، ترید دلار 10، ترید لوریج 8، حداکثر پوزیشن 5، حذف آمار"
