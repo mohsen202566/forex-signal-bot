@@ -1,54 +1,39 @@
+# Secrets
+.env
+*.key
+*.pem
+
 # Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-*.so
-.Python
-
-# Virtual environment
+.venv/
 venv/
-.env/
 env/
 ENV/
 
-# Secrets
-.env
-.env.local
-.env.production
-.env.*
-!.env.example
-
-# Logs
-*.log
-logs/
-log/
-
-# Runtime state / local data
+# Runtime data
+/data/
 data/
-runtime_state.json
-signals.json
-trades.json
-learning_memory.json
-users.json
-
-# Database files
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
-*.db-journal
+logs/
+*.log
 
-# Backups / archives
-*.zip
-*.tar
-*.tar.gz
-*.bak
-*.backup
+# Build/cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
 
-# IDE / editor
-.idea/
-.vscode/
-
-# OS files
+# OS/editor
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
