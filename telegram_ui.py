@@ -49,7 +49,7 @@ def render_trade_panel(settings: dict[str, Any], *, active_real: int, free_slots
         "ترید فعال | ترید خاموش",
         "ترید دلار 10 | ترید لوریج 10 | حداکثر پوزیشن 3",
         "سرمایه ترید 100 | حداقل سود خالص 0.01",
-        "آمار | پوزیشن | کوین‌ها | وضعیت",
+        "آمار | حذف آمار | پوزیشن | کوین‌ها | وضعیت",
     ])
 
 
@@ -112,8 +112,17 @@ def render_stats(stats: dict[str, Any], days: int) -> str:
     long = stats["long"]
     short = stats["short"]
     failed = stats["real_failed"]
+    total_pnl = float(stats.get("total_pnl") or 0.0)
+    today_pnl = float(stats.get("today_pnl") or 0.0)
+    reset_at = int(stats.get("stats_reset_at") or 0)
+    reset_note = ""
+    if reset_at:
+        reset_note = "آمار شمارشی از آخرین «حذف آمار» محاسبه شده؛ سود/ضرر کل و امروز حفظ شده‌اند."
     return "\n".join([
         f"📊 آمار {days} روز اخیر",
+        f"💰 سود/ضرر کل: {total_pnl:.2f} USDT",
+        f"📅 سود/ضرر امروز: {today_pnl:.2f} USDT",
+        reset_note,
         "",
         f"🟢 لانگ: سیگنال {long['total']} | TP {long['tp']} | SL {long['sl']} | وین‌ریت {long['win_rate']:.1f}%",
         f"🔴 شورت: سیگنال {short['total']} | TP {short['tp']} | SL {short['sl']} | وین‌ریت {short['win_rate']:.1f}%",

@@ -320,9 +320,47 @@ class Storage:
             lines.append(f"#{s.id} {s.symbol} {s.direction} | {s.signal_type} | Entry {s.entry_price:g} | TP {s.tp_price:g} | SL {s.sl_price:g}")
         return "\n".join(lines)
 
+    def reset_stats_keep_pnl(self) -> dict[str, float]:
+        """Reset count/win-rate stats from now on while preserving PnL history.
+
+        Open signals are not touched. Closed signals remain in the database so total
+        and today's profit/loss can still be shown. The stats() method starts its
+        counts from stats_reset_at after this command.
+        """
+        now = int(time.time())
+        total = self._pnl_since(0)
+        today = self._pnl_since(self._local_day_start_ts())
+        self.set_setting("stats_reset_at", now)
+        self.conn.execute("DELETE FROM monitor_events")
+        self.conn.execute("DELETE FROM coin_errors")
+        self.conn.execute("DELETE FROM runtime")
+        self.conn.commit()
+        return {"total_pnl": total, "today_pnl": today}
+
+    def _local_day_start_ts(self) -> int:
+        now = time.time()
+        lt = time.localtime(now)
+        return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, lt.tm_wday, lt.tm_yday, lt.tm_isdst)))
+
+    def _pnl_since(self, since: int) -> float:
+        rows = self.conn.execute(
+            """
+            SELECT real_pnl, net_pnl, approx_pnl
+            FROM signals
+            WHERE status IN ('TP','SL','EXIT') AND closed_at IS NOT NULL AND closed_at>=?
+            """,
+            (int(since),),
+        ).fetchall()
+        total = 0.0
+        for row in rows:
+            total += safe_float(row["real_pnl"] if row["real_pnl"] is not None else row["net_pnl"] if row["net_pnl"] is not None else row["approx_pnl"])
+        return float(total)
+
     def stats(self, days: int = 30) -> dict[str, Any]:
         since = int(time.time()) - int(days) * 86400
-        rows = self.conn.execute("SELECT * FROM signals WHERE opened_at>=?", (since,)).fetchall()
+        reset_at = safe_int(self.get_setting("stats_reset_at", 0), 0)
+        count_since = max(int(since), int(reset_at))
+        rows = self.conn.execute("SELECT * FROM signals WHERE opened_at>=?", (count_since,)).fetchall()
         items = [self._row(r) for r in rows]
 
         def bucket(filter_fn):
@@ -342,13 +380,16 @@ class Storage:
                 "pnl": pnl,
             }
 
-        real_failed = self.conn.execute("SELECT COUNT(*) AS c FROM monitor_events WHERE event_type='REAL_FAILED' AND created_at>=?", (since,)).fetchone()
+        real_failed = self.conn.execute("SELECT COUNT(*) AS c FROM monitor_events WHERE event_type='REAL_FAILED' AND created_at>=?", (count_since,)).fetchone()
         return {
             "normal": bucket(lambda x: x.signal_type == "normal"),
             "real": bucket(lambda x: x.signal_type == "real"),
             "long": bucket(lambda x: x.direction == "LONG"),
             "short": bucket(lambda x: x.direction == "SHORT"),
             "real_failed": {"total": int(real_failed["c"] or 0)},
+            "total_pnl": self._pnl_since(0),
+            "today_pnl": self._pnl_since(self._local_day_start_ts()),
+            "stats_reset_at": reset_at,
         }
 
     def _row(self, row: sqlite3.Row) -> StoredSignal:

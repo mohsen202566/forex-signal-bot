@@ -140,6 +140,15 @@ SWING_LOOKBACK_5M = _env_int("SWING_LOOKBACK_5M", 12)
 VWAP_LOOKBACK_5M = _env_int("VWAP_LOOKBACK_5M", 48)
 VOLUME_LOOKBACK_5M = _env_int("VOLUME_LOOKBACK_5M", 20)
 
+# Simple anti-chase guard: prevents entering after the 5M move is already tired.
+# These are hard reject filters, not support/resistance.
+ANTI_CHASE_ENABLED = _env_bool("ANTI_CHASE_ENABLED", True)
+ANTI_CHASE_MAX_EMA50_DISTANCE_PCT = _env_float("ANTI_CHASE_MAX_EMA50_DISTANCE_PCT", 0.0045)  # 0.45%
+ANTI_CHASE_MAX_VWAP_DISTANCE_PCT = _env_float("ANTI_CHASE_MAX_VWAP_DISTANCE_PCT", 0.0035)   # 0.35%
+ANTI_CHASE_MAX_3CANDLE_MOVE_PCT = _env_float("ANTI_CHASE_MAX_3CANDLE_MOVE_PCT", 0.0090)     # 0.90%
+ANTI_CHASE_LONG_MAX_RSI = _env_float("ANTI_CHASE_LONG_MAX_RSI", 68.0)
+ANTI_CHASE_SHORT_MIN_RSI = _env_float("ANTI_CHASE_SHORT_MIN_RSI", 32.0)
+
 # Hard rule: no support/resistance filter for this scalper.
 ENABLE_SUPPORT_RESISTANCE_FILTER = False
 ENABLE_AI = False

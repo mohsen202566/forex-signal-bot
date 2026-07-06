@@ -115,6 +115,13 @@ class Simple5MScalperStrategy:
             return None
 
         direction: Direction = d4.direction
+
+        anti_chase_reason = self._anti_chase_reject(direction, s5m, candles_5m)
+        if anti_chase_reason:
+            # Trend may be right, but the 5M entry is late/tired.
+            # Hard reject so the bot does not buy the top or short the bottom.
+            return None
+
         score, reasons = self._score(direction, s4h, s1h, s5m)
         if score < self.min_score:
             return None
@@ -148,6 +155,7 @@ class Simple5MScalperStrategy:
             return None
 
         reasons = list(reasons)
+        reasons.append("فیلتر ضد دیر ورود پاس شد: قیمت خسته/دور از EMA50 و VWAP نیست")
         reasons.append(f"TP/SL مخصوص 5M | SL={sl_pct * 100:.2f}% | TP={tp_pct * 100:.2f}%")
         reasons.append(f"حداقل سود خالص پاس شد: {net_profit:.4f} USDT")
 
@@ -180,6 +188,49 @@ class Simple5MScalperStrategy:
             reasons.append(f"{label} نزولی: قیمت و EMA50 زیر EMA200")
             return DirectionScore("SHORT", 20.0, tuple(reasons))
         return DirectionScore(None, 0.0, tuple(reasons))
+
+    def _anti_chase_reject(self, direction: Direction, s5m: Snapshot, candles_5m: list[Candle]) -> str | None:
+        if not bool(config.ANTI_CHASE_ENABLED):
+            return None
+        close = float(s5m.close or 0.0)
+        ema50 = float(s5m.ema50 or 0.0)
+        vwap = float(s5m.vwap or 0.0)
+        if close <= 0:
+            return "invalid_close"
+
+        ema50_distance = abs(close - ema50) / close if ema50 > 0 else 0.0
+        vwap_distance = abs(close - vwap) / close if vwap > 0 else 0.0
+
+        # Directional move of the last three completed 5M candles.
+        three_candle_move = 0.0
+        if len(candles_5m) >= 4:
+            base = float(candles_5m[-4].close or 0.0)
+            if base > 0:
+                if direction == "LONG":
+                    three_candle_move = max(0.0, (close - base) / base)
+                else:
+                    three_candle_move = max(0.0, (base - close) / base)
+
+        if direction == "LONG":
+            if float(s5m.rsi) > float(config.ANTI_CHASE_LONG_MAX_RSI):
+                return f"anti_chase_rsi_tired_long:{s5m.rsi:.2f}"
+            if ema50 > 0 and close > ema50 and ema50_distance > float(config.ANTI_CHASE_MAX_EMA50_DISTANCE_PCT):
+                return f"anti_chase_far_from_ema50_long:{ema50_distance * 100:.2f}%"
+            if vwap > 0 and close > vwap and vwap_distance > float(config.ANTI_CHASE_MAX_VWAP_DISTANCE_PCT):
+                return f"anti_chase_far_from_vwap_long:{vwap_distance * 100:.2f}%"
+            if three_candle_move > float(config.ANTI_CHASE_MAX_3CANDLE_MOVE_PCT):
+                return f"anti_chase_3candle_move_long:{three_candle_move * 100:.2f}%"
+        else:
+            if float(s5m.rsi) < float(config.ANTI_CHASE_SHORT_MIN_RSI):
+                return f"anti_chase_rsi_tired_short:{s5m.rsi:.2f}"
+            if ema50 > 0 and close < ema50 and ema50_distance > float(config.ANTI_CHASE_MAX_EMA50_DISTANCE_PCT):
+                return f"anti_chase_far_from_ema50_short:{ema50_distance * 100:.2f}%"
+            if vwap > 0 and close < vwap and vwap_distance > float(config.ANTI_CHASE_MAX_VWAP_DISTANCE_PCT):
+                return f"anti_chase_far_from_vwap_short:{vwap_distance * 100:.2f}%"
+            if three_candle_move > float(config.ANTI_CHASE_MAX_3CANDLE_MOVE_PCT):
+                return f"anti_chase_3candle_move_short:{three_candle_move * 100:.2f}%"
+
+        return None
 
     def _score(self, direction: Direction, s4h: Snapshot, s1h: Snapshot, s5m: Snapshot) -> tuple[float, list[str]]:
         score = 0.0
