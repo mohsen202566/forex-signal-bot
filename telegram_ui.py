@@ -34,6 +34,7 @@ def render_trade_panel(settings: dict[str, Any], *, active_real: int, free_slots
         "⚙️ وضعیت ربات 5M اسکالپ",
         "",
         f"💹 ترید واقعی: {onoff(bool(settings['real_trade_enabled']))}",
+        "📡 اتو سیگنال: فعال ✅",
         f"💰 مارجین توبیت: {margin}",
         f"💲 دلار هر پوزیشن: {float(settings['trade_dollar_usdt']):.2f} USDT",
         f"📈 لوریج: {int(settings['leverage'])}x",
@@ -49,7 +50,7 @@ def render_trade_panel(settings: dict[str, Any], *, active_real: int, free_slots
         "ترید فعال | ترید خاموش",
         "ترید دلار 10 | ترید لوریج 10 | حداکثر پوزیشن 3",
         "سرمایه ترید 100 | حداقل سود خالص 0.01",
-        "آمار | حذف آمار | پوزیشن | کوین‌ها | وضعیت",
+        "آمار | حذف آمار | اتو سیگنال | پوزیشن | کوین‌ها | وضعیت",
     ])
 
 

@@ -129,6 +129,18 @@ class Storage:
             )
             """
         )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scan_rejects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_scan_rejects_created ON scan_rejects(created_at)")
         self.conn.commit()
         self._ensure_default_settings()
 
@@ -311,6 +323,35 @@ class Storage:
         self.conn.execute("DELETE FROM coin_errors WHERE symbol=?", (symbol.upper(),))
         self.conn.commit()
 
+
+    def add_scan_reject(self, symbol: str, reason: str) -> None:
+        self.conn.execute(
+            "INSERT INTO scan_rejects(symbol, reason, created_at) VALUES(?,?,?)",
+            (symbol.upper(), str(reason)[:500], int(time.time())),
+        )
+        self.conn.commit()
+
+    def recent_scan_rejects(self, limit: int = 30) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT symbol, reason, created_at FROM scan_rejects ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reject_reason_counts(self, since: int = 0, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT reason, COUNT(*) AS c
+            FROM scan_rejects
+            WHERE created_at>=?
+            GROUP BY reason
+            ORDER BY c DESC
+            LIMIT ?
+            """,
+            (int(since), int(limit)),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def recent_open_positions_text(self) -> str:
         rows = self.open_signals()
         if not rows:
@@ -333,6 +374,7 @@ class Storage:
         self.set_setting("stats_reset_at", now)
         self.conn.execute("DELETE FROM monitor_events")
         self.conn.execute("DELETE FROM coin_errors")
+        self.conn.execute("DELETE FROM scan_rejects")
         self.conn.execute("DELETE FROM runtime")
         self.conn.commit()
         return {"total_pnl": total, "today_pnl": today}

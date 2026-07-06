@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -85,7 +86,20 @@ class Crypto5MScalperBot:
     # -------------------------
     def scan_once(self) -> None:
         watchlist = self.safety.limited_watchlist()
-        self.storage.runtime_set("last_scan_started_at", int(time.time()))
+        started_at = int(time.time())
+        self.storage.runtime_set("last_scan_started_at", started_at)
+        summary = {
+            "started_at": started_at,
+            "total": len(watchlist),
+            "scanned": 0,
+            "signals": 0,
+            "rejected": 0,
+            "skipped_open": 0,
+            "skipped_cooldown": 0,
+            "errors": 0,
+            "last_rejects": [],
+        }
+        reason_counts: dict[str, int] = {}
         found = 0
         for symbol in watchlist:
             if self.stop_event.is_set():
@@ -94,21 +108,50 @@ class Crypto5MScalperBot:
             if not symbol:
                 continue
             if not self.safety.can_scan_coin(symbol):
+                summary["skipped_cooldown"] += 1
+                reason = "رد شد: ارز در کول‌داون خطا است"
+                self.storage.add_scan_reject(symbol, reason)
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                summary["last_rejects"].append({"symbol": symbol, "reason": reason})
                 continue
             try:
                 if self.storage.has_open_symbol(symbol):
+                    summary["skipped_open"] += 1
                     continue
+                summary["scanned"] += 1
                 plan = self._analyze_symbol(symbol)
                 self.safety.clear_coin_error(symbol)
                 if plan is None:
+                    reason = getattr(self.strategy, "last_reject_reason", "") or "رد شد: شرایط سیگنال کامل نشد"
+                    summary["rejected"] += 1
+                    self.storage.add_scan_reject(symbol, reason)
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                    summary["last_rejects"].append({"symbol": symbol, "reason": reason})
                     continue
                 found += 1
+                summary["signals"] += 1
                 self._handle_plan(plan)
             except Exception as exc:
+                summary["errors"] += 1
                 self.safety.record_coin_error(symbol, exc)
                 continue
-        self.storage.runtime_set("last_scan_finished_at", int(time.time()))
+        finished_at = int(time.time())
+        summary["finished_at"] = finished_at
+        summary["duration_seconds"] = max(0, finished_at - started_at)
+        summary["reason_counts"] = sorted(
+            [{"reason": r, "count": c} for r, c in reason_counts.items()],
+            key=lambda x: x["count"],
+            reverse=True,
+        )[:10]
+        summary["last_rejects"] = summary["last_rejects"][-15:]
+        self.storage.runtime_set("last_scan_finished_at", finished_at)
         self.storage.runtime_set("last_scan_found", found)
+        self.storage.runtime_set("last_scan_summary", json.dumps(summary, ensure_ascii=False))
+        logger.info(
+            "scan summary: total=%s scanned=%s signals=%s rejected=%s skipped_open=%s cooldown=%s errors=%s",
+            summary["total"], summary["scanned"], summary["signals"], summary["rejected"],
+            summary["skipped_open"], summary["skipped_cooldown"], summary["errors"],
+        )
 
     def _analyze_symbol(self, symbol: str) -> SignalPlan | None:
         settings = self.storage.settings()
@@ -272,9 +315,55 @@ class Crypto5MScalperBot:
             return self.storage.recent_open_positions_text()
         if t in {"کوین‌ها", "کوین ها", "ارزها", "ارزهای فعال"}:
             return "📌 ارزهای فعال:\n" + "\n".join(config.WATCHLIST)
+        if t in {"اتو سیگنال", "اتوسیگنال", "گزارش اسکن", "وضعیت اسکن", "رد شده‌ها", "رد شده ها"}:
+            return self._autosignal_text()
         if t in {"راهنما", "help", "/help"}:
             return self._help_text()
         return "دستور شناخته نشد. برای راهنما بنویس: راهنما"
+
+
+    def _autosignal_text(self) -> str:
+        raw = self.storage.runtime_get("last_scan_summary", "")
+        try:
+            summary = json.loads(raw) if raw else {}
+        except Exception:
+            summary = {}
+        open_count = len(self.storage.open_signals())
+        if not summary:
+            return "هنوز چرخه اسکن کامل ثبت نشده است. چند ثانیه بعد دوباره بنویس: اتو سیگنال"
+
+        def ts_text(value: Any) -> str:
+            try:
+                return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(value)))
+            except Exception:
+                return "نامشخص"
+
+        lines = [
+            "📡 گزارش آخرین اتو سیگنال / اسکن 5M",
+            f"زمان شروع: {ts_text(summary.get('started_at'))}",
+            f"زمان پایان: {ts_text(summary.get('finished_at'))}",
+            f"مدت اسکن: {int(summary.get('duration_seconds') or 0)} ثانیه",
+            "",
+            f"کل ارزها: {int(summary.get('total') or 0)}",
+            f"اسکن‌شده: {int(summary.get('scanned') or 0)}",
+            f"سیگنال صادرشده: {int(summary.get('signals') or 0)}",
+            f"ردشده: {int(summary.get('rejected') or 0)}",
+            f"دارای سیگنال باز و ردشده از اسکن: {int(summary.get('skipped_open') or 0)}",
+            f"کول‌داون خطا: {int(summary.get('skipped_cooldown') or 0)}",
+            f"خطای دریافت/تحلیل: {int(summary.get('errors') or 0)}",
+            f"سیگنال‌های باز فعلی: {open_count}",
+        ]
+        reason_counts = summary.get("reason_counts") or []
+        if reason_counts:
+            lines += ["", "📌 دلایل پرتکرار رد شدن:"]
+            for item in reason_counts[:8]:
+                lines.append(f"• {item.get('count', 0)}× {item.get('reason', '')}")
+        rejects = summary.get("last_rejects") or []
+        if rejects:
+            lines += ["", "آخرین ارزهای ردشده:"]
+            for item in rejects[-10:]:
+                lines.append(f"• {item.get('symbol', '')}: {item.get('reason', '')}")
+        return "\n".join(lines)
 
     def _panel_text(self) -> str:
         settings = self.storage.settings()
@@ -302,6 +391,7 @@ class Crypto5MScalperBot:
             "حداقل سود خالص 0.01",
             "آمار یا آمار 7",
             "حذف آمار",
+            "اتو سیگنال",
             "پوزیشن",
             "کوین‌ها",
         ])

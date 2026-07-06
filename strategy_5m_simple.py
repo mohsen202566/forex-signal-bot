@@ -84,6 +84,11 @@ class Simple5MScalperStrategy:
     def __init__(self) -> None:
         self.min_score = float(config.SIGNAL_SCORE_THRESHOLD)
         self.strong_score = float(config.STRONG_SCORE_THRESHOLD)
+        self.last_reject_reason = ""
+
+    def _reject(self, reason: str) -> None:
+        self.last_reject_reason = str(reason)[:300]
+        return None
 
     def analyze(
         self,
@@ -98,6 +103,7 @@ class Simple5MScalperStrategy:
         toobit_symbol: str | None = None,
         round_trip_fee_usdt: float = config.ROUND_TRIP_FEE_USDT,
     ) -> SignalPlan | None:
+        self.last_reject_reason = ""
         s4h = snapshot(candles_4h, swing_lookback=8)
         s1h = snapshot(candles_1h, swing_lookback=8)
         s5m = snapshot(
@@ -109,10 +115,12 @@ class Simple5MScalperStrategy:
 
         d4 = self._direction_filter("4H", s4h)
         d1 = self._direction_filter("1H", s1h)
-        if d4.direction is None or d1.direction is None:
-            return None
+        if d4.direction is None:
+            return self._reject("رد شد: جهت 4H خنثی است")
+        if d1.direction is None:
+            return self._reject("رد شد: جهت 1H خنثی است")
         if d4.direction != d1.direction:
-            return None
+            return self._reject(f"رد شد: 4H و 1H همسو نیستند ({d4.direction} / {d1.direction})")
 
         direction: Direction = d4.direction
 
@@ -120,26 +128,26 @@ class Simple5MScalperStrategy:
         if anti_chase_reason:
             # Trend may be right, but the 5M entry is late/tired.
             # Hard reject so the bot does not buy the top or short the bottom.
-            return None
+            return self._reject("رد شد: ورود دیر/خسته در 5M - " + anti_chase_reason)
 
         score, reasons = self._score(direction, s4h, s1h, s5m)
         if score < self.min_score:
-            return None
+            return self._reject(f"رد شد: امتیاز کم است ({score:.1f}/{self.min_score:g})")
 
         rr = float(config.RR_STRONG if score >= self.strong_score else config.RR_NORMAL)
         strength = "قوی" if score >= self.strong_score else "معمولی"
         entry = s5m.close
         sl = self._make_5m_sl(direction, s5m, entry)
         if sl <= 0 or sl == entry:
-            return None
+            return self._reject("رد شد: SL پنج دقیقه‌ای نامعتبر است")
         risk = entry - sl if direction == "LONG" else sl - entry
         if risk <= 0:
-            return None
+            return self._reject("رد شد: ریسک معامله نامعتبر است")
         sl_pct = risk / entry
 
         # 5M scalping guard rails.
         if sl_pct > float(config.MAX_5M_SL_PCT):
-            return None
+            return self._reject(f"رد شد: SL پنج دقیقه‌ای زیادی بزرگ است ({sl_pct * 100:.2f}%)")
         if sl_pct < float(config.MIN_5M_SL_PCT):
             risk = entry * float(config.MIN_5M_SL_PCT)
             sl = entry - risk if direction == "LONG" else entry + risk
@@ -152,7 +160,7 @@ class Simple5MScalperStrategy:
         gross_loss = notional * sl_pct
         net_profit = gross_profit - float(round_trip_fee_usdt)
         if net_profit < float(min_net_profit_usdt):
-            return None
+            return self._reject(f"رد شد: سود خالص بعد کارمزد کم است ({net_profit:.4f} USDT)")
 
         reasons = list(reasons)
         reasons.append("فیلتر ضد دیر ورود پاس شد: قیمت خسته/دور از EMA50 و VWAP نیست")
