@@ -256,6 +256,14 @@ class Crypto5MScalperBot:
             value = max(0.0, safe_float(m.group(1), config.DEFAULT_MIN_NET_PROFIT_USDT))
             self.storage.set_setting("min_net_profit_usdt", value)
             return f"✅ حداقل سود خالص صدور سیگنال شد: {value:.2f} USDT"
+        if t in {"حذف آمار", "حذف امار", "پاک کردن آمار", "پاک کردن امار"}:
+            pnl = self.storage.reset_stats_keep_pnl()
+            return (
+                "✅ آمار شمارشی صفر شد.\n"
+                "سیگنال‌های باز دست‌نخورده ماندند و همچنان مانیتور می‌شوند.\n"
+                f"سود/ضرر کل حفظ شد: {pnl['total_pnl']:.2f} USDT\n"
+                f"سود/ضرر امروز حفظ شد: {pnl['today_pnl']:.2f} USDT"
+            )
         m = re.match(r"^آمار(?:\s+([0-9]+))?$", t)
         if m:
             days = max(1, min(365, safe_int(m.group(1), 30)))
@@ -293,6 +301,7 @@ class Crypto5MScalperBot:
             "سرمایه ترید 100",
             "حداقل سود خالص 0.01",
             "آمار یا آمار 7",
+            "حذف آمار",
             "پوزیشن",
             "کوین‌ها",
         ])
