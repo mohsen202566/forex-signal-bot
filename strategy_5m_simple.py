@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import config
-from indicators import Snapshot, ema, snapshot
+from indicators import Snapshot, snapshot
 from okx_data import Candle
 from utils import clamp, okx_swap_symbol
 
@@ -56,6 +56,7 @@ class SignalPlan:
             "round_trip_fee_usdt": self.round_trip_fee_usdt,
             "strength": self.strength,
             "timeframe": "5M",
+            "entry_model": "Compression Breakout",
             "reasons": list(self.reasons),
         }
 
@@ -67,15 +68,21 @@ class DirectionScore:
     reasons: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class EntryScore:
+    score: float
+    reasons: tuple[str, ...]
+
+
 class Simple5MScalperStrategy:
-    """Simple score-based 5M scalper.
+    """5M scalper with Compression Breakout entry.
 
     Hard rules:
-    - 4H and 1H must align.
-    - 5M is the entry timeframe.
-    - No candle confirmation, because in 5M the confirmation candle can be the profit.
-    - score >= 70 emits a signal.
-    - RR is 1.5.
+    - 4H and 1H must align for direction.
+    - 5M entry is not a generic indicator score anymore.
+    - Entry happens only when price breaks out of a recent 5M compression box
+      with a strong body, volume expansion, fresh RSI/MACD and anti-late checks.
+    - RR stays 1.5 by default.
     - TP/SL are based only on 5M ATR/swing, not 1H or 4H.
     - Net profit after round-trip fee must be at least the panel minimum.
     - No support/resistance, no AI, no DCA, no martingale, no trailing.
@@ -123,22 +130,11 @@ class Simple5MScalperStrategy:
             return self._reject(f"رد شد: 4H و 1H همسو نیستند ({d4.direction} / {d1.direction})")
 
         direction: Direction = d4.direction
+        entry_score = self._compression_breakout_entry(direction, s5m, candles_5m)
+        if entry_score is None:
+            return None
 
-        range_reason = self._range_reject(s5m, candles_5m)
-        if range_reason:
-            return self._reject("رد شد: بازار 5M رنج/کم‌قدرت است - " + range_reason)
-
-        anti_chase_reason = self._anti_chase_reject(direction, s5m, candles_5m)
-        if anti_chase_reason:
-            # Trend may be right, but the 5M entry is late/tired.
-            # Hard reject so the bot does not buy the top or short the bottom.
-            return self._reject("رد شد: ورود دیر/خسته در 5M - " + anti_chase_reason)
-
-        pullback_ok, pullback_reason, pullback_reasons = self._pullback_reentry_gate(direction, s5m)
-        if not pullback_ok:
-            return self._reject("رد شد: ورود 5M هنوز جای خوبی نیست - " + pullback_reason)
-
-        score, reasons = self._score(direction, s4h, s1h, s5m, pullback_reasons)
+        score = clamp(d4.score + d1.score + entry_score.score, 0, 100)
         if score < self.min_score:
             return self._reject(f"رد شد: امتیاز کم است ({score:.1f}/{self.min_score:g})")
 
@@ -153,7 +149,6 @@ class Simple5MScalperStrategy:
             return self._reject("رد شد: ریسک معامله نامعتبر است")
         sl_pct = risk / entry
 
-        # 5M scalping guard rails.
         if sl_pct > float(config.MAX_5M_SL_PCT):
             return self._reject(f"رد شد: SL پنج دقیقه‌ای زیادی بزرگ است ({sl_pct * 100:.2f}%)")
         if sl_pct < float(config.MIN_5M_SL_PCT):
@@ -170,10 +165,8 @@ class Simple5MScalperStrategy:
         if net_profit < float(min_net_profit_usdt):
             return self._reject(f"رد شد: سود خالص بعد کارمزد کم است ({net_profit:.4f} USDT)")
 
-        reasons = list(reasons)
-        reasons.append("Pullback Re-Entry پاس شد: ورود نزدیک EMA50/VWAP و بدون نویز شدید")
-        reasons.append("فیلتر ضد دیر ورود پاس شد: قیمت خسته/دور از EMA50 و VWAP نیست")
-        reasons.append(f"TP/SL مخصوص 5M | SL={sl_pct * 100:.2f}% | TP={tp_pct * 100:.2f}%")
+        reasons = list(d4.reasons) + list(d1.reasons) + list(entry_score.reasons)
+        reasons.append(f"TP/SL مخصوص 5M | RR={rr:g} | SL={sl_pct * 100:.2f}% | TP={tp_pct * 100:.2f}%")
         reasons.append(f"حداقل سود خالص پاس شد: {net_profit:.4f} USDT")
 
         return SignalPlan(
@@ -200,258 +193,125 @@ class Simple5MScalperStrategy:
         reasons: list[str] = []
         if s.close > s.ema200 and s.ema50 > s.ema200:
             reasons.append(f"{label} صعودی: قیمت و EMA50 بالای EMA200")
-            return DirectionScore("LONG", 20.0, tuple(reasons))
+            return DirectionScore("LONG", 15.0, tuple(reasons))
         if s.close < s.ema200 and s.ema50 < s.ema200:
             reasons.append(f"{label} نزولی: قیمت و EMA50 زیر EMA200")
-            return DirectionScore("SHORT", 20.0, tuple(reasons))
+            return DirectionScore("SHORT", 15.0, tuple(reasons))
         return DirectionScore(None, 0.0, tuple(reasons))
 
-    def _range_reject(self, s5m: Snapshot, candles_5m: list[Candle]) -> str | None:
-        """Detect 5M chop/range without support/resistance.
+    def _compression_breakout_entry(self, direction: Direction, s5m: Snapshot, candles_5m: list[Candle]) -> EntryScore | None:
+        if not bool(config.COMPRESSION_BREAKOUT_ENABLED):
+            return self._reject("رد شد: ورود Compression Breakout خاموش است")
 
-        A range is rejected only when at least RANGE_MIN_FLAGS signs are present,
-        so a single quiet metric does not over-filter good pullbacks.
-        """
-        if not bool(config.RANGE_FILTER_ENABLED):
-            return None
-        close = float(s5m.close or 0.0)
-        if close <= 0 or len(candles_5m) < 60:
-            return None
+        lookback = max(3, int(config.BREAKOUT_LOOKBACK_5M))
+        if len(candles_5m) < lookback + 2:
+            return self._reject("رد شد: کندل کافی برای بررسی شکست فشردگی وجود ندارد")
 
-        flags: list[str] = []
-        ema_spread = abs(float(s5m.ema50) - float(s5m.ema200)) / close if s5m.ema200 > 0 else 0.0
-        if ema_spread < float(config.RANGE_MAX_EMA_SPREAD_PCT):
-            flags.append(f"EMA50/EMA200 خیلی نزدیک:{ema_spread * 100:.2f}%")
-
-        closes = [c.close for c in candles_5m]
-        ema50_line = ema(closes, 50)
-        last = len(candles_5m) - 1
-        back = max(0, last - 10)
-        if ema50_line[last] is not None and ema50_line[back] is not None:
-            ema_slope = abs(float(ema50_line[last]) - float(ema50_line[back])) / close
-            if ema_slope < float(config.RANGE_MAX_EMA50_SLOPE_10_PCT):
-                flags.append(f"شیب EMA50 کم:{ema_slope * 100:.2f}%")
-
-        window = candles_5m[-20:]
-        if len(window) >= 20:
-            range20 = (max(c.high for c in window) - min(c.low for c in window)) / close
-            if range20 < float(config.RANGE_MIN_20CANDLE_RANGE_PCT):
-                flags.append(f"رنج 20 کندل کم:{range20 * 100:.2f}%")
-
-        if len(flags) >= int(config.RANGE_MIN_FLAGS):
-            return " | ".join(flags[:3])
-        return None
-
-    def _pullback_reentry_gate(self, direction: Direction, s5m: Snapshot) -> tuple[bool, str, list[str]]:
-        """Require a healthy pullback re-entry instead of late confirmation.
-
-        Good entry = close is just back on the correct side of EMA50 or VWAP,
-        with RSI fresh and/or MACD histogram improving. This is not candle
-        confirmation; it is a live 5M location filter.
-        """
-        if not bool(config.PULLBACK_REENTRY_ENABLED):
-            return True, "pullback_disabled", ["Pullback Re-Entry خاموش است"]
-
-        close = float(s5m.close or 0.0)
-        ema50 = float(s5m.ema50 or 0.0)
-        vwap = float(s5m.vwap or 0.0)
+        last = candles_5m[-1]
+        previous = candles_5m[-lookback - 1:-1]
+        close = float(s5m.close or last.close or 0.0)
         if close <= 0:
-            return False, "قیمت نامعتبر است", []
+            return self._reject("رد شد: قیمت ورود نامعتبر است")
 
-        min_dist = float(config.PULLBACK_MIN_RECLAIM_DISTANCE_PCT)
-        max_dist = float(config.PULLBACK_MAX_ENTRY_DISTANCE_PCT)
-        triggers: list[str] = []
+        prev_high = max(float(c.high) for c in previous)
+        prev_low = min(float(c.low) for c in previous)
+        compression_range_pct = (prev_high - prev_low) / close if close > 0 else 0.0
+        max_pre_range = float(config.BREAKOUT_MAX_PRE_RANGE_PCT)
+        if compression_range_pct <= 0 or compression_range_pct > max_pre_range:
+            return self._reject(
+                f"رد شد: فشردگی کافی قبل از شکست نیست ({compression_range_pct * 100:.2f}% > {max_pre_range * 100:.2f}%)"
+            )
+
+        break_buffer = float(config.BREAKOUT_MIN_BREAK_PCT)
+        if direction == "LONG":
+            required_break = prev_high * (1 + break_buffer)
+            if close <= required_break:
+                return self._reject(
+                    f"رد شد: شکست معتبر سقف فشردگی رخ نداده است (close<=high+buffer | {break_buffer * 100:.2f}%)"
+                )
+        else:
+            required_break = prev_low * (1 - break_buffer)
+            if close >= required_break:
+                return self._reject(
+                    f"رد شد: شکست معتبر کف فشردگی رخ نداده است (close>=low-buffer | {break_buffer * 100:.2f}%)"
+                )
+
+        candle_range = max(0.0, float(last.high) - float(last.low))
+        if candle_range <= 0:
+            return self._reject("رد شد: کندل شکست رنج معتبر ندارد")
+        body = abs(float(last.close) - float(last.open))
+        body_ratio = body / candle_range
+        min_body = float(config.BREAKOUT_MIN_BODY_RATIO)
+        if body_ratio < min_body:
+            return self._reject(f"رد شد: بدنه کندل شکست ضعیف است ({body_ratio * 100:.0f}% < {min_body * 100:.0f}%)")
+
+        close_position = (float(last.close) - float(last.low)) / candle_range
+        min_close_pos = float(config.BREAKOUT_MIN_CLOSE_POSITION)
+        if direction == "LONG":
+            if float(last.close) <= float(last.open):
+                return self._reject("رد شد: کندل شکست لانگ سبز/صعودی نیست")
+            if close_position < min_close_pos:
+                return self._reject(f"رد شد: بسته شدن کندل لانگ نزدیک سقف نیست ({close_position * 100:.0f}%)")
+        else:
+            if float(last.close) >= float(last.open):
+                return self._reject("رد شد: کندل شکست شورت قرمز/نزولی نیست")
+            if close_position > (1 - min_close_pos):
+                return self._reject(f"رد شد: بسته شدن کندل شورت نزدیک کف نیست ({(1 - close_position) * 100:.0f}%)")
+
+        min_volume = float(config.BREAKOUT_MIN_VOLUME_RATIO)
+        if float(s5m.volume_ratio) < min_volume:
+            return self._reject(f"رد شد: حجم پشت شکست کافی نیست ({s5m.volume_ratio:.2f}x < {min_volume:.2f}x)")
 
         if direction == "LONG":
-            ema_dist = (close - ema50) / close if ema50 > 0 else -999.0
-            vwap_dist = (close - vwap) / close if vwap > 0 else -999.0
-            near_ema = ema50 > 0 and min_dist <= ema_dist <= max_dist
-            near_vwap = vwap > 0 and min_dist <= vwap_dist <= max_dist
-            if near_ema or near_vwap:
-                where = []
-                if near_ema:
-                    where.append(f"EMA50 فاصله {ema_dist * 100:.2f}%")
-                if near_vwap:
-                    where.append(f"VWAP فاصله {vwap_dist * 100:.2f}%")
-                triggers.append("برگشت سالم لانگ نزدیک " + " و ".join(where))
-            else:
-                if (ema50 > 0 and ema_dist < min_dist) and (vwap > 0 and vwap_dist < min_dist):
-                    return False, "لانگ هنوز بالای EMA50/VWAP با بافر کافی برنگشته؛ احتمال نویز", []
-                return False, "لانگ از ناحیه ورود EMA50/VWAP دور شده یا ورود دیر است", []
-
-            if float(config.PULLBACK_LONG_RSI_MIN) <= float(s5m.rsi) <= float(config.PULLBACK_LONG_RSI_MAX):
-                if s5m.rsi > s5m.prev_rsi:
-                    triggers.append(f"RSI تازه رو به بالا و سالم:{s5m.rsi:.1f}")
-                else:
-                    triggers.append(f"RSI سالم ولی هنوز تیز نیست:{s5m.rsi:.1f}")
-            else:
-                return False, f"RSI لانگ خارج محدوده تازه است:{s5m.rsi:.1f}", []
-
-            if s5m.macd_hist >= s5m.prev_macd_hist:
-                triggers.append("MACD Histogram بهتر شده")
+            if not (float(config.BREAKOUT_LONG_RSI_MIN) <= float(s5m.rsi) <= float(config.BREAKOUT_LONG_RSI_MAX)):
+                return self._reject(f"رد شد: RSI لانگ تازه/غیرخسته نیست ({s5m.rsi:.2f})")
+            if float(s5m.macd_hist) <= float(s5m.prev_macd_hist):
+                return self._reject("رد شد: MACD Histogram لانگ تازه بهتر نشده")
+            if not (close > float(s5m.ema20) and close > float(s5m.vwap)):
+                return self._reject("رد شد: شکست لانگ بالای EMA20 و VWAP تثبیت نشده")
         else:
-            ema_dist = (ema50 - close) / close if ema50 > 0 else -999.0
-            vwap_dist = (vwap - close) / close if vwap > 0 else -999.0
-            near_ema = ema50 > 0 and min_dist <= ema_dist <= max_dist
-            near_vwap = vwap > 0 and min_dist <= vwap_dist <= max_dist
-            if near_ema or near_vwap:
-                where = []
-                if near_ema:
-                    where.append(f"EMA50 فاصله {ema_dist * 100:.2f}%")
-                if near_vwap:
-                    where.append(f"VWAP فاصله {vwap_dist * 100:.2f}%")
-                triggers.append("برگشت سالم شورت نزدیک " + " و ".join(where))
-            else:
-                if (ema50 > 0 and ema_dist < min_dist) and (vwap > 0 and vwap_dist < min_dist):
-                    return False, "شورت هنوز زیر EMA50/VWAP با بافر کافی برنگشته؛ احتمال نویز", []
-                return False, "شورت از ناحیه ورود EMA50/VWAP دور شده یا ورود دیر است", []
+            if not (float(config.BREAKOUT_SHORT_RSI_MIN) <= float(s5m.rsi) <= float(config.BREAKOUT_SHORT_RSI_MAX)):
+                return self._reject(f"رد شد: RSI شورت تازه/غیرخسته نیست ({s5m.rsi:.2f})")
+            if float(s5m.macd_hist) >= float(s5m.prev_macd_hist):
+                return self._reject("رد شد: MACD Histogram شورت تازه ضعیف‌تر نشده")
+            if not (close < float(s5m.ema20) and close < float(s5m.vwap)):
+                return self._reject("رد شد: شکست شورت زیر EMA20 و VWAP تثبیت نشده")
 
-            if float(config.PULLBACK_SHORT_RSI_MIN) <= float(s5m.rsi) <= float(config.PULLBACK_SHORT_RSI_MAX):
-                if s5m.rsi < s5m.prev_rsi:
-                    triggers.append(f"RSI تازه رو به پایین و سالم:{s5m.rsi:.1f}")
-                else:
-                    triggers.append(f"RSI سالم ولی هنوز تیز نیست:{s5m.rsi:.1f}")
-            else:
-                return False, f"RSI شورت خارج محدوده تازه است:{s5m.rsi:.1f}", []
+        three_candle_move = self._directional_3candle_move(direction, candles_5m, close)
+        max_3move = float(config.BREAKOUT_MAX_3CANDLE_MOVE_PCT)
+        if three_candle_move > max_3move:
+            return self._reject(f"رد شد: حرکت سه کندل اخیر زیادی انجام شده ({three_candle_move * 100:.2f}% > {max_3move * 100:.2f}%)")
 
-            if s5m.macd_hist <= s5m.prev_macd_hist:
-                triggers.append("MACD Histogram ضعیف‌تر شده")
+        ema50_distance = abs(close - float(s5m.ema50)) / close if float(s5m.ema50) > 0 else 0.0
+        vwap_distance = abs(close - float(s5m.vwap)) / close if float(s5m.vwap) > 0 else 0.0
+        max_ema = float(config.BREAKOUT_MAX_EMA50_DISTANCE_PCT)
+        max_vwap = float(config.BREAKOUT_MAX_VWAP_DISTANCE_PCT)
+        if ema50_distance > max_ema and vwap_distance > max_vwap:
+            return self._reject(
+                f"رد شد: شکست معتبر است ولی ورود دیر شده؛ قیمت از EMA50/VWAP دور است ({ema50_distance * 100:.2f}%/{vwap_distance * 100:.2f}%)"
+            )
 
-        if len(triggers) < int(config.PULLBACK_REQUIRED_TRIGGERS):
-            return False, f"تریگرهای ورود کافی نیستند ({len(triggers)}/{int(config.PULLBACK_REQUIRED_TRIGGERS)})", []
-        return True, "ok", triggers
+        reasons = [
+            f"12 امتیاز: فشردگی {lookback} کندل قبل از شکست ({compression_range_pct * 100:.2f}%)",
+            "18 امتیاز: شکست معتبر محدوده فشرده در جهت 4H/1H",
+            f"15 امتیاز: کندل شکست قوی | body={body_ratio * 100:.0f}%",
+            f"10 امتیاز: حجم پشت شکست {s5m.volume_ratio:.2f}x",
+            f"10 امتیاز: RSI تازه و غیرخسته ({s5m.rsi:.1f})",
+            "10 امتیاز: MACD Histogram تازه در جهت معامله بهتر شد",
+            f"5 امتیاز: ضد دیر ورود پاس شد | 3 کندل={three_candle_move * 100:.2f}%",
+        ]
+        return EntryScore(70.0, tuple(reasons))
 
-    def _anti_chase_reject(self, direction: Direction, s5m: Snapshot, candles_5m: list[Candle]) -> str | None:
-        if not bool(config.ANTI_CHASE_ENABLED):
-            return None
-        close = float(s5m.close or 0.0)
-        ema50 = float(s5m.ema50 or 0.0)
-        vwap = float(s5m.vwap or 0.0)
-        if close <= 0:
-            return "invalid_close"
-
-        ema50_distance = abs(close - ema50) / close if ema50 > 0 else 0.0
-        vwap_distance = abs(close - vwap) / close if vwap > 0 else 0.0
-
-        # Directional move of the last three completed 5M candles.
-        three_candle_move = 0.0
-        if len(candles_5m) >= 4:
-            base = float(candles_5m[-4].close or 0.0)
-            if base > 0:
-                if direction == "LONG":
-                    three_candle_move = max(0.0, (close - base) / base)
-                else:
-                    three_candle_move = max(0.0, (base - close) / base)
-
+    @staticmethod
+    def _directional_3candle_move(direction: Direction, candles_5m: list[Candle], close: float) -> float:
+        if len(candles_5m) < 4:
+            return 0.0
+        base = float(candles_5m[-4].close or 0.0)
+        if base <= 0:
+            return 0.0
         if direction == "LONG":
-            if float(s5m.rsi) > float(config.ANTI_CHASE_LONG_MAX_RSI):
-                return f"anti_chase_rsi_tired_long:{s5m.rsi:.2f}"
-            if ema50 > 0 and close > ema50 and ema50_distance > float(config.ANTI_CHASE_MAX_EMA50_DISTANCE_PCT):
-                return f"anti_chase_far_from_ema50_long:{ema50_distance * 100:.2f}%"
-            if vwap > 0 and close > vwap and vwap_distance > float(config.ANTI_CHASE_MAX_VWAP_DISTANCE_PCT):
-                return f"anti_chase_far_from_vwap_long:{vwap_distance * 100:.2f}%"
-            if three_candle_move > float(config.ANTI_CHASE_MAX_3CANDLE_MOVE_PCT):
-                return f"anti_chase_3candle_move_long:{three_candle_move * 100:.2f}%"
-        else:
-            if float(s5m.rsi) < float(config.ANTI_CHASE_SHORT_MIN_RSI):
-                return f"anti_chase_rsi_tired_short:{s5m.rsi:.2f}"
-            if ema50 > 0 and close < ema50 and ema50_distance > float(config.ANTI_CHASE_MAX_EMA50_DISTANCE_PCT):
-                return f"anti_chase_far_from_ema50_short:{ema50_distance * 100:.2f}%"
-            if vwap > 0 and close < vwap and vwap_distance > float(config.ANTI_CHASE_MAX_VWAP_DISTANCE_PCT):
-                return f"anti_chase_far_from_vwap_short:{vwap_distance * 100:.2f}%"
-            if three_candle_move > float(config.ANTI_CHASE_MAX_3CANDLE_MOVE_PCT):
-                return f"anti_chase_3candle_move_short:{three_candle_move * 100:.2f}%"
-
-        return None
-
-    def _score(self, direction: Direction, s4h: Snapshot, s1h: Snapshot, s5m: Snapshot, pullback_reasons: list[str] | None = None) -> tuple[float, list[str]]:
-        score = 0.0
-        reasons: list[str] = []
-        pullback_reasons = pullback_reasons or []
-
-        # 4H direction: 15
-        if direction == "LONG" and s4h.close > s4h.ema200 and s4h.ema50 > s4h.ema200:
-            score += 15
-            reasons.append("15 امتیاز: جهت 4H صعودی و همسو")
-        elif direction == "SHORT" and s4h.close < s4h.ema200 and s4h.ema50 < s4h.ema200:
-            score += 15
-            reasons.append("15 امتیاز: جهت 4H نزولی و همسو")
-
-        # 1H direction: 15
-        if direction == "LONG" and s1h.close > s1h.ema200 and s1h.ema50 > s1h.ema200:
-            score += 15
-            reasons.append("15 امتیاز: جهت 1H صعودی و همسو")
-        elif direction == "SHORT" and s1h.close < s1h.ema200 and s1h.ema50 < s1h.ema200:
-            score += 15
-            reasons.append("15 امتیاز: جهت 1H نزولی و همسو")
-
-        # 5M trend: 15
-        if direction == "LONG":
-            if s5m.close > s5m.ema200:
-                score += 5
-                reasons.append("5 امتیاز: 5M قیمت بالای EMA200")
-            if s5m.ema50 > s5m.ema200:
-                score += 5
-                reasons.append("5 امتیاز: 5M EMA50 بالای EMA200")
-            if s5m.close > s5m.ema50 or s5m.close > s5m.vwap:
-                score += 5
-                reasons.append("5 امتیاز: 5M سمت درست EMA50/VWAP")
-        else:
-            if s5m.close < s5m.ema200:
-                score += 5
-                reasons.append("5 امتیاز: 5M قیمت زیر EMA200")
-            if s5m.ema50 < s5m.ema200:
-                score += 5
-                reasons.append("5 امتیاز: 5M EMA50 زیر EMA200")
-            if s5m.close < s5m.ema50 or s5m.close < s5m.vwap:
-                score += 5
-                reasons.append("5 امتیاز: 5M سمت درست EMA50/VWAP")
-
-        # Pullback entry location: 20
-        if pullback_reasons:
-            score += 20
-            reasons.append("20 امتیاز: جای ورود Pullback Re-Entry مناسب است")
-            reasons.extend(pullback_reasons[:3])
-
-        # RSI freshness: 15
-        if direction == "LONG":
-            if float(config.PULLBACK_LONG_RSI_MIN) <= s5m.rsi <= float(config.PULLBACK_LONG_RSI_MAX):
-                score += 10
-                reasons.append("10 امتیاز: RSI لانگ تازه و غیرخسته")
-            if s5m.rsi > s5m.prev_rsi:
-                score += 5
-                reasons.append("5 امتیاز: RSI رو به بالا")
-        else:
-            if float(config.PULLBACK_SHORT_RSI_MIN) <= s5m.rsi <= float(config.PULLBACK_SHORT_RSI_MAX):
-                score += 10
-                reasons.append("10 امتیاز: RSI شورت تازه و غیرخسته")
-            if s5m.rsi < s5m.prev_rsi:
-                score += 5
-                reasons.append("5 امتیاز: RSI رو به پایین")
-
-        # MACD momentum: 10
-        if direction == "LONG":
-            if s5m.macd_hist >= s5m.prev_macd_hist:
-                score += 6
-                reasons.append("6 امتیاز: Histogram 5M بهتر شده")
-            if s5m.macd >= s5m.macd_signal:
-                score += 4
-                reasons.append("4 امتیاز: MACD 5M سمت لانگ")
-        else:
-            if s5m.macd_hist <= s5m.prev_macd_hist:
-                score += 6
-                reasons.append("6 امتیاز: Histogram 5M ضعیف‌تر شده")
-            if s5m.macd <= s5m.macd_signal:
-                score += 4
-                reasons.append("4 امتیاز: MACD 5M سمت شورت")
-
-        # ATR/SL quality 5M: 10
-        atr_pct = s5m.atr / s5m.close if s5m.close > 0 else 0.0
-        if float(config.MIN_5M_SL_PCT) <= max(atr_pct, float(config.MIN_5M_SL_PCT)) <= float(config.MAX_5M_SL_PCT):
-            score += 10
-            reasons.append("10 امتیاز: ATR/SL پنج دقیقه‌ای منطقی")
-
-        return clamp(score, 0, 100), reasons
+            return max(0.0, (close - base) / base)
+        return max(0.0, (base - close) / base)
 
     def _make_5m_sl(self, direction: Direction, s: Snapshot, entry: float) -> float:
         atr_stop = float(s.atr) * float(config.ATR_SL_MULT)

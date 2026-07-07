@@ -140,32 +140,23 @@ SWING_LOOKBACK_5M = _env_int("SWING_LOOKBACK_5M", 12)
 VWAP_LOOKBACK_5M = _env_int("VWAP_LOOKBACK_5M", 48)
 VOLUME_LOOKBACK_5M = _env_int("VOLUME_LOOKBACK_5M", 20)
 
-# Simple anti-chase guard: prevents entering after the 5M move is already tired.
-# These are hard reject filters, not support/resistance.
-ANTI_CHASE_ENABLED = _env_bool("ANTI_CHASE_ENABLED", True)
-ANTI_CHASE_MAX_EMA50_DISTANCE_PCT = _env_float("ANTI_CHASE_MAX_EMA50_DISTANCE_PCT", 0.0045)  # 0.45%
-ANTI_CHASE_MAX_VWAP_DISTANCE_PCT = _env_float("ANTI_CHASE_MAX_VWAP_DISTANCE_PCT", 0.0035)   # 0.35%
-ANTI_CHASE_MAX_3CANDLE_MOVE_PCT = _env_float("ANTI_CHASE_MAX_3CANDLE_MOVE_PCT", 0.0090)     # 0.90%
-ANTI_CHASE_LONG_MAX_RSI = _env_float("ANTI_CHASE_LONG_MAX_RSI", 68.0)
-ANTI_CHASE_SHORT_MIN_RSI = _env_float("ANTI_CHASE_SHORT_MIN_RSI", 32.0)
-
-# Pullback Re-Entry: enter early on a healthy pullback, not after the move is tired.
-# Not support/resistance. This only checks distance from EMA50/VWAP, RSI freshness, MACD histogram and range.
-PULLBACK_REENTRY_ENABLED = _env_bool("PULLBACK_REENTRY_ENABLED", True)
-PULLBACK_MIN_RECLAIM_DISTANCE_PCT = _env_float("PULLBACK_MIN_RECLAIM_DISTANCE_PCT", 0.0005)  # 0.05%, avoids pure noise around EMA/VWAP
-PULLBACK_MAX_ENTRY_DISTANCE_PCT = _env_float("PULLBACK_MAX_ENTRY_DISTANCE_PCT", 0.0035)    # 0.35%, avoids late/chase entries
-PULLBACK_LONG_RSI_MIN = _env_float("PULLBACK_LONG_RSI_MIN", 48.0)
-PULLBACK_LONG_RSI_MAX = _env_float("PULLBACK_LONG_RSI_MAX", 62.0)
-PULLBACK_SHORT_RSI_MIN = _env_float("PULLBACK_SHORT_RSI_MIN", 38.0)
-PULLBACK_SHORT_RSI_MAX = _env_float("PULLBACK_SHORT_RSI_MAX", 52.0)
-PULLBACK_REQUIRED_TRIGGERS = _env_int("PULLBACK_REQUIRED_TRIGGERS", 2)
-
-# Range guard: avoid 5M chop where EMA/RSI give fake signals.
-RANGE_FILTER_ENABLED = _env_bool("RANGE_FILTER_ENABLED", True)
-RANGE_MAX_EMA_SPREAD_PCT = _env_float("RANGE_MAX_EMA_SPREAD_PCT", 0.0020)       # 0.20%
-RANGE_MAX_EMA50_SLOPE_10_PCT = _env_float("RANGE_MAX_EMA50_SLOPE_10_PCT", 0.0010)  # 0.10% over 10 candles
-RANGE_MIN_20CANDLE_RANGE_PCT = _env_float("RANGE_MIN_20CANDLE_RANGE_PCT", 0.0060)   # 0.60%
-RANGE_MIN_FLAGS = _env_int("RANGE_MIN_FLAGS", 2)
+# Compression Breakout Entry: enter when price breaks out of a short 5M compression box.
+# This replaces the old pullback/anti-chase entry logic. It is not support/resistance;
+# it only checks a recent small range, breakout candle quality, volume and fresh momentum.
+COMPRESSION_BREAKOUT_ENABLED = _env_bool("COMPRESSION_BREAKOUT_ENABLED", True)
+BREAKOUT_LOOKBACK_5M = _env_int("BREAKOUT_LOOKBACK_5M", 8)
+BREAKOUT_MAX_PRE_RANGE_PCT = _env_float("BREAKOUT_MAX_PRE_RANGE_PCT", 0.0060)       # previous 8-candle box <= 0.60%
+BREAKOUT_MIN_BREAK_PCT = _env_float("BREAKOUT_MIN_BREAK_PCT", 0.0003)              # break buffer 0.03%
+BREAKOUT_MIN_BODY_RATIO = _env_float("BREAKOUT_MIN_BODY_RATIO", 0.55)              # candle body >= 55% of range
+BREAKOUT_MIN_CLOSE_POSITION = _env_float("BREAKOUT_MIN_CLOSE_POSITION", 0.65)      # close near high/low
+BREAKOUT_MIN_VOLUME_RATIO = _env_float("BREAKOUT_MIN_VOLUME_RATIO", 1.20)          # volume expansion
+BREAKOUT_LONG_RSI_MIN = _env_float("BREAKOUT_LONG_RSI_MIN", 50.0)
+BREAKOUT_LONG_RSI_MAX = _env_float("BREAKOUT_LONG_RSI_MAX", 64.0)
+BREAKOUT_SHORT_RSI_MIN = _env_float("BREAKOUT_SHORT_RSI_MIN", 36.0)
+BREAKOUT_SHORT_RSI_MAX = _env_float("BREAKOUT_SHORT_RSI_MAX", 50.0)
+BREAKOUT_MAX_3CANDLE_MOVE_PCT = _env_float("BREAKOUT_MAX_3CANDLE_MOVE_PCT", 0.0075)  # 0.75% anti-late
+BREAKOUT_MAX_EMA50_DISTANCE_PCT = _env_float("BREAKOUT_MAX_EMA50_DISTANCE_PCT", 0.0060)
+BREAKOUT_MAX_VWAP_DISTANCE_PCT = _env_float("BREAKOUT_MAX_VWAP_DISTANCE_PCT", 0.0045)
 
 # Hard rule: no support/resistance filter for this scalper.
 ENABLE_SUPPORT_RESISTANCE_FILTER = False

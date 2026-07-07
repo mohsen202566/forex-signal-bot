@@ -36,7 +36,7 @@ class Crypto5MScalperBot:
     # -------------------------
     def run(self) -> None:
         logger.info("%s شروع شد | symbols=%s", config.BOT_NAME, len(config.WATCHLIST))
-        self.telegram.send("✅ ربات 5M اسکالپ ساده روشن شد.\nبرای پنل بنویس: ترید")
+        self.telegram.send("✅ ربات 5M اسکالپ Compression Breakout روشن شد.\nبرای پنل بنویس: ترید")
         threads = [
             threading.Thread(target=self._scan_loop, name="scan-loop", daemon=True),
             threading.Thread(target=self._monitor_loop, name="monitor-loop", daemon=True),
