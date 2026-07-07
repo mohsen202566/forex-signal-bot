@@ -130,8 +130,8 @@ DEFAULT_MIN_NET_PROFIT_USDT = _env_float("DEFAULT_MIN_NET_PROFIT_USDT", 0.01)
 # Simple 5M strategy laws.
 SIGNAL_SCORE_THRESHOLD = _env_float("SIGNAL_SCORE_THRESHOLD", 70.0)
 STRONG_SCORE_THRESHOLD = _env_float("STRONG_SCORE_THRESHOLD", 85.0)
-RR_NORMAL = _env_float("RR_NORMAL", 1.3)
-RR_STRONG = _env_float("RR_STRONG", 1.3)
+RR_NORMAL = _env_float("RR_NORMAL", 1.5)
+RR_STRONG = _env_float("RR_STRONG", 1.5)
 ROUND_TRIP_FEE_USDT = _env_float("ROUND_TRIP_FEE_USDT", 0.05)
 MIN_5M_SL_PCT = _env_float("MIN_5M_SL_PCT", 0.0025)   # 0.25%
 MAX_5M_SL_PCT = _env_float("MAX_5M_SL_PCT", 0.0120)   # 1.20%
@@ -148,6 +148,24 @@ ANTI_CHASE_MAX_VWAP_DISTANCE_PCT = _env_float("ANTI_CHASE_MAX_VWAP_DISTANCE_PCT"
 ANTI_CHASE_MAX_3CANDLE_MOVE_PCT = _env_float("ANTI_CHASE_MAX_3CANDLE_MOVE_PCT", 0.0090)     # 0.90%
 ANTI_CHASE_LONG_MAX_RSI = _env_float("ANTI_CHASE_LONG_MAX_RSI", 68.0)
 ANTI_CHASE_SHORT_MIN_RSI = _env_float("ANTI_CHASE_SHORT_MIN_RSI", 32.0)
+
+# Pullback Re-Entry: enter early on a healthy pullback, not after the move is tired.
+# Not support/resistance. This only checks distance from EMA50/VWAP, RSI freshness, MACD histogram and range.
+PULLBACK_REENTRY_ENABLED = _env_bool("PULLBACK_REENTRY_ENABLED", True)
+PULLBACK_MIN_RECLAIM_DISTANCE_PCT = _env_float("PULLBACK_MIN_RECLAIM_DISTANCE_PCT", 0.0005)  # 0.05%, avoids pure noise around EMA/VWAP
+PULLBACK_MAX_ENTRY_DISTANCE_PCT = _env_float("PULLBACK_MAX_ENTRY_DISTANCE_PCT", 0.0035)    # 0.35%, avoids late/chase entries
+PULLBACK_LONG_RSI_MIN = _env_float("PULLBACK_LONG_RSI_MIN", 48.0)
+PULLBACK_LONG_RSI_MAX = _env_float("PULLBACK_LONG_RSI_MAX", 62.0)
+PULLBACK_SHORT_RSI_MIN = _env_float("PULLBACK_SHORT_RSI_MIN", 38.0)
+PULLBACK_SHORT_RSI_MAX = _env_float("PULLBACK_SHORT_RSI_MAX", 52.0)
+PULLBACK_REQUIRED_TRIGGERS = _env_int("PULLBACK_REQUIRED_TRIGGERS", 2)
+
+# Range guard: avoid 5M chop where EMA/RSI give fake signals.
+RANGE_FILTER_ENABLED = _env_bool("RANGE_FILTER_ENABLED", True)
+RANGE_MAX_EMA_SPREAD_PCT = _env_float("RANGE_MAX_EMA_SPREAD_PCT", 0.0020)       # 0.20%
+RANGE_MAX_EMA50_SLOPE_10_PCT = _env_float("RANGE_MAX_EMA50_SLOPE_10_PCT", 0.0010)  # 0.10% over 10 candles
+RANGE_MIN_20CANDLE_RANGE_PCT = _env_float("RANGE_MIN_20CANDLE_RANGE_PCT", 0.0060)   # 0.60%
+RANGE_MIN_FLAGS = _env_int("RANGE_MIN_FLAGS", 2)
 
 # Hard rule: no support/resistance filter for this scalper.
 ENABLE_SUPPORT_RESISTANCE_FILTER = False

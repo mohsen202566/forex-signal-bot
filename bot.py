@@ -124,6 +124,7 @@ class Crypto5MScalperBot:
                 if plan is None:
                     reason = getattr(self.strategy, "last_reject_reason", "") or "رد شد: شرایط سیگنال کامل نشد"
                     summary["rejected"] += 1
+                    logger.info("scan rejected: %s | %s", symbol, reason)
                     self.storage.add_scan_reject(symbol, reason)
                     reason_counts[reason] = reason_counts.get(reason, 0) + 1
                     summary["last_rejects"].append({"symbol": symbol, "reason": reason})
@@ -397,7 +398,13 @@ class Crypto5MScalperBot:
         ])
 
     def _send_result(self, signal: StoredSignal, result) -> int | None:
-        return self.telegram.send(render_result(signal, result), reply_to_message_id=signal.message_id)
+        text = render_result(signal, result)
+        msg_id = self.telegram.send(text, reply_to_message_id=signal.message_id)
+        if msg_id is None and signal.message_id:
+            # If Telegram rejects the reply target or reply delivery fails, still send
+            # the result as a normal message so monitoring/results are not lost.
+            msg_id = self.telegram.send("نتیجه مربوط به سیگنال #" + str(signal.id) + "\n" + text)
+        return msg_id
 
 
 def main() -> None:
