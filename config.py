@@ -130,8 +130,8 @@ DEFAULT_MIN_NET_PROFIT_USDT = _env_float("DEFAULT_MIN_NET_PROFIT_USDT", 0.01)
 # Simple 5M strategy laws.
 SIGNAL_SCORE_THRESHOLD = _env_float("SIGNAL_SCORE_THRESHOLD", 70.0)
 STRONG_SCORE_THRESHOLD = _env_float("STRONG_SCORE_THRESHOLD", 85.0)
-RR_NORMAL = _env_float("RR_NORMAL", 1.5)
-RR_STRONG = _env_float("RR_STRONG", 1.5)
+RR_NORMAL = _env_float("RR_NORMAL", 1.3)
+RR_STRONG = _env_float("RR_STRONG", 1.3)
 ROUND_TRIP_FEE_USDT = _env_float("ROUND_TRIP_FEE_USDT", 0.05)
 MIN_5M_SL_PCT = _env_float("MIN_5M_SL_PCT", 0.0025)   # 0.25%
 MAX_5M_SL_PCT = _env_float("MAX_5M_SL_PCT", 0.0120)   # 1.20%
