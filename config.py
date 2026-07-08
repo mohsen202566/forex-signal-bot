@@ -7,6 +7,27 @@ from __future__ import annotations
 
 import os
 
+# اگر python-dotenv نصب باشد، فایل .env از ریشه پروژه خودکار خوانده می‌شود.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+# -----------------------------
+# 35 نماد پیش‌فرض: باید هم در OKX SWAP و هم در Toobit Futures قابل اعتبارسنجی باشند.
+# اگر یکی از صرافی‌ها نمادی را نداشت، /validate_symbols گزارش می‌دهد و در اسکن رد می‌شود.
+# -----------------------------
+DEFAULT_SYMBOLS_35 = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
+    "DOGEUSDT", "ADAUSDT", "TRXUSDT", "AVAXUSDT", "LINKUSDT",
+    "SUIUSDT", "LTCUSDT", "BCHUSDT", "DOTUSDT", "UNIUSDT",
+    "AAVEUSDT", "NEARUSDT", "OPUSDT", "ARBUSDT", "INJUSDT",
+    "ATOMUSDT", "ETCUSDT", "FILUSDT", "APTUSDT", "WLDUSDT",
+    "PEPEUSDT", "SHIBUSDT", "SEIUSDT", "TONUSDT", "ICPUSDT",
+    "HBARUSDT", "ARUSDT", "TIAUSDT", "ORDIUSDT", "JUPUSDT",
+]
+
 # -----------------------------
 # Telegram
 # -----------------------------
@@ -21,12 +42,18 @@ TELEGRAM_ADMIN_IDS = [int(x.strip()) for x in os.getenv("TELEGRAM_ADMIN_IDS", ""
 BOT_MODE = os.getenv("BOT_MODE", "NORMAL").upper()  # NORMAL / REAL
 REAL_TRADING_ENABLED = os.getenv("REAL_TRADING_ENABLED", "false").lower() == "true"
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
-RESULT_CHECK_INTERVAL_SECONDS = int(os.getenv("RESULT_CHECK_INTERVAL_SECONDS", "60"))
+RESULT_CHECK_INTERVAL_SECONDS = int(os.getenv("RESULT_CHECK_INTERVAL_SECONDS", "30"))
+MONITORING_ENABLED = os.getenv("MONITORING_ENABLED", "true").lower() == "true"
+SEND_SIGNAL_MESSAGES = os.getenv("SEND_SIGNAL_MESSAGES", "true").lower() == "true"
+SEND_RESULT_MESSAGES = os.getenv("SEND_RESULT_MESSAGES", "true").lower() == "true"
 
 # -----------------------------
 # نمادها: داخلی/Toobit = BTCUSDT ، OKX = BTC-USDT-SWAP
 # -----------------------------
-SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT").split(",") if s.strip()]
+SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", ",".join(DEFAULT_SYMBOLS_35)).split(",") if s.strip()]
+REQUIRED_COMMON_SYMBOL_COUNT = int(os.getenv("REQUIRED_COMMON_SYMBOL_COUNT", "35"))
+REQUIRE_EXCHANGE_SYMBOL_MATCH = os.getenv("REQUIRE_EXCHANGE_SYMBOL_MATCH", "true").lower() == "true"
+VALIDATE_SYMBOLS_ON_START = os.getenv("VALIDATE_SYMBOLS_ON_START", "true").lower() == "true"
 OKX_INST_TYPE = os.getenv("OKX_INST_TYPE", "SWAP")
 OKX_BASE_URL = os.getenv("OKX_BASE_URL", "https://www.okx.com")
 OKX_CANDLE_LIMIT_5M = int(os.getenv("OKX_CANDLE_LIMIT_5M", "180"))
@@ -125,6 +152,7 @@ MIN_TARGET_ROOM_R_MULT = float(os.getenv("MIN_TARGET_ROOM_R_MULT", "1.0"))
 # -----------------------------
 STATE_FILE = os.getenv("STATE_FILE", "runtime_state.json")
 SIGNALS_FILE = os.getenv("SIGNALS_FILE", "signals.jsonl")
+RESULTS_FILE = os.getenv("RESULTS_FILE", "results.jsonl")
 ACTIVE_TRADES_FILE = os.getenv("ACTIVE_TRADES_FILE", "active_trades.json")
 TRADE_HISTORY_FILE = os.getenv("TRADE_HISTORY_FILE", "trade_history.csv")
 LOG_FILE = os.getenv("LOG_FILE", "bot.log")

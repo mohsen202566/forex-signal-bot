@@ -53,6 +53,12 @@ class OKXClient:
             raise RuntimeError(f"پاسخ ناموفق OKX: {payload}")
         return payload
 
+
+    def get_instruments(self) -> list[dict[str, Any]]:
+        """لیست نمادهای قابل معامله OKX برای اعتبارسنجی مشترک با Toobit."""
+        payload = self._get("/api/v5/public/instruments", {"instType": config.OKX_INST_TYPE})
+        return [x for x in (payload.get("data") or []) if isinstance(x, dict)]
+
     def get_candles(self, symbol: str, bar: str, limit: int) -> list[Candle]:
         inst_id = to_okx_inst_id(symbol)
         payload = self._get("/api/v5/market/candles", {"instId": inst_id, "bar": bar, "limit": str(limit)})

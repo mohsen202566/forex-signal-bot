@@ -140,6 +140,7 @@ class TradeManager:
                 else:
                     closed.append(result)
                     self._append_history(result)
+                    append_jsonl(config.RESULTS_FILE, result)
                     if float(result.get("pnl", 0) or 0) < 0:
                         state.touch_loss(str(result.get("symbol")))
             except Exception as exc:
@@ -164,16 +165,21 @@ class TradeManager:
             if self.toobit.get_open_position(symbol, side):
                 return None
         except ToobitError:
+            # اگر endpoint پوزیشن خطا داد، برای جلوگیری از نتیجه اشتباه، history را هم امتحان می‌کنیم.
             pass
 
         res = self.toobit.find_realized_result(symbol=symbol, side=side, start_ms=opened_ms)
         if not res:
             return None
+
+        close_price = res.get("close_price")
+        result = self._infer_result_label(t, close_price, float(res.get("pnl") or 0))
         return {
             **t,
             "closed_ms": res.get("close_time_ms") or now_ms(),
-            "close_price": res.get("close_price"),
+            "close_price": close_price,
             "pnl": res.get("pnl"),
+            "result": result,
             "result_source": "TOOBIT_HISTORY",
             "raw_result": res.get("raw"),
         }
@@ -181,39 +187,89 @@ class TradeManager:
     def _check_normal_result(self, t: dict[str, Any]) -> dict[str, Any] | None:
         symbol = str(t.get("symbol"))
         side = str(t.get("side"))
-        ticker = self.okx.get_ticker(symbol)
-        price = float(ticker.get("last") or t.get("entry_price") or 0)
         tp = float(t.get("tp_price"))
         sl = float(t.get("sl_price"))
         entry = float(t.get("entry_price"))
+        opened_ms = int(t.get("opened_ms") or t.get("signal_ms") or 0)
+
+        # برای مانیتور نرمال، کندل‌های OKX را چک می‌کنیم تا اگر داخل کندل TP/SL خورد از دست نرود.
+        candles = self.okx.get_candles(symbol, "5m", 200)
+        relevant = [c for c in candles if int(c.ts) >= opened_ms]
+        if not relevant:
+            ticker = self.okx.get_ticker(symbol)
+            price = float(ticker.get("last") or t.get("entry_price") or 0)
+            relevant = []
+        else:
+            price = relevant[-1].close
 
         hit: str | None = None
-        if side == "BUY":
-            if price >= tp:
-                hit = "TP"
-            elif price <= sl:
-                hit = "SL"
-            pnl_pct = (price - entry) / entry * 100 if entry else 0.0
-        else:
-            if price <= tp:
-                hit = "TP"
-            elif price >= sl:
-                hit = "SL"
-            pnl_pct = (entry - price) / entry * 100 if entry else 0.0
+        close_price = price
+        closed_ms = now_ms()
+
+        for c in relevant:
+            if side == "BUY":
+                sl_hit = c.low <= sl
+                tp_hit = c.high >= tp
+                if sl_hit and tp_hit:
+                    hit = "SL_FIRST_CONSERVATIVE"
+                    close_price = sl
+                elif sl_hit:
+                    hit = "SL"
+                    close_price = sl
+                elif tp_hit:
+                    hit = "TP"
+                    close_price = tp
+            else:
+                sl_hit = c.high >= sl
+                tp_hit = c.low <= tp
+                if sl_hit and tp_hit:
+                    hit = "SL_FIRST_CONSERVATIVE"
+                    close_price = sl
+                elif sl_hit:
+                    hit = "SL"
+                    close_price = sl
+                elif tp_hit:
+                    hit = "TP"
+                    close_price = tp
+            if hit:
+                closed_ms = int(c.ts)
+                break
+
         if not hit:
             return None
+
+        if side == "BUY":
+            pnl_pct = (close_price - entry) / entry * 100 if entry else 0.0
+        else:
+            pnl_pct = (entry - close_price) / entry * 100 if entry else 0.0
+
         return {
             **t,
-            "closed_ms": now_ms(),
-            "close_price": price,
+            "closed_ms": closed_ms,
+            "close_price": close_price,
             "pnl": pnl_pct,
+            "pnl_unit": "PCT_NORMAL_SIM",
             "result": hit,
-            "result_source": "OKX_NORMAL_SIM",
+            "result_source": "OKX_NORMAL_SIM_CANDLES",
         }
+
+    @staticmethod
+    def _infer_result_label(t: dict[str, Any], close_price: Any, pnl: float) -> str:
+        try:
+            cp = float(close_price)
+            tp = float(t.get("tp_price"))
+            sl = float(t.get("sl_price"))
+            if cp > 0 and abs(cp - tp) / cp * 100 <= 0.15:
+                return "TP"
+            if cp > 0 and abs(cp - sl) / cp * 100 <= 0.15:
+                return "SL"
+        except Exception:
+            pass
+        return "PROFIT" if pnl > 0 else "LOSS" if pnl < 0 else "FLAT"
 
     def _append_history(self, result: dict[str, Any]) -> None:
         path = Path(config.TRADE_HISTORY_FILE)
-        fields = ["mode", "symbol", "side", "entry_price", "sl_price", "tp_price", "rr", "opened_ms", "closed_ms", "close_price", "pnl", "result", "result_source"]
+        fields = ["mode", "symbol", "side", "entry_price", "sl_price", "tp_price", "rr", "opened_ms", "closed_ms", "close_price", "pnl", "pnl_unit", "result", "result_source"]
         exists = path.exists()
         with open(path, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fields)
@@ -234,3 +290,35 @@ class TradeManager:
                 f"TP {human_price(float(t.get('tp_price') or 0))} | RR {float(t.get('rr') or 0):.2f}"
             )
         return "\n\n".join(lines)
+
+
+    @staticmethod
+    def format_result(result: dict[str, Any]) -> str:
+        pnl = result.get("pnl")
+        pnl_unit = result.get("pnl_unit") or ("USDT_REAL" if result.get("mode") == "REAL" else "PCT_NORMAL_SIM")
+        return (
+            f"✅ نتیجه معامله\n"
+            f"{result.get('mode')} | {result.get('symbol')} | {result.get('direction')} | {result.get('result')}\n"
+            f"Entry: {human_price(float(result.get('entry_price') or 0))}\n"
+            f"Close: {human_price(float(result.get('close_price') or 0))}\n"
+            f"SL: {human_price(float(result.get('sl_price') or 0))} | TP: {human_price(float(result.get('tp_price') or 0))}\n"
+            f"PnL: {pnl} {pnl_unit}\n"
+            f"Source: {result.get('result_source')}"
+        )
+
+    def format_recent_results(self, limit: int = 10) -> str:
+        path = Path(config.RESULTS_FILE)
+        if not path.exists():
+            return "هنوز نتیجه‌ای ثبت نشده است."
+        lines = path.read_text(encoding="utf-8").splitlines()[-max(1, int(limit)):]
+        if not lines:
+            return "هنوز نتیجه‌ای ثبت نشده است."
+        import json
+        blocks: list[str] = []
+        for line in lines:
+            try:
+                item = json.loads(line)
+                blocks.append(self.format_result(item))
+            except Exception:
+                continue
+        return "\n\n".join(blocks) if blocks else "نتیجه قابل نمایش پیدا نشد."

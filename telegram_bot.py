@@ -13,6 +13,7 @@ from state import BotState
 from toobit_client import ToobitClient
 from trade_manager import TradeManager
 from okx_client import OKXClient
+from symbol_registry import default_symbols_text
 from utils import is_admin, logger
 
 engine: BotEngine | None = None
@@ -24,7 +25,8 @@ def menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 Status", callback_data="status"), InlineKeyboardButton("🔎 Scan", callback_data="scan")],
         [InlineKeyboardButton("🟢 Normal", callback_data="mode_normal"), InlineKeyboardButton("🔴 Real", callback_data="mode_real")],
         [InlineKeyboardButton("▶️ Trade ON", callback_data="trade_on"), InlineKeyboardButton("⏸ Trade OFF", callback_data="trade_off")],
-        [InlineKeyboardButton("📌 Active", callback_data="active"), InlineKeyboardButton("💰 Balance", callback_data="balance")],
+        [InlineKeyboardButton("📌 Active", callback_data="active"), InlineKeyboardButton("✅ Results", callback_data="results")],
+        [InlineKeyboardButton("💰 Balance", callback_data="balance"), InlineKeyboardButton("🔗 Validate", callback_data="validate_symbols")],
     ])
 
 
@@ -74,6 +76,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/balance موجودی Toobit\n"
         "/pnl PnL امروز Toobit\n"
         "/positions پوزیشن‌های Toobit\n"
+        "/results 10 نمایش نتایج ثبت‌شده\n"
+        "/validate_symbols چک همخوانی ۳۵ ارز در OKX و Toobit\n"
+        "/reset_symbols برگشت به ۳۵ ارز پیش‌فرض\n"
         "/symbols لیست نمادها\n"
         "/add BTCUSDT افزودن نماد\n"
         "/remove BTCUSDT حذف نماد\n"
@@ -102,7 +107,9 @@ def format_status(state: BotState) -> str:
     return (
         f"Mode: {state.mode}\n"
         f"Trading: {'ON' if state.trading_enabled else 'OFF'}\n"
-        f"Symbols: {', '.join(state.symbols)}\n"
+        f"Symbols: {len(state.symbols)} | {', '.join(state.symbols)}\n"
+        f"Monitoring: {'ON' if config.MONITORING_ENABLED else 'OFF'} | Result interval: {config.RESULT_CHECK_INTERVAL_SECONDS}s\n"
+        f"Required common symbols: {config.REQUIRED_COMMON_SYMBOL_COUNT}\n"
         f"Amount: {state.trade_amount_usdt} USDT\n"
         f"Leverage: {state.leverage}x\n"
         f"RR min/default: {state.min_rr}/{state.default_rr}\n"
@@ -191,6 +198,45 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"خطا در خواندن پوزیشن‌ها: {exc}")
 
 
+async def results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not guard(update):
+        return
+    limit = 10
+    if context.args:
+        try:
+            limit = max(1, min(30, int(context.args[0])))
+        except Exception:
+            pass
+    tm = TradeManager(OKXClient())
+    await update.message.reply_text(tm.format_recent_results(limit))
+
+
+async def validate_symbols_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not guard(update):
+        return
+    assert engine is not None
+    report = await engine.validate_symbols_once(force=True)
+    if report is None:
+        await update.message.reply_text("اعتبارسنجی انجام نشد؛ لاگ را چک کن.")
+        return
+    await update.message.reply_text(report.short_text())
+
+
+async def reset_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not guard(update):
+        return
+    state = BotState.load()
+    state.symbols = list(config.DEFAULT_SYMBOLS_35)
+    state.save()
+    if engine is not None:
+        engine.symbol_report = None
+        engine.valid_symbols = set()
+    await update.message.reply_text(
+        f"لیست نمادها به ۳۵ ارز پیش‌فرض برگشت:\n{default_symbols_text()}",
+        reply_markup=menu_keyboard(),
+    )
+
+
 async def symbols(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not guard(update):
         return
@@ -263,7 +309,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif data == "trade_on": await trade_on(dummy, context)  # type: ignore[arg-type]
     elif data == "trade_off": await trade_off(dummy, context)  # type: ignore[arg-type]
     elif data == "active": await active(dummy, context)  # type: ignore[arg-type]
+    elif data == "results": await results(dummy, context)  # type: ignore[arg-type]
     elif data == "balance": await balance(dummy, context)  # type: ignore[arg-type]
+    elif data == "validate_symbols": await validate_symbols_cmd(dummy, context)  # type: ignore[arg-type]
 
 
 def build_application() -> Application:
@@ -284,6 +332,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("pnl", pnl))
     app.add_handler(CommandHandler("positions", positions))
+    app.add_handler(CommandHandler("results", results))
+    app.add_handler(CommandHandler("validate_symbols", validate_symbols_cmd))
+    app.add_handler(CommandHandler("reset_symbols", reset_symbols))
     app.add_handler(CommandHandler("symbols", symbols))
     app.add_handler(CommandHandler("add", add_symbol))
     app.add_handler(CommandHandler("remove", remove_symbol))
@@ -297,7 +348,10 @@ def build_application() -> Application:
 async def post_init(app: Application) -> None:
     global engine
     engine = BotEngine(notify=notify_admins)
-    asyncio.create_task(engine.loop(config.SCAN_INTERVAL_SECONDS))
+    if config.VALIDATE_SYMBOLS_ON_START:
+        asyncio.create_task(engine.validate_symbols_once(force=True))
+    asyncio.create_task(engine.scan_loop(config.SCAN_INTERVAL_SECONDS))
+    asyncio.create_task(engine.monitor_loop(config.RESULT_CHECK_INTERVAL_SECONDS))
 
 
 def run() -> None:
