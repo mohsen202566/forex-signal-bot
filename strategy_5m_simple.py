@@ -310,7 +310,10 @@ class Simple5MScalperStrategy:
         setup = self._momentum_continuation_setup(direction, candles_5m, s5m)
         if setup is not None:
             return setup
-        return self._reject("رد شد: 5M هنوز ستاپ معتبر Sweep/Reclaim یا Breakout/Retest یا Momentum نداده")
+        setup = self._trend_context_setup(direction, candles_5m, s5m)
+        if setup is not None:
+            return setup
+        return self._reject("رد شد: 5M هنوز حتی Context سالم برای 1M Trigger نداده")
 
     def _candidate_5m_indices(self, candles_5m: list[Candle], lookback: int) -> list[int]:
         valid = max(1, int(config.SETUP_VALID_5M_CANDLES))
@@ -459,7 +462,8 @@ class Simple5MScalperStrategy:
                 flags.append(f"حجم 5M قابل قبول:{s5m.volume_ratio:.2f}x")
             if float(last.close) > float(last.open) or close_pos >= 0.50:
                 flags.append("کندل آخر 5M ضد لانگ نیست")
-            sl_anchor = min(float(c.low) for c in recent)
+            # Momentum is only a context setup; SL must be behind the 1M trigger, not a far 5M swing.
+            sl_anchor = close
         else:
             ref_candidates = [x for x in (float(s5m.ema20), float(s5m.vwap)) if x > 0]
             if not ref_candidates:
@@ -482,7 +486,8 @@ class Simple5MScalperStrategy:
                 flags.append(f"حجم 5M قابل قبول:{s5m.volume_ratio:.2f}x")
             if float(last.close) < float(last.open) or close_pos <= 0.50:
                 flags.append("کندل آخر 5M ضد شورت نیست")
-            sl_anchor = max(float(c.high) for c in recent)
+            # Momentum is only a context setup; SL must be behind the 1M trigger, not a far 5M swing.
+            sl_anchor = close
 
         if len(flags) < int(config.MOMENTUM_MIN_FLAGS):
             return None
@@ -494,6 +499,94 @@ class Simple5MScalperStrategy:
             reasons=(
                 "5M ستاپ Momentum Continuation: روند سالم است، ورود هنوز فقط با 1M Trigger مجاز است",
                 " | ".join(flags[:4]),
+            ),
+        )
+
+    def _trend_context_setup(self, direction: Direction, candles_5m: list[Candle], s5m: Snapshot) -> SetupScore | None:
+        """Soft 5M context fallback for anti-choke behavior.
+
+        Sweep/Reclaim and Breakout/Retest are high-quality patterns but do not
+        appear on every healthy move. This fallback does NOT open a trade. It
+        only says: 5M is alive, not too late, and not against the selected
+        1H/15M direction, so the coin may continue to the 1M trigger gate.
+        The actual entry, SL and final quality still come from 1M.
+        """
+        if not bool(config.CONTEXT_SETUP_ENABLED):
+            return None
+        if len(candles_5m) < 8:
+            return None
+        close = float(s5m.close or 0.0)
+        if close <= 0:
+            return None
+
+        max_dist = float(config.CONTEXT_MAX_DISTANCE_FROM_EMA_VWAP_PCT)
+        max_move = float(config.CONTEXT_MAX_3CANDLE_MOVE_PCT)
+        move = self._directional_3candle_move(direction, candles_5m, close)
+        if move > max_move:
+            return None
+
+        flags: list[str] = []
+        refs = [x for x in (float(s5m.ema20), float(s5m.vwap), float(s5m.ema50)) if x > 0]
+        if not refs:
+            return None
+
+        if direction == "LONG":
+            # At least one fast reference must be reclaimed; requiring both EMA20
+            # and VWAP choked the scanner in normal trend continuation.
+            above_ema20 = close > float(s5m.ema20)
+            above_vwap = close > float(s5m.vwap)
+            above_ema50 = close > float(s5m.ema50)
+            if not (above_ema20 or above_vwap):
+                return None
+            nearest_ref = max([r for r in (float(s5m.ema20), float(s5m.vwap)) if r > 0 and close >= r] or [min(refs)])
+            dist = max(0.0, (close - nearest_ref) / close)
+            if dist > max_dist:
+                return None
+            if above_ema20:
+                flags.append("5M بالای EMA20")
+            if above_vwap:
+                flags.append("5M بالای VWAP")
+            if above_ema50:
+                flags.append("5M بالای EMA50")
+            if float(config.CONTEXT_LONG_RSI_MIN) <= float(s5m.rsi) <= float(config.CONTEXT_LONG_RSI_MAX):
+                flags.append(f"RSI 5M قابل قبول:{s5m.rsi:.1f}")
+            if float(s5m.macd_hist) >= float(s5m.prev_macd_hist):
+                flags.append("MACD 5M خلاف لانگ نیست")
+            level = close
+            sl_anchor = close
+        else:
+            below_ema20 = close < float(s5m.ema20)
+            below_vwap = close < float(s5m.vwap)
+            below_ema50 = close < float(s5m.ema50)
+            if not (below_ema20 or below_vwap):
+                return None
+            nearest_ref = min([r for r in (float(s5m.ema20), float(s5m.vwap)) if r > 0 and close <= r] or [max(refs)])
+            dist = max(0.0, (nearest_ref - close) / close)
+            if dist > max_dist:
+                return None
+            if below_ema20:
+                flags.append("5M زیر EMA20")
+            if below_vwap:
+                flags.append("5M زیر VWAP")
+            if below_ema50:
+                flags.append("5M زیر EMA50")
+            if float(config.CONTEXT_SHORT_RSI_MIN) <= float(s5m.rsi) <= float(config.CONTEXT_SHORT_RSI_MAX):
+                flags.append(f"RSI 5M قابل قبول:{s5m.rsi:.1f}")
+            if float(s5m.macd_hist) <= float(s5m.prev_macd_hist):
+                flags.append("MACD 5M خلاف شورت نیست")
+            level = close
+            sl_anchor = close
+
+        if len(flags) < int(config.CONTEXT_MIN_FLAGS):
+            return None
+        return SetupScore(
+            "5M Trend Context",
+            level=float(level),
+            sl_anchor=float(sl_anchor),
+            score=15.0,
+            reasons=(
+                "5M Context سالم: ستاپ کلاسیک نبود، ولی بازار برای بررسی 1M Trigger خفه نمی‌شود",
+                " | ".join(flags[:4]) + f" | حرکت 3 کندل:{move * 100:.2f}%",
             ),
         )
 
