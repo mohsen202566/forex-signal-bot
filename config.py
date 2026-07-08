@@ -61,7 +61,7 @@ def _env_bool(name: str, default: bool) -> bool:
     return value in {"1", "true", "yes", "y", "on", "فعال"}
 
 
-BOT_NAME = _env("BOT_NAME", "Crypto 5M Simple Toobit Scalper")
+BOT_NAME = _env("BOT_NAME", "HMT-5 Trap Hunt Toobit Scalper")
 BOT_DATA_DIR = _env("BOT_DATA_DIR", "data")
 BOT_DB_PATH = _env("BOT_DB_PATH", os.path.join(BOT_DATA_DIR, "crypto_5m_simple.sqlite3"))
 LOG_LEVEL = _env("LOG_LEVEL", "INFO")
@@ -113,7 +113,7 @@ TOOBIT_SL_PARAM = TOOBIT_PARAM_SL
 TOOBIT_PANEL_CACHE_SECONDS = _env_int("TOOBIT_PANEL_CACHE_SECONDS", 20)
 
 # Main runtime laws.
-MAX_WATCH_SYMBOLS = _env_int("MAX_WATCH_SYMBOLS", 30)
+MAX_WATCH_SYMBOLS = _env_int("MAX_WATCH_SYMBOLS", 50)
 FULL_SCAN_SECONDS = _env_int("FULL_SCAN_SECONDS", 55)
 MONITOR_INTERVAL_SECONDS = _env_int("MONITOR_INTERVAL_SECONDS", 5)
 SLOT_RECHECK_SECONDS = _env_int("SLOT_RECHECK_SECONDS", 70)
@@ -131,32 +131,93 @@ DEFAULT_MIN_NET_PROFIT_USDT = _env_float("DEFAULT_MIN_NET_PROFIT_USDT", 0.01)
 SIGNAL_SCORE_THRESHOLD = _env_float("SIGNAL_SCORE_THRESHOLD", 70.0)
 STRONG_SCORE_THRESHOLD = _env_float("STRONG_SCORE_THRESHOLD", 85.0)
 RR_NORMAL = _env_float("RR_NORMAL", 1.5)
-RR_STRONG = _env_float("RR_STRONG", 1.5)
+RR_STRONG = _env_float("RR_STRONG", 1.8)
 ROUND_TRIP_FEE_USDT = _env_float("ROUND_TRIP_FEE_USDT", 0.05)
 MIN_5M_SL_PCT = _env_float("MIN_5M_SL_PCT", 0.0025)   # 0.25%
-MAX_5M_SL_PCT = _env_float("MAX_5M_SL_PCT", 0.0120)   # 1.20%
+MAX_5M_SL_PCT = _env_float("MAX_5M_SL_PCT", 0.0090)   # 0.90%
 ATR_SL_MULT = _env_float("ATR_SL_MULT", 1.20)
 SWING_LOOKBACK_5M = _env_int("SWING_LOOKBACK_5M", 12)
 VWAP_LOOKBACK_5M = _env_int("VWAP_LOOKBACK_5M", 48)
 VOLUME_LOOKBACK_5M = _env_int("VOLUME_LOOKBACK_5M", 20)
 
-# Compression Breakout Entry: enter when price breaks out of a short 5M compression box.
-# This replaces the old pullback/anti-chase entry logic. It is not support/resistance;
-# it only checks a recent small range, breakout candle quality, volume and fresh momentum.
-COMPRESSION_BREAKOUT_ENABLED = _env_bool("COMPRESSION_BREAKOUT_ENABLED", True)
+# HMT-5 Trap Hunt.
+# 5M no longer opens the trade directly. It only creates hunting context.
+# 1M must give the final trap/reclaim trigger so the bot does not chase tops/bottoms.
+SETUP_1M_TRIGGER_ENABLED = _env_bool("SETUP_1M_TRIGGER_ENABLED", True)
+DANGER_4H_FILTER_ENABLED = _env_bool("DANGER_4H_FILTER_ENABLED", True)
+SETUP_VALID_5M_CANDLES = _env_int("SETUP_VALID_5M_CANDLES", 3)
+
+# Direction: 1H is the main direction, 15M confirms momentum.
+DIRECTION_MIN_FLAGS_1H = _env_int("DIRECTION_MIN_FLAGS_1H", 3)
+DIRECTION_MIN_FLAGS_15M = _env_int("DIRECTION_MIN_FLAGS_15M", 2)
+DIRECTION_EMA50_SLOPE_MIN_PCT = _env_float("DIRECTION_EMA50_SLOPE_MIN_PCT", 0.0002)  # 0.02%
+
+# Dead-market guard: avoids entries when 5M has no usable movement.
+MIN_5M_ATR_PCT = _env_float("MIN_5M_ATR_PCT", 0.0010)               # 0.10%
+MIN_5M_VOLUME_RATIO = _env_float("MIN_5M_VOLUME_RATIO", 0.45)
+DEAD_MARKET_MIN_FLAGS = _env_int("DEAD_MARKET_MIN_FLAGS", 2)  # reject only when ATR and volume are both dead
+
+# Setup A: Liquidity Sweep + Reclaim.
+LIQUIDITY_SWEEP_ENABLED = _env_bool("LIQUIDITY_SWEEP_ENABLED", True)
+SWEEP_LOOKBACK_5M = _env_int("SWEEP_LOOKBACK_5M", 10)
+SWEEP_MIN_BREAK_PCT = _env_float("SWEEP_MIN_BREAK_PCT", 0.0003)     # 0.03%
+SWEEP_RECLAIM_BUFFER_PCT = _env_float("SWEEP_RECLAIM_BUFFER_PCT", 0.0002)
+
+# Setup B: Breakout Retest. Breakout is allowed only as a SETUP, not direct entry.
+BREAKOUT_RETEST_ENABLED = _env_bool("BREAKOUT_RETEST_ENABLED", _env_bool("COMPRESSION_BREAKOUT_ENABLED", True))
 BREAKOUT_LOOKBACK_5M = _env_int("BREAKOUT_LOOKBACK_5M", 8)
-BREAKOUT_MAX_PRE_RANGE_PCT = _env_float("BREAKOUT_MAX_PRE_RANGE_PCT", 0.0060)       # previous 8-candle box <= 0.60%
-BREAKOUT_MIN_BREAK_PCT = _env_float("BREAKOUT_MIN_BREAK_PCT", 0.0003)              # break buffer 0.03%
-BREAKOUT_MIN_BODY_RATIO = _env_float("BREAKOUT_MIN_BODY_RATIO", 0.55)              # candle body >= 55% of range
-BREAKOUT_MIN_CLOSE_POSITION = _env_float("BREAKOUT_MIN_CLOSE_POSITION", 0.65)      # close near high/low
-BREAKOUT_MIN_VOLUME_RATIO = _env_float("BREAKOUT_MIN_VOLUME_RATIO", 1.20)          # volume expansion
-BREAKOUT_LONG_RSI_MIN = _env_float("BREAKOUT_LONG_RSI_MIN", 50.0)
-BREAKOUT_LONG_RSI_MAX = _env_float("BREAKOUT_LONG_RSI_MAX", 64.0)
-BREAKOUT_SHORT_RSI_MIN = _env_float("BREAKOUT_SHORT_RSI_MIN", 36.0)
-BREAKOUT_SHORT_RSI_MAX = _env_float("BREAKOUT_SHORT_RSI_MAX", 50.0)
-BREAKOUT_MAX_3CANDLE_MOVE_PCT = _env_float("BREAKOUT_MAX_3CANDLE_MOVE_PCT", 0.0075)  # 0.75% anti-late
-BREAKOUT_MAX_EMA50_DISTANCE_PCT = _env_float("BREAKOUT_MAX_EMA50_DISTANCE_PCT", 0.0060)
-BREAKOUT_MAX_VWAP_DISTANCE_PCT = _env_float("BREAKOUT_MAX_VWAP_DISTANCE_PCT", 0.0045)
+BREAKOUT_MAX_PRE_RANGE_PCT = _env_float("BREAKOUT_MAX_PRE_RANGE_PCT", 0.0080)       # previous 8-candle box <= 0.80%
+BREAKOUT_MIN_BREAK_PCT = _env_float("BREAKOUT_MIN_BREAK_PCT", 0.0002)              # break buffer 0.02%
+BREAKOUT_RETEST_MAX_DISTANCE_PCT = _env_float("BREAKOUT_RETEST_MAX_DISTANCE_PCT", 0.0035)  # retest must come close to level
+
+
+# Setup C: Momentum Continuation. Used when trend is healthy but no sweep/retest appeared.
+# It still does NOT enter on 5M directly; it only allows the coin to wait for a 1M trigger.
+MOMENTUM_CONTINUATION_ENABLED = _env_bool("MOMENTUM_CONTINUATION_ENABLED", True)
+MOMENTUM_LOOKBACK_5M = _env_int("MOMENTUM_LOOKBACK_5M", 6)
+MOMENTUM_MIN_FLAGS = _env_int("MOMENTUM_MIN_FLAGS", 3)
+MOMENTUM_MAX_DISTANCE_FROM_EMA_VWAP_PCT = _env_float("MOMENTUM_MAX_DISTANCE_FROM_EMA_VWAP_PCT", 0.0065)  # 0.45%, avoids chase entries
+MOMENTUM_MAX_3CANDLE_MOVE_PCT = _env_float("MOMENTUM_MAX_3CANDLE_MOVE_PCT", 0.0075)  # 0.65%, avoids late entries
+MOMENTUM_MIN_VOLUME_RATIO = _env_float("MOMENTUM_MIN_VOLUME_RATIO", 0.45)
+MOMENTUM_LONG_RSI_MIN = _env_float("MOMENTUM_LONG_RSI_MIN", 50.0)
+MOMENTUM_LONG_RSI_MAX = _env_float("MOMENTUM_LONG_RSI_MAX", 66.0)
+MOMENTUM_SHORT_RSI_MIN = _env_float("MOMENTUM_SHORT_RSI_MIN", 34.0)
+MOMENTUM_SHORT_RSI_MAX = _env_float("MOMENTUM_SHORT_RSI_MAX", 55.0)
+
+# Setup D: 5M Trend Context. This is the anti-choke fallback.
+# It does not enter by itself; it only sends a non-dead, non-late 5M trend context to the 1M trigger.
+CONTEXT_SETUP_ENABLED = _env_bool("CONTEXT_SETUP_ENABLED", True)
+CONTEXT_MIN_FLAGS = _env_int("CONTEXT_MIN_FLAGS", 2)
+CONTEXT_MAX_DISTANCE_FROM_EMA_VWAP_PCT = _env_float("CONTEXT_MAX_DISTANCE_FROM_EMA_VWAP_PCT", 0.0065)
+CONTEXT_MAX_3CANDLE_MOVE_PCT = _env_float("CONTEXT_MAX_3CANDLE_MOVE_PCT", 0.0075)
+CONTEXT_LONG_RSI_MIN = _env_float("CONTEXT_LONG_RSI_MIN", 44.0)
+CONTEXT_LONG_RSI_MAX = _env_float("CONTEXT_LONG_RSI_MAX", 67.0)
+CONTEXT_SHORT_RSI_MIN = _env_float("CONTEXT_SHORT_RSI_MIN", 33.0)
+CONTEXT_SHORT_RSI_MAX = _env_float("CONTEXT_SHORT_RSI_MAX", 56.0)
+
+# 1M trigger quality.
+TRIGGER_LOOKBACK_1M = _env_int("TRIGGER_LOOKBACK_1M", 5)
+TRIGGER_SL_LOOKBACK_1M = _env_int("TRIGGER_SL_LOOKBACK_1M", 5)
+TRIGGER_MIN_BODY_RATIO = _env_float("TRIGGER_MIN_BODY_RATIO", 0.40)
+TRIGGER_MIN_CLOSE_POSITION = _env_float("TRIGGER_MIN_CLOSE_POSITION", 0.55)
+TRIGGER_MIN_VOLUME_RATIO = _env_float("TRIGGER_MIN_VOLUME_RATIO", 0.75)
+TRIGGER_MAX_ENTRY_DISTANCE_PCT = _env_float("TRIGGER_MAX_ENTRY_DISTANCE_PCT", 0.0055)
+TRIGGER_MAX_3CANDLE_MOVE_PCT = _env_float("TRIGGER_MAX_3CANDLE_MOVE_PCT", 0.0070)
+TRIGGER_SL_BUFFER_PCT = _env_float("TRIGGER_SL_BUFFER_PCT", 0.0005)
+TRIGGER_LONG_RSI_MIN = _env_float("TRIGGER_LONG_RSI_MIN", 45.0)
+TRIGGER_LONG_RSI_MAX = _env_float("TRIGGER_LONG_RSI_MAX", 64.0)
+TRIGGER_SHORT_RSI_MIN = _env_float("TRIGGER_SHORT_RSI_MIN", 36.0)
+TRIGGER_SHORT_RSI_MAX = _env_float("TRIGGER_SHORT_RSI_MAX", 55.0)
+
+
+# HMT-5 Trap Hunt gate: entry must be near a 1M trap/reclaim, not a naked momentum chase.
+HMT_TRAP_GATE_ENABLED = _env_bool("HMT_TRAP_GATE_ENABLED", True)
+HMT_TRAP_LOOKBACK_1M = _env_int("HMT_TRAP_LOOKBACK_1M", 8)
+HMT_TRAP_MIN_SWEEP_PCT = _env_float("HMT_TRAP_MIN_SWEEP_PCT", 0.0002)      # 0.02% wick sweep buffer
+HMT_TRAP_RECLAIM_BUFFER_PCT = _env_float("HMT_TRAP_RECLAIM_BUFFER_PCT", 0.0001)
+HMT_MICRO_RECLAIM_LOOKBACK_1M = _env_int("HMT_MICRO_RECLAIM_LOOKBACK_1M", 4)
+HMT_ALLOW_MICRO_RECLAIM = _env_bool("HMT_ALLOW_MICRO_RECLAIM", True)
+HMT_ALLOW_IGNITION_TRAP = _env_bool("HMT_ALLOW_IGNITION_TRAP", True)
 
 # Hard rule: no support/resistance filter for this scalper.
 ENABLE_SUPPORT_RESISTANCE_FILTER = False
@@ -165,14 +226,17 @@ ENABLE_DCA = False
 ENABLE_MARTINGALE = False
 ENABLE_TRAILING_STOP = False
 
-# 30 symbols. Keep internal name USDT style. OKX and Toobit mapping happens in utils.py.
+# 50 symbols. Keep internal name USDT style. OKX and Toobit mapping happens in utils.py.
+# Known OKX-mapping errors from the old list are removed/replaced: TONUSDT, FETUSDT, 1000PEPEUSDT.
 WATCHLIST = tuple(
     s.strip().upper()
     for s in _env(
         "WATCHLIST",
         "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,TRXUSDT,"
-        "TONUSDT,DOTUSDT,NEARUSDT,APTUSDT,ARBUSDT,OPUSDT,SUIUSDT,SEIUSDT,FETUSDT,INJUSDT,"
-        "LTCUSDT,BCHUSDT,ETCUSDT,FILUSDT,ATOMUSDT,AAVEUSDT,UNIUSDT,1000PEPEUSDT,WIFUSDT,ORDIUSDT",
+        "DOTUSDT,NEARUSDT,APTUSDT,ARBUSDT,OPUSDT,SUIUSDT,SEIUSDT,INJUSDT,LTCUSDT,BCHUSDT,"
+        "ETCUSDT,FILUSDT,ATOMUSDT,AAVEUSDT,UNIUSDT,WIFUSDT,ORDIUSDT,PEPEUSDT,SHIBUSDT,FLOKIUSDT,"
+        "BONKUSDT,WLDUSDT,ICPUSDT,XLMUSDT,HBARUSDT,ALGOUSDT,GALAUSDT,APEUSDT,SANDUSDT,MANAUSDT,"
+        "LDOUSDT,ENSUSDT,DYDXUSDT,CHZUSDT,CRVUSDT,COMPUSDT,SNXUSDT,MKRUSDT,ZECUSDT,DASHUSDT",
     ).split(",")
     if s.strip()
 )[:MAX_WATCH_SYMBOLS]
