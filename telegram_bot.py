@@ -5,7 +5,7 @@ import asyncio
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import config
 from engine import BotEngine
@@ -22,11 +22,11 @@ admin_chat_ids: set[int] = set()
 
 def menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Status", callback_data="status"), InlineKeyboardButton("🔎 Scan", callback_data="scan")],
-        [InlineKeyboardButton("🟢 Normal", callback_data="mode_normal"), InlineKeyboardButton("🔴 Real", callback_data="mode_real")],
-        [InlineKeyboardButton("▶️ Trade ON", callback_data="trade_on"), InlineKeyboardButton("⏸ Trade OFF", callback_data="trade_off")],
-        [InlineKeyboardButton("📌 Active", callback_data="active"), InlineKeyboardButton("✅ Results", callback_data="results")],
-        [InlineKeyboardButton("💰 Balance", callback_data="balance"), InlineKeyboardButton("🔗 Validate", callback_data="validate_symbols")],
+        [InlineKeyboardButton("📊 وضعیت", callback_data="status"), InlineKeyboardButton("🔎 اسکن", callback_data="scan")],
+        [InlineKeyboardButton("🟢 نرمال", callback_data="mode_normal"), InlineKeyboardButton("🔴 واقعی", callback_data="mode_real")],
+        [InlineKeyboardButton("▶️ ترید روشن", callback_data="trade_on"), InlineKeyboardButton("⏸ ترید خاموش", callback_data="trade_off")],
+        [InlineKeyboardButton("📌 فعال‌ها", callback_data="active"), InlineKeyboardButton("✅ آمار", callback_data="results")],
+        [InlineKeyboardButton("💰 موجودی", callback_data="balance"), InlineKeyboardButton("🔗 چک ارزها", callback_data="validate_symbols")],
     ])
 
 
@@ -64,27 +64,19 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not guard(update):
         return
     text = (
-        "دستورات:\n"
-        "/start /menu /help\n"
-        "/status وضعیت ربات\n"
-        "/normal حالت نرمال\n"
-        "/real حالت واقعی\n"
-        "/trade_on روشن کردن اجرای حالت فعلی\n"
-        "/trade_off خاموش کردن اجرا، فقط ثبت سیگنال\n"
-        "/scan اسکن دستی\n"
-        "/active معاملات فعال\n"
-        "/balance موجودی Toobit\n"
-        "/pnl PnL امروز Toobit\n"
-        "/positions پوزیشن‌های Toobit\n"
-        "/results 10 نمایش نتایج ثبت‌شده\n"
-        "/validate_symbols چک همخوانی ۳۵ ارز در OKX و Toobit\n"
-        "/reset_symbols برگشت به ۳۵ ارز پیش‌فرض\n"
-        "/symbols لیست نمادها\n"
-        "/add BTCUSDT افزودن نماد\n"
-        "/remove BTCUSDT حذف نماد\n"
-        "/set_amount 6 تنظیم مارجین هر معامله\n"
-        "/set_leverage 10 تنظیم لوریج\n"
-        "/settings تنظیمات اصلی"
+        "دستورات فارسی روان:\n"
+        "منو | راهنما | وضعیت\n"
+        "نرمال | واقعی\n"
+        "ترید روشن | ترید خاموش | ترید\n"
+        "اسکن\n"
+        "فعال | موجودی | سود | پوزیشن\n"
+        "آمار یا آمار 20\n"
+        "ارزها | چک ارزها | ریست ارزها\n"
+        "افزودن BTCUSDT | حذف BTCUSDT\n"
+        "ترید دلار 6\n"
+        "ترید لوریج 10\n"
+        "حداکثر پوزیشن 3\n\n"
+        "دستورات انگلیسی قبلی هم برای سازگاری فعال هستند: /start /menu /status /scan /results"
     )
     await update.message.reply_text(text, reply_markup=menu_keyboard())
 
@@ -290,6 +282,106 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(format_status(BotState.load()))
 
 
+def _text_number(parts: list[str]) -> str | None:
+    for part in reversed(parts):
+        t = part.strip().replace("٬", "").replace(",", "")
+        if t.replace(".", "", 1).isdigit():
+            return t
+    return None
+
+
+async def set_max_positions_text(update: Update, context: ContextTypes.DEFAULT_TYPE, value: int | None = None) -> None:
+    if not guard(update):
+        return
+    state = BotState.load()
+    if value is None:
+        await update.message.reply_text(f"حداکثر پوزیشن فعلی: {state.max_active_trades}", reply_markup=menu_keyboard())
+        return
+    state.max_active_trades = max(1, min(20, int(value)))
+    state.save()
+    await update.message.reply_text(f"حداکثر پوزیشن تنظیم شد: {state.max_active_trades}", reply_markup=menu_keyboard())
+
+
+async def persian_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not guard(update):
+        return
+    raw = (update.message.text or "").strip()
+    text = " ".join(raw.replace("/", " ").split()).lower()
+    parts = text.split()
+
+    if text in {"منو", "پنل"}:
+        await menu(update, context); return
+    if text in {"راهنما", "کمک", "دستورات"}:
+        await help_cmd(update, context); return
+    if text in {"وضعیت", "تنظیمات"}:
+        await status(update, context); return
+    if text in {"نرمال", "حالت نرمال", "normal"}:
+        await set_normal(update, context); return
+    if text in {"واقعی", "حالت واقعی", "ریل", "real"}:
+        await set_real(update, context); return
+
+    if text in {"ترید روشن", "ترید فعال", "روشن کردن ترید", "اجرای روشن", "trade on"}:
+        await trade_on(update, context); return
+    if text in {"ترید خاموش", "ترید غیرفعال", "خاموش کردن ترید", "اجرای خاموش", "trade off"}:
+        await trade_off(update, context); return
+    if text == "ترید":
+        await status(update, context); return
+
+    if text in {"اسکن", "سیگنال", "اسکن دستی"}:
+        await scan(update, context); return
+    if text in {"فعال", "معاملات فعال", "پوزیشن فعال"}:
+        await active(update, context); return
+    if text in {"موجودی", "بالانس"}:
+        await balance(update, context); return
+    if text in {"سود", "پی ان ال", "pnl"}:
+        await pnl(update, context); return
+    if text in {"پوزیشن", "پوزیشن ها", "پوزیشن‌ها"}:
+        await positions(update, context); return
+    if text in {"ارزها", "لیست ارزها", "نمادها"}:
+        await symbols(update, context); return
+    if text in {"چک ارزها", "اعتبارسنجی", "اعتبارسنجی ارزها"}:
+        await validate_symbols_cmd(update, context); return
+    if text in {"ریست ارزها", "ریست نمادها"}:
+        await reset_symbols(update, context); return
+
+    if parts and parts[0] == "آمار":
+        n = _text_number(parts)
+        context.args = [n] if n else []
+        await results(update, context); return
+
+    if text.startswith("ترید دلار") or text.startswith("دلار "):
+        n = _text_number(parts)
+        if not n:
+            await update.message.reply_text("مثال درست: ترید دلار 6")
+            return
+        context.args = [n]
+        await set_amount(update, context); return
+
+    if text.startswith("ترید لوریج") or text.startswith("لوریج ") or text.startswith("اهرم "):
+        n = _text_number(parts)
+        if not n:
+            await update.message.reply_text("مثال درست: ترید لوریج 10")
+            return
+        context.args = [n]
+        await set_leverage(update, context); return
+
+    if text.startswith("حداکثر پوزیشن") or text.startswith("حداکثر معامله"):
+        n = _text_number(parts)
+        await set_max_positions_text(update, context, int(float(n)) if n else None)
+        return
+
+    if text.startswith("افزودن ") or text.startswith("اضافه "):
+        sym = parts[-1].upper()
+        context.args = [sym]
+        await add_symbol(update, context); return
+    if text.startswith("حذف "):
+        sym = parts[-1].upper()
+        context.args = [sym]
+        await remove_symbol(update, context); return
+
+    await update.message.reply_text("دستور شناخته نشد. برای لیست دستورها بنویس: راهنما", reply_markup=menu_keyboard())
+
+
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not guard(update):
         return
@@ -341,6 +433,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("set_amount", set_amount))
     app.add_handler(CommandHandler("set_leverage", set_leverage))
     app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, persian_text))
     app.add_handler(CallbackQueryHandler(callback))
     return app
 
