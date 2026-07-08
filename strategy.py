@@ -44,13 +44,20 @@ class TradeSignal:
         return asdict(self)
 
     def text(self) -> str:
+        side_emoji = "🟢" if self.direction == "LONG" else "🔴"
+        strength = "قوی" if self.rr >= 1.5 else "معمولی"
         return (
-            f"{self.strategy} | {self.symbol} | {self.direction}\n"
+            "📊 سیگنال عادی 5M\n"
+            f"#{str(self.created_ms)[-6:]} | {self.symbol}\n\n"
+            f"{side_emoji} جهت: {self.direction}\n"
+            f"قدرت: {strength}\n"
+            f"RR: {self.rr:.1f}\n"
+            "مدل ورود: DIFT-5M Trap Hunt | 5M Trend Context + Flow\n\n"
             f"Entry: {human_price(self.entry_price)}\n"
-            f"SL: {human_price(self.sl_price)} ({self.sl_pct:.2f}%)\n"
-            f"TP: {human_price(self.tp_price)} ({self.tp_pct:.2f}%)\n"
-            f"RR: {self.rr:.2f}\n"
-            f"Reason: {self.reason}"
+            f"TP 5M: {human_price(self.tp_price)}\n"
+            f"SL 5M: {human_price(self.sl_price)}\n"
+            f"فاصله استاپ: {self.sl_pct:.2f}% | تارگت: {self.tp_pct:.2f}%\n"
+            f"منبع دیتا: {self.data_source} | اجرای واقعی: Toobit"
         )
 
 

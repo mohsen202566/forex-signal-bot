@@ -70,8 +70,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "ترید روشن | ترید خاموش | ترید\n"
         "اسکن\n"
         "فعال | موجودی | سود | پوزیشن\n"
-        "آمار یا آمار 20\n"
-        "ارزها | چک ارزها | ریست ارزها\n"
+        "آمار یا آمار 30 | حذف آمار\n"
+        "ارزها | کوین‌ها | چک ارزها | ریست ارزها\n"
         "افزودن BTCUSDT | حذف BTCUSDT\n"
         "ترید دلار 6\n"
         "ترید لوریج 10\n"
@@ -96,16 +96,36 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def format_status(state: BotState) -> str:
+    real_on = state.mode == "REAL" and state.trading_enabled and bool(config.REAL_TRADING_ENABLED)
+    real_text = "روشن ✅" if real_on else "خاموش ⛔"
+    signal_text = "فعال ✅" if config.SEND_SIGNAL_MESSAGES else "خاموش ⛔"
+    free_slots = max(0, int(state.max_active_trades) - (engine.manager.active_count() if engine else 0))
+    active_real = 0
+    try:
+        from state import load_active_trades
+        active_real = sum(1 for t in load_active_trades() if str(t.get("mode")) == "REAL")
+    except Exception:
+        active_real = 0
     return (
-        f"Mode: {state.mode}\n"
-        f"Trading: {'ON' if state.trading_enabled else 'OFF'}\n"
-        f"Symbols: {len(state.symbols)} | {', '.join(state.symbols)}\n"
-        f"Monitoring: {'ON' if config.MONITORING_ENABLED else 'OFF'} | Result interval: {config.RESULT_CHECK_INTERVAL_SECONDS}s\n"
-        f"Required common symbols: {config.REQUIRED_COMMON_SYMBOL_COUNT}\n"
-        f"Amount: {state.trade_amount_usdt} USDT\n"
-        f"Leverage: {state.leverage}x\n"
-        f"RR min/default: {state.min_rr}/{state.default_rr}\n"
-        f"REAL_TRADING_ENABLED: {config.REAL_TRADING_ENABLED}"
+        "⚙️ وضعیت ربات 5M اسکلپ\n\n"
+        f"💹 ترید واقعی: {real_text}\n"
+        f"📡 اتو سیگنال: {signal_text}\n"
+        f"💰 مارجین توبیت: نامشخص\n"
+        f"💵 دلار هر پوزیشن: USDT {float(state.trade_amount_usdt):.2f}\n"
+        f"📈 لوریج: {int(state.leverage)}x\n"
+        f"🎯 حداکثر پوزیشن: {int(state.max_active_trades)}\n"
+        f"📌 پوزیشن Real فعال: {active_real}\n"
+        f"🟢 اسلات آزاد: {free_slots}\n"
+        f"💵 سرمایه مجاز ربات: USDT {float(state.trade_amount_usdt) * int(state.max_active_trades):.2f}\n"
+        f"🧾 کارمزد رفت‌وبرگشت ثابت: USDT {float(getattr(config, 'FIXED_ROUNDTRIP_FEE_USDT', 0.05)):.2f}\n"
+        f"✅ حداقل سود خالص: USDT {float(getattr(config, 'MIN_NET_PROFIT_USDT', 0.01)):.2f}\n"
+        f"📐 RR اسکالپ: {float(state.default_rr):.1f}\n"
+        "🎯 ورود: DIFT-5M Trap Hunt ✅\n\n"
+        "دستورات:\n"
+        "ترید فعال | ترید خاموش\n"
+        "ترید دلار 10 | ترید لوریج 10 | حداکثر پوزیشن 3\n"
+        "سرمایه ترید 100 | حداقل سود خالص 0.01\n"
+        "آمار | حذف آمار | سیگنال | پوزیشن | کوین‌ها | وضعیت"
     )
 
 
@@ -193,7 +213,7 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not guard(update):
         return
-    limit = 10
+    limit = 30
     if context.args:
         try:
             limit = max(1, min(30, int(context.args[0])))
@@ -302,6 +322,19 @@ async def set_max_positions_text(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text(f"حداکثر پوزیشن تنظیم شد: {state.max_active_trades}", reply_markup=menu_keyboard())
 
 
+
+
+async def clear_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not guard(update):
+        return
+    from pathlib import Path
+    for name in (config.SIGNALS_FILE, config.RESULTS_FILE, config.TRADE_HISTORY_FILE):
+        try:
+            Path(name).unlink(missing_ok=True)
+        except Exception:
+            pass
+    await update.message.reply_text("✅ آمار و نتایج قبلی حذف شد؛ سود/ضرر کل و امروز از این لحظه دوباره محاسبه می‌شود.", reply_markup=menu_keyboard())
+
 async def persian_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not guard(update):
         return
@@ -329,6 +362,8 @@ async def persian_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if text in {"اسکن", "سیگنال", "اسکن دستی"}:
         await scan(update, context); return
+    if text in {"حذف آمار", "پاک کردن آمار", "ریست آمار", "آمار حذف"}:
+        await clear_stats(update, context); return
     if text in {"فعال", "معاملات فعال", "پوزیشن فعال"}:
         await active(update, context); return
     if text in {"موجودی", "بالانس"}:
@@ -337,7 +372,7 @@ async def persian_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await pnl(update, context); return
     if text in {"پوزیشن", "پوزیشن ها", "پوزیشن‌ها"}:
         await positions(update, context); return
-    if text in {"ارزها", "لیست ارزها", "نمادها"}:
+    if text in {"ارزها", "کوین ها", "کوین‌ها", "لیست ارزها", "نمادها"}:
         await symbols(update, context); return
     if text in {"چک ارزها", "اعتبارسنجی", "اعتبارسنجی ارزها"}:
         await validate_symbols_cmd(update, context); return
@@ -433,6 +468,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("set_amount", set_amount))
     app.add_handler(CommandHandler("set_leverage", set_leverage))
     app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(CommandHandler("clear_stats", clear_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, persian_text))
     app.add_handler(CallbackQueryHandler(callback))
     return app
