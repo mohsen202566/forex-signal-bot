@@ -54,10 +54,25 @@ class BotEngine:
             await self.send(f"⚠️ اعتبارسنجی نمادهای OKX/Toobit ناموفق بود: {exc}")
             return None
 
-    async def scan_once(self) -> list[TradeSignal]:
+    def _scan_once_sync(self) -> tuple[list[TradeSignal], list[str]]:
+        """اسکن سنگین بازار در thread جدا اجرا می‌شود تا تلگرام دیر جواب ندهد."""
         state = BotState.load()
-        if config.VALIDATE_SYMBOLS_ON_START and self.symbol_report is None:
-            await self.validate_symbols_once()
+        messages: list[str] = []
+
+        if config.VALIDATE_SYMBOLS_ON_START and self.symbol_report is None and config.REQUIRE_EXCHANGE_SYMBOL_MATCH:
+            try:
+                report = validate_symbols(state.symbols, self.okx, self.manager.toobit)
+                self.symbol_report = report
+                self.valid_symbols = set(report.valid_common)
+                if report.valid_common and state.symbols != report.valid_common and len(report.valid_common) >= config.REQUIRED_COMMON_SYMBOL_COUNT:
+                    state.symbols = list(report.valid_common)
+                    state.save()
+                prefix = "✅ اعتبارسنجی ۳۵ نماد مشترک انجام شد" if report.ok else "⚠️ مشکل در همخوانی نمادهای OKX/Toobit"
+                messages.append(prefix + "\n" + report.short_text())
+            except Exception as exc:
+                logger.warning("اعتبارسنجی نمادها ناموفق بود: %s", exc)
+                messages.append(f"⚠️ اعتبارسنجی نمادهای OKX/Toobit ناموفق بود: {exc}")
+
         scan_symbols = list(state.symbols)
         if config.REQUIRE_EXCHANGE_SYMBOL_MATCH and self.valid_symbols:
             scan_symbols = [s for s in scan_symbols if s in self.valid_symbols]
@@ -72,18 +87,29 @@ class BotEngine:
                     self.last_signal = result
                     exec_result = self.manager.execute_or_track(result, state)
                     if config.SEND_SIGNAL_MESSAGES:
-                        await self.send("🚨 سیگنال معتبر\n" + result.text() + f"\nAction: {exec_result.get('action')}\n{exec_result.get('reason','')}")
+                        messages.append("🚨 سیگنال معتبر\n" + result.text() + f"\nAction: {exec_result.get('action')}\n{exec_result.get('reason','')}")
                 else:
                     self.last_rejections[symbol] = result.reason
             except Exception as exc:
                 self.last_rejections[symbol] = str(exc)
                 logger.warning("اسکن %s ناموفق بود: %s", symbol, exc)
+        return signals, messages
+
+    async def scan_once(self) -> list[TradeSignal]:
+        signals, messages = await asyncio.to_thread(self._scan_once_sync)
+        for msg in messages:
+            await self.send(msg)
         return signals
 
     async def check_results_once(self) -> list[dict]:
         if not config.MONITORING_ENABLED:
             return []
-        return await self.monitor.check_once()
+        state = BotState.load()
+        closed = await asyncio.to_thread(self.manager.update_results, state)
+        if self.notify and config.SEND_RESULT_MESSAGES:
+            for item in closed:
+                await self.notify(self.manager.format_result(item))
+        return closed
 
     async def scan_loop(self, interval_seconds: int) -> None:
         self.running = True

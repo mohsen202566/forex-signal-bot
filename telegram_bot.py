@@ -20,14 +20,9 @@ engine: BotEngine | None = None
 admin_chat_ids: set[int] = set()
 
 
-def menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 وضعیت", callback_data="status"), InlineKeyboardButton("🔎 اسکن", callback_data="scan")],
-        [InlineKeyboardButton("🟢 نرمال", callback_data="mode_normal"), InlineKeyboardButton("🔴 واقعی", callback_data="mode_real")],
-        [InlineKeyboardButton("▶️ ترید روشن", callback_data="trade_on"), InlineKeyboardButton("⏸ ترید خاموش", callback_data="trade_off")],
-        [InlineKeyboardButton("📌 فعال‌ها", callback_data="active"), InlineKeyboardButton("✅ آمار", callback_data="results")],
-        [InlineKeyboardButton("💰 موجودی", callback_data="balance"), InlineKeyboardButton("🔗 چک ارزها", callback_data="validate_symbols")],
-    ])
+def menu_keyboard():
+    # دکمه‌ها عمداً حذف شدند؛ پنل فقط متنی و سریع است.
+    return None
 
 
 async def notify_admins(text: str) -> None:
@@ -84,7 +79,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not guard(update):
         return
-    await update.message.reply_text("پنل:", reply_markup=menu_keyboard())
+    await update.message.reply_text(format_status(BotState.load()))
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
