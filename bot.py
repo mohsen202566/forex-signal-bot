@@ -36,7 +36,7 @@ class Crypto5MScalperBot:
     # -------------------------
     def run(self) -> None:
         logger.info("%s شروع شد | symbols=%s", config.BOT_NAME, len(config.WATCHLIST))
-        self.telegram.send("✅ ربات 5M اسکالپ Compression Breakout روشن شد.\nبرای پنل بنویس: ترید")
+        self.telegram.send("✅ ربات 5M اسکالپ 5M Setup + 1M Trigger روشن شد.\nبرای پنل بنویس: ترید")
         threads = [
             threading.Thread(target=self._scan_loop, name="scan-loop", daemon=True),
             threading.Thread(target=self._monitor_loop, name="monitor-loop", daemon=True),
@@ -159,12 +159,16 @@ class Crypto5MScalperBot:
         toobit_symbol = self._resolve_toobit_symbol(symbol)
         candles_4h = self.okx.get_candles(symbol, "4H", config.OKX_CANDLE_LIMIT)
         candles_1h = self.okx.get_candles(symbol, "1H", config.OKX_CANDLE_LIMIT)
+        candles_15m = self.okx.get_candles(symbol, "15m", config.OKX_CANDLE_LIMIT)
         candles_5m = self.okx.get_candles(symbol, "5m", config.OKX_CANDLE_LIMIT)
+        candles_1m = self.okx.get_candles(symbol, "1m", config.OKX_CANDLE_LIMIT)
         return self.strategy.analyze(
             symbol,
             candles_4h,
             candles_1h,
+            candles_15m,
             candles_5m,
+            candles_1m,
             margin_usdt=float(settings["trade_dollar_usdt"]),
             leverage=int(settings["leverage"]),
             min_net_profit_usdt=float(settings["min_net_profit_usdt"]),

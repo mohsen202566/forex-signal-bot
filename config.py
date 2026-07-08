@@ -131,32 +131,57 @@ DEFAULT_MIN_NET_PROFIT_USDT = _env_float("DEFAULT_MIN_NET_PROFIT_USDT", 0.01)
 SIGNAL_SCORE_THRESHOLD = _env_float("SIGNAL_SCORE_THRESHOLD", 70.0)
 STRONG_SCORE_THRESHOLD = _env_float("STRONG_SCORE_THRESHOLD", 85.0)
 RR_NORMAL = _env_float("RR_NORMAL", 1.5)
-RR_STRONG = _env_float("RR_STRONG", 1.5)
+RR_STRONG = _env_float("RR_STRONG", 1.8)
 ROUND_TRIP_FEE_USDT = _env_float("ROUND_TRIP_FEE_USDT", 0.05)
 MIN_5M_SL_PCT = _env_float("MIN_5M_SL_PCT", 0.0025)   # 0.25%
-MAX_5M_SL_PCT = _env_float("MAX_5M_SL_PCT", 0.0120)   # 1.20%
+MAX_5M_SL_PCT = _env_float("MAX_5M_SL_PCT", 0.0090)   # 0.90%
 ATR_SL_MULT = _env_float("ATR_SL_MULT", 1.20)
 SWING_LOOKBACK_5M = _env_int("SWING_LOOKBACK_5M", 12)
 VWAP_LOOKBACK_5M = _env_int("VWAP_LOOKBACK_5M", 48)
 VOLUME_LOOKBACK_5M = _env_int("VOLUME_LOOKBACK_5M", 20)
 
-# Compression Breakout Entry: enter when price breaks out of a short 5M compression box.
-# This replaces the old pullback/anti-chase entry logic. It is not support/resistance;
-# it only checks a recent small range, breakout candle quality, volume and fresh momentum.
-COMPRESSION_BREAKOUT_ENABLED = _env_bool("COMPRESSION_BREAKOUT_ENABLED", True)
+# 5M Setup + 1M Trigger.
+# 5M no longer opens the trade directly. It only creates a setup.
+# 1M must give the final trigger so the bot does not short the bottom or buy the top.
+SETUP_1M_TRIGGER_ENABLED = _env_bool("SETUP_1M_TRIGGER_ENABLED", True)
+DANGER_4H_FILTER_ENABLED = _env_bool("DANGER_4H_FILTER_ENABLED", True)
+SETUP_VALID_5M_CANDLES = _env_int("SETUP_VALID_5M_CANDLES", 3)
+
+# Direction: 1H is the main direction, 15M confirms momentum.
+DIRECTION_MIN_FLAGS_1H = _env_int("DIRECTION_MIN_FLAGS_1H", 3)
+DIRECTION_MIN_FLAGS_15M = _env_int("DIRECTION_MIN_FLAGS_15M", 3)
+DIRECTION_EMA50_SLOPE_MIN_PCT = _env_float("DIRECTION_EMA50_SLOPE_MIN_PCT", 0.0002)  # 0.02%
+
+# Dead-market guard: avoids entries when 5M has no usable movement.
+MIN_5M_ATR_PCT = _env_float("MIN_5M_ATR_PCT", 0.0012)               # 0.12%
+MIN_5M_VOLUME_RATIO = _env_float("MIN_5M_VOLUME_RATIO", 0.70)
+
+# Setup A: Liquidity Sweep + Reclaim.
+LIQUIDITY_SWEEP_ENABLED = _env_bool("LIQUIDITY_SWEEP_ENABLED", True)
+SWEEP_LOOKBACK_5M = _env_int("SWEEP_LOOKBACK_5M", 10)
+SWEEP_MIN_BREAK_PCT = _env_float("SWEEP_MIN_BREAK_PCT", 0.0005)     # 0.05%
+SWEEP_RECLAIM_BUFFER_PCT = _env_float("SWEEP_RECLAIM_BUFFER_PCT", 0.0002)
+
+# Setup B: Breakout Retest. Breakout is allowed only as a SETUP, not direct entry.
+BREAKOUT_RETEST_ENABLED = _env_bool("BREAKOUT_RETEST_ENABLED", _env_bool("COMPRESSION_BREAKOUT_ENABLED", True))
 BREAKOUT_LOOKBACK_5M = _env_int("BREAKOUT_LOOKBACK_5M", 8)
 BREAKOUT_MAX_PRE_RANGE_PCT = _env_float("BREAKOUT_MAX_PRE_RANGE_PCT", 0.0060)       # previous 8-candle box <= 0.60%
 BREAKOUT_MIN_BREAK_PCT = _env_float("BREAKOUT_MIN_BREAK_PCT", 0.0003)              # break buffer 0.03%
-BREAKOUT_MIN_BODY_RATIO = _env_float("BREAKOUT_MIN_BODY_RATIO", 0.55)              # candle body >= 55% of range
-BREAKOUT_MIN_CLOSE_POSITION = _env_float("BREAKOUT_MIN_CLOSE_POSITION", 0.65)      # close near high/low
-BREAKOUT_MIN_VOLUME_RATIO = _env_float("BREAKOUT_MIN_VOLUME_RATIO", 1.20)          # volume expansion
-BREAKOUT_LONG_RSI_MIN = _env_float("BREAKOUT_LONG_RSI_MIN", 50.0)
-BREAKOUT_LONG_RSI_MAX = _env_float("BREAKOUT_LONG_RSI_MAX", 64.0)
-BREAKOUT_SHORT_RSI_MIN = _env_float("BREAKOUT_SHORT_RSI_MIN", 36.0)
-BREAKOUT_SHORT_RSI_MAX = _env_float("BREAKOUT_SHORT_RSI_MAX", 50.0)
-BREAKOUT_MAX_3CANDLE_MOVE_PCT = _env_float("BREAKOUT_MAX_3CANDLE_MOVE_PCT", 0.0075)  # 0.75% anti-late
-BREAKOUT_MAX_EMA50_DISTANCE_PCT = _env_float("BREAKOUT_MAX_EMA50_DISTANCE_PCT", 0.0060)
-BREAKOUT_MAX_VWAP_DISTANCE_PCT = _env_float("BREAKOUT_MAX_VWAP_DISTANCE_PCT", 0.0045)
+BREAKOUT_RETEST_MAX_DISTANCE_PCT = _env_float("BREAKOUT_RETEST_MAX_DISTANCE_PCT", 0.0025)  # retest must come close to level
+
+# 1M trigger quality.
+TRIGGER_LOOKBACK_1M = _env_int("TRIGGER_LOOKBACK_1M", 5)
+TRIGGER_SL_LOOKBACK_1M = _env_int("TRIGGER_SL_LOOKBACK_1M", 5)
+TRIGGER_MIN_BODY_RATIO = _env_float("TRIGGER_MIN_BODY_RATIO", 0.45)
+TRIGGER_MIN_CLOSE_POSITION = _env_float("TRIGGER_MIN_CLOSE_POSITION", 0.60)
+TRIGGER_MIN_VOLUME_RATIO = _env_float("TRIGGER_MIN_VOLUME_RATIO", 0.90)
+TRIGGER_MAX_ENTRY_DISTANCE_PCT = _env_float("TRIGGER_MAX_ENTRY_DISTANCE_PCT", 0.0045)
+TRIGGER_MAX_3CANDLE_MOVE_PCT = _env_float("TRIGGER_MAX_3CANDLE_MOVE_PCT", 0.0060)
+TRIGGER_SL_BUFFER_PCT = _env_float("TRIGGER_SL_BUFFER_PCT", 0.0005)
+TRIGGER_LONG_RSI_MIN = _env_float("TRIGGER_LONG_RSI_MIN", 45.0)
+TRIGGER_LONG_RSI_MAX = _env_float("TRIGGER_LONG_RSI_MAX", 64.0)
+TRIGGER_SHORT_RSI_MIN = _env_float("TRIGGER_SHORT_RSI_MIN", 36.0)
+TRIGGER_SHORT_RSI_MAX = _env_float("TRIGGER_SHORT_RSI_MAX", 55.0)
 
 # Hard rule: no support/resistance filter for this scalper.
 ENABLE_SUPPORT_RESISTANCE_FILTER = False
