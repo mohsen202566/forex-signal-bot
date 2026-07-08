@@ -1,184 +1,172 @@
+"""اندیکاتورهای بدون وابستگی سنگین برای DIFT-5M."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable
 
-from okx_data import Candle
+from utils import safe_float
+
+
+@dataclass(slots=True)
+class Candle:
+    ts: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    confirm: bool = True
+
+    @property
+    def body(self) -> float:
+        return abs(self.close - self.open)
+
+    @property
+    def range(self) -> float:
+        return max(0.0, self.high - self.low)
+
+    @property
+    def body_ratio(self) -> float:
+        r = self.range
+        return self.body / r if r > 0 else 0.0
+
+    @property
+    def close_position(self) -> float:
+        r = self.range
+        return (self.close - self.low) / r if r > 0 else 0.5
+
+
+def parse_okx_candles(rows: list[list[str]]) -> list[Candle]:
+    candles: list[Candle] = []
+    # OKX معمولاً جدیدترین کندل را اول می‌دهد؛ ما قدیمی به جدید می‌خواهیم.
+    for row in reversed(rows or []):
+        if len(row) < 6:
+            continue
+        candles.append(
+            Candle(
+                ts=int(float(row[0])),
+                open=safe_float(row[1]),
+                high=safe_float(row[2]),
+                low=safe_float(row[3]),
+                close=safe_float(row[4]),
+                volume=safe_float(row[5]),
+                confirm=str(row[-1]) == "1" if len(row) >= 9 else True,
+            )
+        )
+    return candles
+
+
+def closes(candles: Iterable[Candle]) -> list[float]:
+    return [c.close for c in candles]
+
+
+def highs(candles: Iterable[Candle]) -> list[float]:
+    return [c.high for c in candles]
+
+
+def lows(candles: Iterable[Candle]) -> list[float]:
+    return [c.low for c in candles]
+
+
+def volumes(candles: Iterable[Candle]) -> list[float]:
+    return [c.volume for c in candles]
+
+
+def sma(values: list[float], length: int) -> list[float | None]:
+    out: list[float | None] = []
+    if length <= 0:
+        return [None for _ in values]
+    s = 0.0
+    for i, v in enumerate(values):
+        s += v
+        if i >= length:
+            s -= values[i - length]
+        out.append(s / length if i >= length - 1 else None)
+    return out
 
 
 def ema(values: list[float], length: int) -> list[float | None]:
-    if not values:
+    if not values or length <= 0:
         return []
-    out: list[float | None] = [None] * len(values)
-    if len(values) < length:
-        return out
-    sma = sum(values[:length]) / length
-    out[length - 1] = sma
-    alpha = 2 / (length + 1)
-    prev = sma
-    for i in range(length, len(values)):
-        prev = values[i] * alpha + prev * (1 - alpha)
-        out[i] = prev
-    return out
-
-
-def rsi(values: list[float], length: int = 14) -> list[float | None]:
-    out: list[float | None] = [None] * len(values)
-    if len(values) <= length:
-        return out
-    gains = 0.0
-    losses = 0.0
-    for i in range(1, length + 1):
-        change = values[i] - values[i - 1]
-        gains += max(change, 0.0)
-        losses += max(-change, 0.0)
-    avg_gain = gains / length
-    avg_loss = losses / length
-    out[length] = 100.0 if avg_loss == 0 else 100 - (100 / (1 + avg_gain / avg_loss))
-    for i in range(length + 1, len(values)):
-        change = values[i] - values[i - 1]
-        gain = max(change, 0.0)
-        loss = max(-change, 0.0)
-        avg_gain = (avg_gain * (length - 1) + gain) / length
-        avg_loss = (avg_loss * (length - 1) + loss) / length
-        out[i] = 100.0 if avg_loss == 0 else 100 - (100 / (1 + avg_gain / avg_loss))
-    return out
-
-
-def macd(values: list[float]) -> tuple[list[float | None], list[float | None], list[float | None]]:
-    e12 = ema(values, 12)
-    e26 = ema(values, 26)
-    line: list[float | None] = [None] * len(values)
-    for i, (a, b) in enumerate(zip(e12, e26)):
-        if a is not None and b is not None:
-            line[i] = a - b
-    compact = [x for x in line if x is not None]
-    sig_compact = ema(compact, 9)
-    signal: list[float | None] = [None] * len(values)
-    hist: list[float | None] = [None] * len(values)
-    j = 0
-    for i, x in enumerate(line):
-        if x is None:
+    out: list[float | None] = []
+    k = 2 / (length + 1)
+    prev: float | None = None
+    for i, v in enumerate(values):
+        if i < length - 1:
+            out.append(None)
             continue
-        sig = sig_compact[j]
-        if sig is not None:
-            signal[i] = sig
-            hist[i] = x - sig
-        j += 1
-    return line, signal, hist
+        if prev is None:
+            prev = sum(values[i - length + 1:i + 1]) / length
+        else:
+            prev = v * k + prev * (1 - k)
+        out.append(prev)
+    return out
 
 
-def atr(candles: list[Candle], length: int = 14) -> list[float | None]:
-    out: list[float | None] = [None] * len(candles)
-    if len(candles) <= length:
-        return out
+def atr(candles: list[Candle], length: int) -> list[float | None]:
     trs: list[float] = []
-    for i, c in enumerate(candles):
-        if i == 0:
+    prev_close: float | None = None
+    for c in candles:
+        if prev_close is None:
             tr = c.high - c.low
         else:
-            prev_close = candles[i - 1].close
             tr = max(c.high - c.low, abs(c.high - prev_close), abs(c.low - prev_close))
         trs.append(max(0.0, tr))
-    first = sum(trs[1:length + 1]) / length
-    out[length] = first
-    prev = first
-    for i in range(length + 1, len(candles)):
-        prev = (prev * (length - 1) + trs[i]) / length
-        out[i] = prev
-    return out
+        prev_close = c.close
+    return sma(trs, length)
 
 
-def rolling_vwap(candles: list[Candle], length: int = 48) -> list[float | None]:
-    out: list[float | None] = [None] * len(candles)
-    if not candles or length <= 0:
-        return out
+def rolling_vwap(candles: list[Candle], length: int) -> list[float | None]:
+    out: list[float | None] = []
     pv: list[float] = []
     vv: list[float] = []
     for c in candles:
-        typical = (c.high + c.low + c.close) / 3.0
-        volume = max(0.0, c.volume)
-        pv.append(typical * volume)
-        vv.append(volume)
+        typical = (c.high + c.low + c.close) / 3
+        pv.append(typical * c.volume)
+        vv.append(c.volume)
     for i in range(len(candles)):
-        if i + 1 < length:
-            continue
-        start = i + 1 - length
+        start = max(0, i - length + 1)
         vol = sum(vv[start:i + 1])
-        if vol > 0:
-            out[i] = sum(pv[start:i + 1]) / vol
+        out.append(sum(pv[start:i + 1]) / vol if vol > 0 and i >= length - 1 else None)
     return out
 
 
-@dataclass(frozen=True)
-class Snapshot:
-    close: float
-    high: float
-    low: float
-    volume: float
-    ema20: float
-    ema50: float
-    ema200: float
-    prev_ema50: float
-    prev_ema200: float
-    rsi: float
-    prev_rsi: float
-    macd: float
-    macd_signal: float
-    macd_hist: float
-    prev_macd_hist: float
-    atr: float
-    swing_high: float
-    swing_low: float
-    vwap: float
-    volume_ratio: float
+def adx(candles: list[Candle], length: int = 14) -> list[float | None]:
+    if len(candles) < length + 2:
+        return [None for _ in candles]
+    trs = [0.0]
+    plus_dm = [0.0]
+    minus_dm = [0.0]
+    for i in range(1, len(candles)):
+        cur, prev = candles[i], candles[i - 1]
+        up = cur.high - prev.high
+        down = prev.low - cur.low
+        plus_dm.append(up if up > down and up > 0 else 0.0)
+        minus_dm.append(down if down > up and down > 0 else 0.0)
+        trs.append(max(cur.high - cur.low, abs(cur.high - prev.close), abs(cur.low - prev.close)))
+
+    tr_s = sma(trs, length)
+    p_s = sma(plus_dm, length)
+    m_s = sma(minus_dm, length)
+    dx: list[float | None] = []
+    for tr, p, m in zip(tr_s, p_s, m_s):
+        if tr in (None, 0) or p is None or m is None:
+            dx.append(None)
+            continue
+        pdi = 100 * p / tr
+        mdi = 100 * m / tr
+        denom = pdi + mdi
+        dx.append(100 * abs(pdi - mdi) / denom if denom > 0 else None)
+    dx_vals = [0.0 if x is None else x for x in dx]
+    raw = sma(dx_vals, length)
+    out: list[float | None] = []
+    for i, v in enumerate(raw):
+        out.append(v if i >= (2 * length - 2) else None)
+    return out
 
 
-def snapshot(candles: list[Candle], swing_lookback: int = 12, *, vwap_lookback: int = 48, volume_lookback: int = 20) -> Snapshot:
-    if len(candles) < 220:
-        raise RuntimeError("کندل کافی برای EMA200 وجود ندارد")
-    closes = [c.close for c in candles]
-    ema20 = ema(closes, 20)
-    ema50 = ema(closes, 50)
-    ema200 = ema(closes, 200)
-    rsi14 = rsi(closes, 14)
-    macd_line, macd_sig, macd_hist = macd(closes)
-    atr14 = atr(candles, 14)
-    vwap_line = rolling_vwap(candles, vwap_lookback)
-
-    last = len(candles) - 1
-    prev = last - 1
-    required = [
-        ema20[last], ema50[last], ema200[last], ema50[prev], ema200[prev],
-        rsi14[last], rsi14[prev], macd_line[last], macd_sig[last], macd_hist[last],
-        macd_hist[prev], atr14[last], vwap_line[last],
-    ]
-    if any(x is None for x in required):
-        raise RuntimeError("اندیکاتورها هنوز کامل نیستند")
-
-    window = candles[max(0, last - swing_lookback): last + 1]
-    vol_window = candles[max(0, last - volume_lookback): last]
-    avg_volume = sum(c.volume for c in vol_window) / len(vol_window) if vol_window else candles[last].volume
-    volume_ratio = candles[last].volume / avg_volume if avg_volume > 0 else 1.0
-
-    return Snapshot(
-        close=candles[last].close,
-        high=candles[last].high,
-        low=candles[last].low,
-        volume=candles[last].volume,
-        ema20=float(ema20[last]),
-        ema50=float(ema50[last]),
-        ema200=float(ema200[last]),
-        prev_ema50=float(ema50[prev]),
-        prev_ema200=float(ema200[prev]),
-        rsi=float(rsi14[last]),
-        prev_rsi=float(rsi14[prev]),
-        macd=float(macd_line[last]),
-        macd_signal=float(macd_sig[last]),
-        macd_hist=float(macd_hist[last]),
-        prev_macd_hist=float(macd_hist[prev]),
-        atr=float(atr14[last]),
-        swing_high=max(c.high for c in window),
-        swing_low=min(c.low for c in window),
-        vwap=float(vwap_line[last]),
-        volume_ratio=float(volume_ratio),
-    )
+def last_valid(values: list[float | None], fallback: float = 0.0) -> float:
+    for v in reversed(values):
+        if v is not None:
+            return float(v)
+    return fallback
