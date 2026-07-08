@@ -52,7 +52,7 @@
 
 ## ستاپ‌های مجاز 5M
 
-ربات فقط دو مدل ستاپ را قبول می‌کند:
+ربات سه مدل ستاپ را قبول می‌کند:
 
 ### 1) Liquidity Sweep + Reclaim
 
@@ -85,6 +85,32 @@ Breakout 5M = فقط آلارم
 Retest + Trigger 1M = ورود
 ```
 
+### 3) Momentum Continuation
+
+برای اینکه ربات خفه نشود، اگر بازار روند سالم داشته باشد ولی دقیقاً Sweep یا Retest نداده باشد، ربات آن ارز را کامل حذف نمی‌کند. این ستاپ فقط اجازه می‌دهد ارز وارد مرحله تریگر 1M شود؛ یعنی هنوز ورود مستقیم روی 5M ممنوع است.
+
+برای LONG:
+
+```text
+قیمت 5M بالای EMA20 و VWAP باشد
+فاصله از EMA20/VWAP زیاد نباشد
+RSI 5M سالم و غیرخسته باشد
+MACD 5M بهتر شده باشد
+حرکت 3 کندل اخیر دیر نشده باشد
+بعد فقط با 1M Trigger ورود صادر شود
+```
+
+برای SHORT برعکس:
+
+```text
+قیمت 5M زیر EMA20 و VWAP باشد
+فاصله از EMA20/VWAP زیاد نباشد
+RSI 5M سالم و غیرخسته باشد
+MACD 5M ضعیف‌تر شده باشد
+حرکت 3 کندل اخیر دیر نشده باشد
+بعد فقط با 1M Trigger ورود صادر شود
+```
+
 ## قوانین تریگر 1M
 
 ورود فقط وقتی صادر می‌شود که 1M این شرایط را بدهد:
@@ -106,7 +132,7 @@ Retest + Trigger 1M = ورود
 | جهت 1H | 20 |
 | تأیید 15M | 20 |
 | 4H خلاف شدید نبود | 5 |
-| ستاپ 5M معتبر | 25 |
+| ستاپ 5M معتبر | 20 تا 25 |
 | تریگر 1M معتبر | 30 |
 | جمع | 100 |
 
@@ -117,7 +143,7 @@ Retest + Trigger 1M = ورود
 - 1H و 15M همسو نباشند.
 - 4H شدیداً خلاف معامله باشد.
 - 5M حرکت قابل استفاده نداشته باشد.
-- نه sweep/reclaim معتبر وجود داشته باشد نه breakout/retest معتبر.
+- نه sweep/reclaim معتبر وجود داشته باشد نه breakout/retest معتبر و نه momentum continuation سالم.
 - 1M تریگر ورود ندهد.
 - ورود از سطح ستاپ دور شده باشد.
 - SL از سقف مجاز اسکالپ بزرگ‌تر شود.
@@ -201,6 +227,38 @@ TRIGGER_MAX_ENTRY_DISTANCE_PCT = 0.55%
 ```
 
 معنی مهم `DEAD_MARKET_MIN_FLAGS=2` این است که فقط با یک حجم کم یا یک ATR کم، ارز فوراً حذف نمی‌شود؛ فقط وقتی هم ATR و هم حجم مرده باشند، بازار 5M مرده حساب می‌شود.
+
+
+
+## نسخه Soft V2: اضافه شدن Momentum Continuation
+
+در لاگ VPS مشخص شد نسخه قبلی سالم کار می‌کرد، اما چون فقط دو ستاپ Sweep/Reclaim و Breakout/Retest را قبول می‌کرد، خیلی از چرخه‌ها `signals=0` می‌ماندند. در این نسخه ستاپ سوم اضافه شد:
+
+```text
+Momentum Continuation = ستاپ ادامه روند سالم
+```
+
+این ستاپ تعداد فرصت‌ها را بیشتر می‌کند، ولی قانون اصلی را خراب نمی‌کند:
+
+```text
+5M فقط ستاپ می‌دهد
+ورود واقعی فقط با 1M Trigger انجام می‌شود
+```
+
+تنظیمات جدید:
+
+```text
+MOMENTUM_CONTINUATION_ENABLED=true
+MOMENTUM_LOOKBACK_5M=6
+MOMENTUM_MIN_FLAGS=4
+MOMENTUM_MAX_DISTANCE_FROM_EMA_VWAP_PCT=0.0045
+MOMENTUM_MAX_3CANDLE_MOVE_PCT=0.0065
+MOMENTUM_MIN_VOLUME_RATIO=0.55
+MOMENTUM_LONG_RSI_MIN=50
+MOMENTUM_LONG_RSI_MAX=66
+MOMENTUM_SHORT_RSI_MIN=34
+MOMENTUM_SHORT_RSI_MAX=50
+```
 
 ## اجرای مستقیم روی VPS
 

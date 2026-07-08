@@ -91,7 +91,7 @@ class Simple5MScalperStrategy:
     Hard rules:
     - 1H gives the main direction and 15M confirms momentum.
     - 4H is only a danger filter; it does not choke every setup.
-    - 5M creates only a setup: Liquidity Sweep + Reclaim or Breakout Retest.
+    - 5M creates only a setup: Liquidity Sweep/Reclaim, Breakout Retest, or Momentum Continuation.
     - Direct entry on a 5M breakout candle is forbidden.
     - 1M must trigger the actual entry after reclaim/retest.
     - SL is placed behind the trigger/sweep wick and capped for scalping.
@@ -307,7 +307,10 @@ class Simple5MScalperStrategy:
         setup = self._breakout_retest_setup(direction, candles_5m)
         if setup is not None:
             return setup
-        return self._reject("رد شد: 5M هنوز ستاپ معتبر Sweep/Reclaim یا Breakout/Retest نداده")
+        setup = self._momentum_continuation_setup(direction, candles_5m, s5m)
+        if setup is not None:
+            return setup
+        return self._reject("رد شد: 5M هنوز ستاپ معتبر Sweep/Reclaim یا Breakout/Retest یا Momentum نداده")
 
     def _candidate_5m_indices(self, candles_5m: list[Candle], lookback: int) -> list[int]:
         valid = max(1, int(config.SETUP_VALID_5M_CANDLES))
@@ -404,6 +407,95 @@ class Simple5MScalperStrategy:
                     ),
                 )
         return None
+
+    def _momentum_continuation_setup(self, direction: Direction, candles_5m: list[Candle], s5m: Snapshot) -> SetupScore | None:
+        """Controlled trend-continuation setup.
+
+        This setup fixes the scanner being too quiet when there is a healthy trend
+        but no exact sweep/retest. It still does not enter directly on 5M; it only
+        lets the coin continue to the 1M trigger gate.
+        """
+        if not bool(config.MOMENTUM_CONTINUATION_ENABLED):
+            return None
+        lookback = max(4, int(config.MOMENTUM_LOOKBACK_5M))
+        if len(candles_5m) < lookback + 4:
+            return None
+        close = float(s5m.close or 0.0)
+        if close <= 0:
+            return None
+
+        recent = candles_5m[-lookback:]
+        last = candles_5m[-1]
+        max_dist = float(config.MOMENTUM_MAX_DISTANCE_FROM_EMA_VWAP_PCT)
+        max_move = float(config.MOMENTUM_MAX_3CANDLE_MOVE_PCT)
+        min_volume = float(config.MOMENTUM_MIN_VOLUME_RATIO)
+        flags: list[str] = []
+
+        candle_range = max(0.0, float(last.high) - float(last.low))
+        close_pos = 0.5 if candle_range <= 0 else (float(last.close) - float(last.low)) / candle_range
+        move = self._directional_3candle_move(direction, candles_5m, close)
+        if move > max_move:
+            return None
+
+        if direction == "LONG":
+            ref_candidates = [x for x in (float(s5m.ema20), float(s5m.vwap)) if x > 0]
+            if not ref_candidates:
+                return None
+            ref = max(ref_candidates)
+            if not (close > float(s5m.ema20) and close > float(s5m.vwap)):
+                return None
+            dist = max(0.0, (close - ref) / close)
+            if dist > max_dist:
+                return None
+            if close > float(s5m.ema20) and close > float(s5m.vwap):
+                flags.append(f"قیمت بالای EMA20/VWAP و فاصله سالم:{dist * 100:.2f}%")
+            if close > float(s5m.ema50):
+                flags.append("قیمت بالای EMA50 5M")
+            if float(s5m.macd_hist) > float(s5m.prev_macd_hist):
+                flags.append("MACD 5M در جهت لانگ بهتر شده")
+            if float(config.MOMENTUM_LONG_RSI_MIN) <= float(s5m.rsi) <= float(config.MOMENTUM_LONG_RSI_MAX):
+                flags.append(f"RSI 5M ادامه‌روند سالم:{s5m.rsi:.1f}")
+            if float(s5m.volume_ratio) >= min_volume:
+                flags.append(f"حجم 5M قابل قبول:{s5m.volume_ratio:.2f}x")
+            if float(last.close) > float(last.open) or close_pos >= 0.50:
+                flags.append("کندل آخر 5M ضد لانگ نیست")
+            sl_anchor = min(float(c.low) for c in recent)
+        else:
+            ref_candidates = [x for x in (float(s5m.ema20), float(s5m.vwap)) if x > 0]
+            if not ref_candidates:
+                return None
+            ref = min(ref_candidates)
+            if not (close < float(s5m.ema20) and close < float(s5m.vwap)):
+                return None
+            dist = max(0.0, (ref - close) / close)
+            if dist > max_dist:
+                return None
+            if close < float(s5m.ema20) and close < float(s5m.vwap):
+                flags.append(f"قیمت زیر EMA20/VWAP و فاصله سالم:{dist * 100:.2f}%")
+            if close < float(s5m.ema50):
+                flags.append("قیمت زیر EMA50 5M")
+            if float(s5m.macd_hist) < float(s5m.prev_macd_hist):
+                flags.append("MACD 5M در جهت شورت ضعیف‌تر شده")
+            if float(config.MOMENTUM_SHORT_RSI_MIN) <= float(s5m.rsi) <= float(config.MOMENTUM_SHORT_RSI_MAX):
+                flags.append(f"RSI 5M ادامه‌روند سالم:{s5m.rsi:.1f}")
+            if float(s5m.volume_ratio) >= min_volume:
+                flags.append(f"حجم 5M قابل قبول:{s5m.volume_ratio:.2f}x")
+            if float(last.close) < float(last.open) or close_pos <= 0.50:
+                flags.append("کندل آخر 5M ضد شورت نیست")
+            sl_anchor = max(float(c.high) for c in recent)
+
+        if len(flags) < int(config.MOMENTUM_MIN_FLAGS):
+            return None
+        return SetupScore(
+            "Momentum Continuation",
+            level=float(ref),
+            sl_anchor=float(sl_anchor),
+            score=20.0,
+            reasons=(
+                "5M ستاپ Momentum Continuation: روند سالم است، ورود هنوز فقط با 1M Trigger مجاز است",
+                " | ".join(flags[:4]),
+            ),
+        )
 
     def _trigger_1m(self, direction: Direction, setup: SetupScore, candles_1m: list[Candle], s1m: Snapshot) -> TriggerScore | None:
         if len(candles_1m) < max(10, int(config.TRIGGER_LOOKBACK_1M) + 4):

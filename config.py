@@ -170,6 +170,20 @@ BREAKOUT_MAX_PRE_RANGE_PCT = _env_float("BREAKOUT_MAX_PRE_RANGE_PCT", 0.0080)   
 BREAKOUT_MIN_BREAK_PCT = _env_float("BREAKOUT_MIN_BREAK_PCT", 0.0002)              # break buffer 0.02%
 BREAKOUT_RETEST_MAX_DISTANCE_PCT = _env_float("BREAKOUT_RETEST_MAX_DISTANCE_PCT", 0.0035)  # retest must come close to level
 
+
+# Setup C: Momentum Continuation. Used when trend is healthy but no sweep/retest appeared.
+# It still does NOT enter on 5M directly; it only allows the coin to wait for a 1M trigger.
+MOMENTUM_CONTINUATION_ENABLED = _env_bool("MOMENTUM_CONTINUATION_ENABLED", True)
+MOMENTUM_LOOKBACK_5M = _env_int("MOMENTUM_LOOKBACK_5M", 6)
+MOMENTUM_MIN_FLAGS = _env_int("MOMENTUM_MIN_FLAGS", 4)
+MOMENTUM_MAX_DISTANCE_FROM_EMA_VWAP_PCT = _env_float("MOMENTUM_MAX_DISTANCE_FROM_EMA_VWAP_PCT", 0.0045)  # 0.45%, avoids chase entries
+MOMENTUM_MAX_3CANDLE_MOVE_PCT = _env_float("MOMENTUM_MAX_3CANDLE_MOVE_PCT", 0.0065)  # 0.65%, avoids late entries
+MOMENTUM_MIN_VOLUME_RATIO = _env_float("MOMENTUM_MIN_VOLUME_RATIO", 0.55)
+MOMENTUM_LONG_RSI_MIN = _env_float("MOMENTUM_LONG_RSI_MIN", 50.0)
+MOMENTUM_LONG_RSI_MAX = _env_float("MOMENTUM_LONG_RSI_MAX", 66.0)
+MOMENTUM_SHORT_RSI_MIN = _env_float("MOMENTUM_SHORT_RSI_MIN", 34.0)
+MOMENTUM_SHORT_RSI_MAX = _env_float("MOMENTUM_SHORT_RSI_MAX", 50.0)
+
 # 1M trigger quality.
 TRIGGER_LOOKBACK_1M = _env_int("TRIGGER_LOOKBACK_1M", 5)
 TRIGGER_SL_LOOKBACK_1M = _env_int("TRIGGER_SL_LOOKBACK_1M", 5)
