@@ -282,11 +282,20 @@ class Simple5MScalperStrategy:
         close = float(s5m.close or 0.0)
         if close <= 0:
             return "قیمت 5M نامعتبر است"
+
+        # Softer dead-market guard:
+        # Before, one quiet metric (low ATR OR low volume) blocked the coin immediately.
+        # That choked the scanner in normal calm-before-move conditions.
+        # Now we reject only when enough dead-market signs are present.
+        flags: list[str] = []
         atr_pct = float(s5m.atr) / close if float(s5m.atr) > 0 else 0.0
         if atr_pct < float(config.MIN_5M_ATR_PCT):
-            return f"ATR کم:{atr_pct * 100:.2f}%"
+            flags.append(f"ATR کم:{atr_pct * 100:.2f}%")
         if float(s5m.volume_ratio) < float(config.MIN_5M_VOLUME_RATIO):
-            return f"حجم 5M مرده:{s5m.volume_ratio:.2f}x"
+            flags.append(f"حجم 5M مرده:{s5m.volume_ratio:.2f}x")
+
+        if len(flags) >= int(config.DEAD_MARKET_MIN_FLAGS):
+            return " | ".join(flags)
         return None
 
     def _find_5m_setup(self, direction: Direction, candles_5m: list[Candle], s5m: Snapshot) -> SetupScore | None:
