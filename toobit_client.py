@@ -117,6 +117,8 @@ class ToobitFuturesClient:
             best["available"] = max(best["available"], safe_float(item.get("available") or item.get("availableBalance") or item.get("free")))
             best["total"] = max(best["total"], safe_float(item.get("balance") or item.get("total") or item.get("walletBalance")))
             best["margin"] = max(best["margin"], safe_float(item.get("marginBalance") or item.get("equity") or item.get("total")))
+        if best["margin"] <= 0 and best["available"] > 0:
+            best["margin"] = best["available"]
         return best
 
     def set_isolated_margin(self, symbol: str) -> Any:

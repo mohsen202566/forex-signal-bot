@@ -196,9 +196,15 @@ class TradingBotApp:
                 bal = self.toobit.get_futures_balance()
                 now_ts = int(time.time())
                 self.storage.set("toobit_connected", True)
-                self.storage.set("toobit_margin_usdt", float(bal.get("margin", 0.0) or 0.0))
-                self.storage.set("toobit_available_usdt", float(bal.get("available", 0.0) or 0.0))
-                self.storage.set("toobit_total_usdt", float(bal.get("total", 0.0) or 0.0))
+                available_usdt = float(bal.get("available", 0.0) or 0.0)
+                total_usdt = float(bal.get("total", 0.0) or 0.0)
+                raw_margin_usdt = float(bal.get("margin", 0.0) or 0.0)
+                # بعضی پاسخ‌های Toobit فیلد margin/equity جدا نمی‌دهند یا صفر می‌دهند،
+                # در فیوچرز ایزوله معیار قابل استفاده برای پنل همان موجودی آزاد است.
+                usable_margin_usdt = raw_margin_usdt if raw_margin_usdt > 0 else available_usdt
+                self.storage.set("toobit_margin_usdt", usable_margin_usdt)
+                self.storage.set("toobit_available_usdt", available_usdt)
+                self.storage.set("toobit_total_usdt", total_usdt)
                 self.storage.set("toobit_last_error", "")
                 self.storage.set("toobit_last_update", now_ts)
                 self.health.mark("toobit")
