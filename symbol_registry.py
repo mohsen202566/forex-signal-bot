@@ -52,6 +52,9 @@ def _okx_symbol_from_inst_id(inst_id: str) -> str:
 
 
 def load_okx_symbols(okx: OKXClient) -> set[str]:
+    # از کش OKXClient استفاده می‌کند تا هر بار endpoint را اسپم نکند.
+    if hasattr(okx, "available_symbols"):
+        return set(okx.available_symbols())
     instruments = okx.get_instruments()
     out: set[str] = set()
     for item in instruments:
@@ -66,7 +69,14 @@ def load_okx_symbols(okx: OKXClient) -> set[str]:
 
 
 def load_toobit_symbols(toobit: ToobitClient) -> set[str]:
-    raw = toobit.get_exchange_symbols()
+    try:
+        raw = toobit.get_exchange_symbols()
+    except Exception as exc:
+        # اگر endpoint نمادهای Toobit روی VPS 404 داد، اسکن OKX را متوقف نمی‌کنیم.
+        # در REAL قبل از ارسال سفارش، خود toobit_client.validate_symbol دوباره نماد را چک می‌کند.
+        import logging
+        logging.getLogger("dift5m").warning("خواندن symbols توبیت ناموفق بود؛ اعتبارسنجی Toobit موقتاً رد شد: %s", exc)
+        return set()
     out: set[str] = set()
     for name in raw.keys():
         s = normalize_symbol(str(name))

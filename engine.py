@@ -28,6 +28,7 @@ class BotEngine:
         self.last_signal: TradeSignal | None = None
         self.symbol_report: SymbolValidationReport | None = None
         self.valid_symbols: set[str] = set()
+        self._validation_attempted = False
 
     async def send(self, text: str) -> None:
         if self.notify:
@@ -36,6 +37,9 @@ class BotEngine:
     async def validate_symbols_once(self, force: bool = False) -> SymbolValidationReport | None:
         if self.symbol_report is not None and not force:
             return self.symbol_report
+        if self._validation_attempted and not force:
+            return self.symbol_report
+        self._validation_attempted = True
         if not config.REQUIRE_EXCHANGE_SYMBOL_MATCH:
             return None
         state = BotState.load()
@@ -51,7 +55,14 @@ class BotEngine:
             return report
         except Exception as exc:
             logger.warning("اعتبارسنجی نمادها ناموفق بود: %s", exc)
-            await self.send(f"⚠️ اعتبارسنجی نمادهای OKX/Toobit ناموفق بود: {exc}")
+            # اگر Toobit یا یکی از endpointها مشکل داد، حداقل نمادهای معتبر OKX را برای اسکن نگه می‌داریم
+            try:
+                okx_set = self.okx.available_symbols()
+                state = BotState.load()
+                self.valid_symbols = {s for s in state.symbols if s in okx_set}
+                await self.send(f"⚠️ اعتبارسنجی کامل OKX/Toobit ناموفق بود؛ اسکن با نمادهای معتبر OKX ادامه دارد.\nخطا: {exc}")
+            except Exception:
+                await self.send(f"⚠️ اعتبارسنجی نمادهای OKX/Toobit ناموفق بود: {exc}")
             return None
 
     def _scan_once_sync(self) -> tuple[list[TradeSignal], list[str]]:
@@ -59,19 +70,29 @@ class BotEngine:
         state = BotState.load()
         messages: list[str] = []
 
-        if config.VALIDATE_SYMBOLS_ON_START and self.symbol_report is None and config.REQUIRE_EXCHANGE_SYMBOL_MATCH:
+        if config.VALIDATE_SYMBOLS_ON_START and not self._validation_attempted and config.REQUIRE_EXCHANGE_SYMBOL_MATCH:
+            self._validation_attempted = True
             try:
                 report = validate_symbols(state.symbols, self.okx, self.manager.toobit)
                 self.symbol_report = report
                 self.valid_symbols = set(report.valid_common)
+                # اگر Toobit symbols در VPS 404 داد، report.valid_common خالی می‌شود؛ اسکن را کامل نخوابان.
+                if not self.valid_symbols:
+                    okx_set = self.okx.available_symbols()
+                    self.valid_symbols = {s for s in state.symbols if s in okx_set}
                 if report.valid_common and state.symbols != report.valid_common and len(report.valid_common) >= config.REQUIRED_COMMON_SYMBOL_COUNT:
                     state.symbols = list(report.valid_common)
                     state.save()
-                prefix = "✅ اعتبارسنجی ۳۵ نماد مشترک انجام شد" if report.ok else "⚠️ مشکل در همخوانی نمادهای OKX/Toobit"
+                prefix = "✅ اعتبارسنجی ۳۵ نماد مشترک انجام شد" if report.ok else "⚠️ مشکل در همخوانی نمادهای OKX/Toobit؛ اسکن با نمادهای معتبر ادامه دارد"
                 messages.append(prefix + "\n" + report.short_text())
             except Exception as exc:
                 logger.warning("اعتبارسنجی نمادها ناموفق بود: %s", exc)
-                messages.append(f"⚠️ اعتبارسنجی نمادهای OKX/Toobit ناموفق بود: {exc}")
+                try:
+                    okx_set = self.okx.available_symbols()
+                    self.valid_symbols = {s for s in state.symbols if s in okx_set}
+                    messages.append(f"⚠️ اعتبارسنجی کامل ناموفق بود؛ اسکن با {len(self.valid_symbols)} نماد معتبر OKX ادامه دارد.\n{exc}")
+                except Exception:
+                    messages.append(f"⚠️ اعتبارسنجی نمادهای OKX/Toobit ناموفق بود: {exc}")
 
         scan_symbols = list(state.symbols)
         if config.REQUIRE_EXCHANGE_SYMBOL_MATCH and self.valid_symbols:

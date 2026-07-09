@@ -24,7 +24,7 @@ DEFAULT_SYMBOLS_35 = [
     "SUIUSDT", "LTCUSDT", "BCHUSDT", "DOTUSDT", "UNIUSDT",
     "AAVEUSDT", "NEARUSDT", "OPUSDT", "ARBUSDT", "INJUSDT",
     "ATOMUSDT", "ETCUSDT", "FILUSDT", "APTUSDT", "WLDUSDT",
-    "PEPEUSDT", "SHIBUSDT", "SEIUSDT", "TONUSDT", "ICPUSDT",
+    "PEPEUSDT", "SHIBUSDT", "SEIUSDT", "WIFUSDT", "ICPUSDT",
     "HBARUSDT", "ARUSDT", "TIAUSDT", "ORDIUSDT", "JUPUSDT",
 ]
 
@@ -61,6 +61,12 @@ OKX_CANDLE_LIMIT_15M = int(os.getenv("OKX_CANDLE_LIMIT_15M", "140"))
 OKX_CANDLE_LIMIT_1H = int(os.getenv("OKX_CANDLE_LIMIT_1H", "120"))
 OKX_ORDERBOOK_DEPTH = int(os.getenv("OKX_ORDERBOOK_DEPTH", "20"))
 OKX_TRADE_LIMIT = int(os.getenv("OKX_TRADE_LIMIT", "100"))
+
+# کنترل فشار روی OKX: جلوگیری از 429 و حذف نمادهای نامعتبر از چرخه اسکن
+OKX_REQUEST_DELAY_SECONDS = float(os.getenv("OKX_REQUEST_DELAY_SECONDS", "0.18"))
+OKX_BAD_SYMBOL_COOLDOWN_SECONDS = int(os.getenv("OKX_BAD_SYMBOL_COOLDOWN_SECONDS", "3600"))
+OKX_FETCH_FUNDING_EVERY_SCAN = os.getenv("OKX_FETCH_FUNDING_EVERY_SCAN", "false").lower() == "true"
+OKX_MAX_RETRIES = int(os.getenv("OKX_MAX_RETRIES", "2"))
 
 # -----------------------------
 # Toobit - فایل toobit_client.py همین‌ها را می‌خواند

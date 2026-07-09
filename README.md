@@ -1,3 +1,32 @@
+# DIFT-5M v7 - OKX Fix / Fast Panel
+
+این نسخه خطاهای OKX را اصلاح می‌کند:
+
+- تبدیل نماد داخلی مثل `BTCUSDT` به instId صحیح `BTC-USDT-SWAP`
+- کش کردن لیست Instrumentهای OKX
+- حذف نماد نامعتبر از چرخه اسکن برای جلوگیری از اسپم `51001`
+- کنترل سرعت درخواست‌ها برای جلوگیری از `HTTP 429`
+- اگر endpoint نمادهای Toobit خطای 404 بدهد، اسکن NORMAL متوقف نمی‌شود؛ در REAL قبل از سفارش Toobit دوباره اعتبارسنجی می‌شود.
+- `TONUSDT` با `WIFUSDT` جایگزین شد، چون در لاگ OKX برای TON خطای Instrument می‌داد.
+
+دستور آپدیت روی VPS:
+
+```bash
+cd /root/forex-signal-bot || exit
+git pull origin main
+python3 -m py_compile *.py
+sudo systemctl restart forex-signal-bot.service
+journalctl -u forex-signal-bot.service -n 120 --no-pager
+```
+
+تنظیمات اختیاری در `.env`:
+
+```env
+OKX_REQUEST_DELAY_SECONDS=0.18
+OKX_BAD_SYMBOL_COOLDOWN_SECONDS=3600
+OKX_FETCH_FUNDING_EVERY_SCAN=false
+```
+
 # DIFT-5M Futures Bot — Root Clean Version
 
 ربات ۵ دقیقه فیوچرز با منطق ابداعی:
