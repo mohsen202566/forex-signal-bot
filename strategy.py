@@ -1,292 +1,117 @@
-"""استراتژی ابداعی DIFT-5M بدون سیستم امتیازی.
-
-اصل: Direction Lock → Compression → Impulse Break → Flow Confirm → Risk Gate
-اگر حتی یک قفل رد شود، سیگنال صادر نمی‌شود.
+"""اصل ۱ و ۲ ربات: شکار حرکت و تشخیص جهت.
+این فایل باید سریع‌ترین مسیر تحلیلی باشد و هیچ کار سنگین روزانه داخل آن انجام نشود.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from statistics import median
 
 import config
-from indicators import Candle, adx, atr, closes, ema, highs, last_valid, lows, rolling_vwap, sma, volumes
-from okx_client import MarketData, OrderFlow
-from utils import human_price, now_ms, pct_distance
 
-
-@dataclass(slots=True)
-class Rejection:
-    symbol: str
+@dataclass
+class StrategySignal:
+    symbol_id: str
+    okx_symbol: str
+    toobit_symbol: str
+    side: str
+    entry: float
+    strength: str
+    strength_score: float
+    compression_score: float
+    flow_bias: float
+    absorption_score: float
     reason: str
-    details: dict[str, Any] = field(default_factory=dict)
 
+def pct_range(c: dict[str, float]) -> float:
+    close = float(c["close"])
+    return (float(c["high"]) - float(c["low"])) / close * 100.0 if close > 0 else 0.0
 
-@dataclass(slots=True)
-class TradeSignal:
-    symbol: str
-    side: str               # BUY / SELL
-    direction: str          # LONG / SHORT
-    entry_price: float
-    sl_price: float
-    tp_price: float
-    rr: float
-    sl_pct: float
-    tp_pct: float
-    created_ms: int
-    strategy: str = "DIFT-5M"
-    data_source: str = "OKX"
-    execution_source: str = "TOOBIT_WHEN_REAL"
-    reason: str = ""
-    gates: list[str] = field(default_factory=list)
-    meta: dict[str, Any] = field(default_factory=dict)
+def signed_body(c: dict[str, float]) -> float:
+    close = float(c["close"])
+    if close <= 0:
+        return 0.0
+    return (float(c["close"]) - float(c["open"])) / close * 100.0
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+def detect_compression(candles: list[dict[str, float]]) -> tuple[bool, float, str]:
+    if len(candles) < config.COMPRESSION_LOOKBACK + 5:
+        return False, 0.0, "candles_too_few"
+    recent = candles[-config.COMPRESSION_RECENT:]
+    lookback = candles[-config.COMPRESSION_LOOKBACK:]
+    recent_ranges = [pct_range(c) for c in recent]
+    all_ranges = [pct_range(c) for c in lookback]
+    med_recent = median(recent_ranges)
+    med_all = median(all_ranges) or 1e-9
+    ratio = med_recent / med_all
+    body_move = abs((recent[-1]["close"] - recent[0]["open"]) / recent[0]["open"] * 100.0)
+    ok = ratio <= config.COMPRESSION_RATIO_MAX and body_move <= config.PREMOVE_PRICE_MOVE_MAX_PCT
+    score = max(0.0, min(1.0, 1.0 - ratio))
+    return ok, score, f"compression_ratio={ratio:.3f};body_move={body_move:.3f}%"
 
-    def text(self) -> str:
-        side_emoji = "🟢" if self.direction == "LONG" else "🔴"
-        strength = "قوی" if self.rr >= 1.5 else "معمولی"
-        return (
-            "📊 سیگنال عادی 5M\n"
-            f"#{str(self.created_ms)[-6:]} | {self.symbol}\n\n"
-            f"{side_emoji} جهت: {self.direction}\n"
-            f"قدرت: {strength}\n"
-            f"RR: {self.rr:.1f}\n"
-            "مدل ورود: DIFT-5M Trap Hunt | 5M Trend Context + Flow\n\n"
-            f"Entry: {human_price(self.entry_price)}\n"
-            f"TP 5M: {human_price(self.tp_price)}\n"
-            f"SL 5M: {human_price(self.sl_price)}\n"
-            f"فاصله استاپ: {self.sl_pct:.2f}% | تارگت: {self.tp_pct:.2f}%\n"
-            f"منبع دیتا: {self.data_source} | اجرای واقعی: Toobit"
-        )
+def pre_move_flow_bias(candles: list[dict[str, float]]) -> float:
+    """نسخه سبک Taker Flow Proxy.
+    اگر دیتای واقعی taker buy/sell اضافه شود، فقط همین تابع عوض می‌شود.
+    فعلاً از بدنه کندل و حجم نسبی برای تخمین فشار داخل فشردگی استفاده می‌کند.
+    """
+    recent = candles[-config.FLOW_BIAS_LOOKBACK:]
+    total_vol = sum(max(float(c.get("vol_quote") or c.get("volume") or 0.0), 0.0) for c in recent) or 1e-9
+    s = 0.0
+    for c in recent:
+        vol = max(float(c.get("vol_quote") or c.get("volume") or 0.0), 0.0)
+        rng = max(float(c["high"]) - float(c["low"]), 1e-12)
+        body_pos = (float(c["close"]) - float(c["open"])) / rng
+        s += max(-1.0, min(1.0, body_pos)) * (vol / total_vol)
+    return max(-1.0, min(1.0, s))
 
+def absorption_score(candles: list[dict[str, float]], side: str) -> float:
+    recent = candles[-config.FLOW_BIAS_LOOKBACK:]
+    lows = [float(c["low"]) for c in recent]
+    highs = [float(c["high"]) for c in recent]
+    closes = [float(c["close"]) for c in recent]
+    if side == "LONG":
+        # فروش/فشار پایین هست ولی کف‌ها نمی‌شکنند و کلوزها به نیمه بالایی می‌آیند.
+        low_stability = 1.0 - (max(lows) - min(lows)) / max(median(closes), 1e-9) * 100.0
+        close_pos = sum((float(c["close"]) - float(c["low"])) / max(float(c["high"]) - float(c["low"]), 1e-9) for c in recent) / len(recent)
+    else:
+        high_stability = 1.0 - (max(highs) - min(highs)) / max(median(closes), 1e-9) * 100.0
+        low_stability = high_stability
+        close_pos = sum((float(c["high"]) - float(c["close"])) / max(float(c["high"]) - float(c["low"]), 1e-9) for c in recent) / len(recent)
+    return max(0.0, min(1.0, 0.5 * max(0.0, low_stability) + 0.5 * close_pos))
 
-class DIFT5MStrategy:
-    def analyze(self, market: MarketData) -> TradeSignal | Rejection:
-        c5 = market.candles_5m
-        c15 = market.candles_15m
-        c1h = market.candles_1h
-        min_needed = max(config.EMA_SLOW + 5, config.COMPRESSION_LOOKBACK + config.ATR_LENGTH + 5)
-        if len(c5) < min_needed or len(c15) < config.EMA_SLOW + 5 or len(c1h) < config.EMA_SLOW + 5:
-            return Rejection(market.symbol, "دیتای کندل کافی نیست")
+def estimate_strength(candles: list[dict[str, float]], compression_score: float, flow_bias: float, absorption: float) -> tuple[str, float]:
+    score = 0.40 * compression_score + 0.35 * abs(flow_bias) + 0.25 * absorption
+    if score >= 0.72:
+        label = "خیلی قوی"
+    elif score >= 0.58:
+        label = "قوی"
+    elif score >= 0.45:
+        label = "متوسط"
+    else:
+        label = "ضعیف"
+    return label, round(score * 100.0, 2)
 
-        last = c5[-1]
-        if not last.confirm:
-            return Rejection(market.symbol, "کندل ۵ دقیقه هنوز بسته/تایید نشده است")
-
-        side = self._detect_impulse_side(c5)
-        if side is None:
-            return Rejection(market.symbol, "ایمپالس شکست معتبر شکل نگرفته")
-
-        direction = "LONG" if side == "BUY" else "SHORT"
-        gates: list[str] = []
-
-        trend_ok, trend_meta = self._gate_direction_lock(side, c15, c1h)
-        if not trend_ok:
-            return Rejection(market.symbol, "جهت ۱۵M و ۱H همسو نیست", trend_meta)
-        gates.append("DIRECTION_LOCK")
-
-        compression_ok, comp_meta = self._gate_compression(c5)
-        if not compression_ok:
-            return Rejection(market.symbol, "قبل از حرکت، فشردگی سالم وجود ندارد", comp_meta)
-        gates.append("COMPRESSION")
-
-        impulse_ok, impulse_meta = self._gate_impulse(side, c5)
-        if not impulse_ok:
-            return Rejection(market.symbol, "کیفیت کندل شکست کافی نیست", impulse_meta)
-        gates.append("IMPULSE_BREAK")
-
-        flow_ok, flow_meta = self._gate_flow(side, market.flow)
-        if not flow_ok:
-            return Rejection(market.symbol, "جریان سفارش/حجم پشت سیگنال تایید نکرد", flow_meta)
-        gates.append("ORDER_FLOW")
-
-        risk_ok, risk_meta = self._gate_risk(side, c5, c15, market.flow)
-        if not risk_ok:
-            return Rejection(market.symbol, "استاپ/تارگت/RR منطقی نیست", risk_meta)
-        gates.append("RISK_RR")
-
-        entry = float(last.close)
-        sl = float(risk_meta["sl_price"])
-        rr = float(risk_meta["rr"])
-        risk = abs(entry - sl)
-        if side == "BUY":
-            tp = entry + risk * rr
-        else:
-            tp = entry - risk * rr
-        sl_pct = abs(entry - sl) / entry * 100
-        tp_pct = abs(tp - entry) / entry * 100
-
-        reason = " + ".join(gates)
-        return TradeSignal(
-            symbol=market.symbol,
-            side=side,
-            direction=direction,
-            entry_price=entry,
-            sl_price=sl,
-            tp_price=tp,
-            rr=rr,
-            sl_pct=sl_pct,
-            tp_pct=tp_pct,
-            created_ms=now_ms(),
-            reason=reason,
-            gates=gates,
-            meta={**trend_meta, **comp_meta, **impulse_meta, **flow_meta, **risk_meta},
-        )
-
-    def _detect_impulse_side(self, candles: list[Candle]) -> str | None:
-        last = candles[-1]
-        pre = candles[-1 - config.COMPRESSION_LOOKBACK:-1]
-        pre_high = max(c.high for c in pre)
-        pre_low = min(c.low for c in pre)
-        if last.close > pre_high:
-            return "BUY"
-        if last.close < pre_low:
-            return "SELL"
+def analyze_symbol(symbol_id: str, okx_symbol: str, toobit_symbol: str, candles: list[dict[str, float]]) -> StrategySignal | None:
+    comp_ok, comp_score, comp_reason = detect_compression(candles)
+    if not comp_ok:
         return None
-
-    def _gate_direction_lock(self, side: str, c15: list[Candle], c1h: list[Candle]) -> tuple[bool, dict[str, Any]]:
-        def trend(candles: list[Candle], min_adx: float) -> tuple[str, dict[str, Any]]:
-            cls = closes(candles)
-            ef = ema(cls, config.EMA_FAST)
-            es = ema(cls, config.EMA_SLOW)
-            vw = rolling_vwap(candles, config.VWAP_LENGTH)
-            ax = adx(candles, config.ADX_LENGTH)
-            fast = last_valid(ef)
-            slow = last_valid(es)
-            vwap = last_valid(vw, cls[-1])
-            cur_adx = last_valid(ax, 0.0)
-            slope_fast = fast - (ef[-4] if len(ef) >= 4 and ef[-4] is not None else fast)
-            last_close = cls[-1]
-            if cur_adx < min_adx:
-                return "RANGE", {"adx": cur_adx, "min_adx": min_adx}
-            if last_close > vwap and fast > slow and slope_fast > 0:
-                return "UP", {"adx": cur_adx, "fast": fast, "slow": slow, "vwap": vwap, "slope_fast": slope_fast}
-            if last_close < vwap and fast < slow and slope_fast < 0:
-                return "DOWN", {"adx": cur_adx, "fast": fast, "slow": slow, "vwap": vwap, "slope_fast": slope_fast}
-            return "MIXED", {"adx": cur_adx, "fast": fast, "slow": slow, "vwap": vwap, "slope_fast": slope_fast}
-
-        t15, m15 = trend(c15, config.MIN_ADX_15M)
-        t1h, m1h = trend(c1h, config.MIN_ADX_1H)
-        want = "UP" if side == "BUY" else "DOWN"
-        ok = t15 == want and t1h == want
-        return ok, {"trend_15m": t15, "trend_1h": t1h, "trend_15m_meta": m15, "trend_1h_meta": m1h}
-
-    def _gate_compression(self, candles: list[Candle]) -> tuple[bool, dict[str, Any]]:
-        last = candles[-1]
-        pre = candles[-1 - config.COMPRESSION_LOOKBACK:-1]
-        pre_high = max(c.high for c in pre)
-        pre_low = min(c.low for c in pre)
-        pre_range = max(0.0, pre_high - pre_low)
-        pre_range_pct = pre_range / last.close * 100 if last.close else 0.0
-        current_atr = last_valid(atr(candles, config.ATR_LENGTH), 0.0)
-        atr_mult = pre_range / current_atr if current_atr > 0 else 999
-        ok = (
-            config.MIN_PRE_RANGE_PCT <= pre_range_pct <= config.MAX_PRE_RANGE_PCT
-            and atr_mult <= config.MAX_PRE_RANGE_ATR_MULT
-        )
-        return ok, {"pre_high": pre_high, "pre_low": pre_low, "pre_range_pct": pre_range_pct, "pre_range_atr_mult": atr_mult, "atr_5m": current_atr}
-
-    def _gate_impulse(self, side: str, candles: list[Candle]) -> tuple[bool, dict[str, Any]]:
-        last = candles[-1]
-        vols = volumes(candles[:-1])
-        avg_vol = last_valid(sma(vols, 20), 0.0)
-        volume_ratio = last.volume / avg_vol if avg_vol > 0 else 0.0
-        current_atr = last_valid(atr(candles, config.ATR_LENGTH), 0.0)
-        impulse_atr_mult = last.range / current_atr if current_atr > 0 else 999
-
-        if side == "BUY":
-            close_ok = last.close_position >= config.MIN_CLOSE_POSITION_LONG
-        else:
-            close_ok = last.close_position <= config.MAX_CLOSE_POSITION_SHORT
-
-        ok = (
-            last.body_ratio >= config.MIN_BODY_RATIO
-            and close_ok
-            and volume_ratio >= config.MIN_VOLUME_RATIO
-            and impulse_atr_mult <= config.MAX_IMPULSE_ATR_MULT
-        )
-        return ok, {"body_ratio": last.body_ratio, "close_position": last.close_position, "volume_ratio": volume_ratio, "impulse_atr_mult": impulse_atr_mult}
-
-    def _gate_flow(self, side: str, flow: OrderFlow) -> tuple[bool, dict[str, Any]]:
-        meta = {
-            "bid_ratio": flow.bid_ratio,
-            "taker_ratio": flow.taker_ratio,
-            "spread_pct": flow.spread_pct,
-            "funding_rate": flow.funding_rate,
-            "open_interest": flow.open_interest,
-        }
-        if flow.spread_pct > config.MAX_SPREAD_PCT:
-            return False, {**meta, "flow_reject": "spread_high"}
-
-        funding = flow.funding_rate
-        if funding is not None:
-            if abs(funding) > config.MAX_ABS_FUNDING_RATE:
-                return False, {**meta, "flow_reject": "funding_abs_high"}
-            if side == "BUY" and funding > config.MAX_DIRECTIONAL_FUNDING_RATE:
-                return False, {**meta, "flow_reject": "long_crowded_funding"}
-            if side == "SELL" and funding < -config.MAX_DIRECTIONAL_FUNDING_RATE:
-                return False, {**meta, "flow_reject": "short_crowded_funding"}
-
-        if not config.REQUIRE_ORDER_FLOW:
-            return True, meta
-
-        if side == "BUY":
-            ok = flow.taker_ratio >= config.MIN_TAKER_RATIO_LONG and flow.bid_ratio >= config.MIN_BOOK_BID_RATIO_LONG
-        else:
-            sell_ratio = (flow.taker_sell_qty / max(flow.taker_buy_qty, 1e-12))
-            ok = sell_ratio >= config.MIN_TAKER_RATIO_SHORT and flow.bid_ratio <= config.MAX_BOOK_BID_RATIO_SHORT
-            meta["sell_taker_ratio"] = sell_ratio
-        return ok, meta
-
-    def _gate_risk(self, side: str, c5: list[Candle], c15: list[Candle], flow: OrderFlow) -> tuple[bool, dict[str, Any]]:
-        last = c5[-1]
-        entry = last.close
-        pre = c5[-1 - config.COMPRESSION_LOOKBACK:-1]
-        current_atr = last_valid(atr(c5, config.ATR_LENGTH), 0.0)
-        buffer = current_atr * config.SL_ATR_BUFFER
-
-        if side == "BUY":
-            raw_sl = min(min(c.low for c in pre), last.low) - buffer
-            min_sl = entry * (1 - config.MIN_SL_DISTANCE_PCT / 100)
-            sl = min(raw_sl, min_sl)
-            risk = entry - sl
-            recent_highs = highs(c15[-24:-1]) or highs(c15[-24:])
-            nearest_ceiling = max(recent_highs) if recent_highs else entry
-            # اگر قیمت بالای سقف اخیر شکسته باشد، مقاومت نزدیک نداریم و فضا را باز حساب می‌کنیم.
-            recent_room = nearest_ceiling - entry if nearest_ceiling > entry else 999999.0
-        else:
-            raw_sl = max(max(c.high for c in pre), last.high) + buffer
-            min_sl = entry * (1 + config.MIN_SL_DISTANCE_PCT / 100)
-            sl = max(raw_sl, min_sl)
-            risk = sl - entry
-            recent_lows = lows(c15[-24:-1]) or lows(c15[-24:])
-            nearest_floor = min(recent_lows) if recent_lows else entry
-            # اگر قیمت زیر کف اخیر شکسته باشد، حمایت نزدیک نداریم و فضا را باز حساب می‌کنیم.
-            recent_room = entry - nearest_floor if nearest_floor < entry else 999999.0
-
-        if entry <= 0 or risk <= 0:
-            return False, {"risk_reject": "invalid_risk"}
-
-        sl_pct = risk / entry * 100
-        if sl_pct < config.MIN_SL_DISTANCE_PCT:
-            return False, {"sl_pct": sl_pct, "risk_reject": "sl_too_small"}
-        if sl_pct > config.MAX_SL_DISTANCE_PCT:
-            return False, {"sl_pct": sl_pct, "risk_reject": "sl_too_large"}
-
-        rr = config.DEFAULT_RR
-        if config.USE_DYNAMIC_RR:
-            strong_long = side == "BUY" and flow.taker_ratio >= config.STRONG_TAKER_RATIO and flow.bid_ratio >= config.STRONG_BOOK_EDGE
-            sell_ratio = flow.taker_sell_qty / max(flow.taker_buy_qty, 1e-12)
-            strong_short = side == "SELL" and sell_ratio >= config.STRONG_TAKER_RATIO and flow.bid_ratio <= (1 - config.STRONG_BOOK_EDGE)
-            if strong_long or strong_short:
-                rr = config.STRONG_FLOW_RR
-
-        # اگر تا سقف/کف اخیر ۱۵M فضا کم باشد، RR را تا حداقل 1 پایین می‌آوریم؛ زیر 1 ممنوع است.
-        max_room_r = recent_room / risk if risk > 0 else 0.0
-        if max_room_r < rr:
-            rr = max(config.MIN_RR, min(config.DEFAULT_RR, max_room_r))
-        if rr < config.MIN_RR or max_room_r < config.MIN_TARGET_ROOM_R_MULT:
-            return False, {"sl_pct": sl_pct, "rr": rr, "max_room_r": max_room_r, "risk_reject": "target_room_low"}
-
-        return True, {"sl_price": sl, "sl_pct": sl_pct, "rr": rr, "max_room_r": max_room_r}
+    bias = pre_move_flow_bias(candles)
+    if abs(bias) < config.FLOW_BIAS_MIN_ABS:
+        return None
+    side = "LONG" if bias > 0 else "SHORT"
+    absorb = absorption_score(candles, side)
+    if absorb < config.ABSORPTION_MIN_SCORE:
+        return None
+    entry = float(candles[-1]["close"])
+    strength, strength_score = estimate_strength(candles, comp_score, bias, absorb)
+    return StrategySignal(
+        symbol_id=symbol_id,
+        okx_symbol=okx_symbol,
+        toobit_symbol=toobit_symbol,
+        side=side,
+        entry=entry,
+        strength=strength,
+        strength_score=strength_score,
+        compression_score=round(comp_score * 100.0, 2),
+        flow_bias=round(bias, 4),
+        absorption_score=round(absorb * 100.0, 2),
+        reason=f"Compression + FlowBias + Absorption | {comp_reason}",
+    )
