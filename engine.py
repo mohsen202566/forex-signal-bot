@@ -50,7 +50,7 @@ class BotEngine:
             if report.valid_common and state.symbols != report.valid_common and len(report.valid_common) >= config.REQUIRED_COMMON_SYMBOL_COUNT:
                 state.symbols = list(report.valid_common)
                 state.save()
-            prefix = "✅ اعتبارسنجی ۳۵ نماد مشترک انجام شد" if report.ok else "⚠️ مشکل در همخوانی نمادهای OKX/Toobit"
+            prefix = "✅ نمادهای قابل اسکن OKX آماده شد" if report.ok else "⚠️ مشکل در نمادهای قابل اسکن"
             await self.send(prefix + "\n" + report.short_text())
             return report
         except Exception as exc:
@@ -83,7 +83,7 @@ class BotEngine:
                 if report.valid_common and state.symbols != report.valid_common and len(report.valid_common) >= config.REQUIRED_COMMON_SYMBOL_COUNT:
                     state.symbols = list(report.valid_common)
                     state.save()
-                prefix = "✅ اعتبارسنجی ۳۵ نماد مشترک انجام شد" if report.ok else "⚠️ مشکل در همخوانی نمادهای OKX/Toobit؛ اسکن با نمادهای معتبر ادامه دارد"
+                prefix = "✅ نمادهای قابل اسکن OKX آماده شد" if report.ok else "⚠️ مشکل در نمادهای قابل اسکن؛ اسکن با نمادهای معتبر ادامه دارد"
                 messages.append(prefix + "\n" + report.short_text())
             except Exception as exc:
                 logger.warning("اعتبارسنجی نمادها ناموفق بود: %s", exc)

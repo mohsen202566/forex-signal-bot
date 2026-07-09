@@ -54,6 +54,9 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", ",".join(DEFAULT_SYMB
 REQUIRED_COMMON_SYMBOL_COUNT = int(os.getenv("REQUIRED_COMMON_SYMBOL_COUNT", "35"))
 REQUIRE_EXCHANGE_SYMBOL_MATCH = os.getenv("REQUIRE_EXCHANGE_SYMBOL_MATCH", "true").lower() == "true"
 VALIDATE_SYMBOLS_ON_START = os.getenv("VALIDATE_SYMBOLS_ON_START", "true").lower() == "true"
+# Toobit symbols endpoint may return 404 on some accounts/VPS. Keep this false by default.
+# REAL execution still validates symbol on Toobit immediately before order.
+CHECK_TOOBIT_SYMBOLS_ON_START = os.getenv("CHECK_TOOBIT_SYMBOLS_ON_START", "false").lower() == "true"
 OKX_INST_TYPE = os.getenv("OKX_INST_TYPE", "SWAP")
 OKX_BASE_URL = os.getenv("OKX_BASE_URL", "https://www.okx.com")
 OKX_CANDLE_LIMIT_5M = int(os.getenv("OKX_CANDLE_LIMIT_5M", "180"))
@@ -63,7 +66,7 @@ OKX_ORDERBOOK_DEPTH = int(os.getenv("OKX_ORDERBOOK_DEPTH", "20"))
 OKX_TRADE_LIMIT = int(os.getenv("OKX_TRADE_LIMIT", "100"))
 
 # کنترل فشار روی OKX: جلوگیری از 429 و حذف نمادهای نامعتبر از چرخه اسکن
-OKX_REQUEST_DELAY_SECONDS = float(os.getenv("OKX_REQUEST_DELAY_SECONDS", "0.18"))
+OKX_REQUEST_DELAY_SECONDS = float(os.getenv("OKX_REQUEST_DELAY_SECONDS", "0.30"))
 OKX_BAD_SYMBOL_COOLDOWN_SECONDS = int(os.getenv("OKX_BAD_SYMBOL_COOLDOWN_SECONDS", "3600"))
 OKX_FETCH_FUNDING_EVERY_SCAN = os.getenv("OKX_FETCH_FUNDING_EVERY_SCAN", "false").lower() == "true"
 OKX_MAX_RETRIES = int(os.getenv("OKX_MAX_RETRIES", "2"))
