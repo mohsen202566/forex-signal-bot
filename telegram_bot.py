@@ -101,6 +101,18 @@ def format_status(state: BotState) -> str:
         active_real = sum(1 for t in load_active_trades() if str(t.get("mode")) == "REAL")
     except Exception:
         active_real = 0
+    scan_line = ""
+    try:
+        summary = engine.last_scan_summary if engine else {}
+        if summary:
+            scan_line = (
+                f"\n🔎 آخرین اسکن: {summary.get('symbols', 0)} ارز | "
+                f"سیگنال {summary.get('signals', 0)} | "
+                f"رد {summary.get('rejected', 0)} | "
+                f"خطا {summary.get('failed', 0)}\n"
+            )
+    except Exception:
+        scan_line = ""
     return (
         "⚙️ وضعیت ربات 5M اسکلپ\n\n"
         f"💹 ترید واقعی: {real_text}\n"
@@ -115,6 +127,7 @@ def format_status(state: BotState) -> str:
         f"🧾 کارمزد رفت‌وبرگشت ثابت: USDT {float(getattr(config, 'FIXED_ROUNDTRIP_FEE_USDT', 0.05)):.2f}\n"
         f"✅ حداقل سود خالص: USDT {float(getattr(config, 'MIN_NET_PROFIT_USDT', 0.01)):.2f}\n"
         f"📐 RR اسکالپ: {float(state.default_rr):.1f}\n"
+        f"{scan_line}"
         "🎯 ورود: DIFT-5M Trap Hunt ✅\n\n"
         "دستورات:\n"
         "ترید فعال | ترید خاموش\n"
@@ -436,10 +449,50 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif data == "validate_symbols": await validate_symbols_cmd(dummy, context)  # type: ignore[arg-type]
 
 
+async def _run_forever(name: str, coro_factory) -> None:
+    """اجرای امن taskهای حلقه‌ای؛ اگر کرش کنند لاگ می‌شود و دوباره بالا می‌آیند."""
+    while True:
+        try:
+            logger.info("background task started: %s", name)
+            await coro_factory()
+        except asyncio.CancelledError:
+            logger.info("background task cancelled: %s", name)
+            raise
+        except Exception as exc:
+            logger.exception("background task crashed: %s | %s", name, exc)
+            await asyncio.sleep(10)
+
+
+async def _run_once(name: str, coro_factory) -> None:
+    try:
+        logger.info("background one-shot started: %s", name)
+        await coro_factory()
+        logger.info("background one-shot finished: %s", name)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.exception("background one-shot failed: %s | %s", name, exc)
+
+
+async def post_init(app: Application) -> None:
+    global engine
+    engine = BotEngine(notify=notify_admins)
+    logger.info(
+        "DIFT-5M started | scan_interval=%ss | result_interval=%ss | symbols=%s",
+        config.SCAN_INTERVAL_SECONDS,
+        config.RESULT_CHECK_INTERVAL_SECONDS,
+        len(BotState.load().symbols),
+    )
+    if config.VALIDATE_SYMBOLS_ON_START:
+        app.create_task(_run_once("symbol_validation_once", lambda: engine.validate_symbols_once(force=True)))
+    app.create_task(_run_forever("scan_loop", lambda: engine.scan_loop(config.SCAN_INTERVAL_SECONDS)))
+    app.create_task(_run_forever("monitor_loop", lambda: engine.monitor_loop(config.RESULT_CHECK_INTERVAL_SECONDS)))
+
+
 def build_application() -> Application:
     if not config.TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN تنظیم نشده است")
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     setattr(notify_admins, "app", app)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
@@ -469,16 +522,6 @@ def build_application() -> Application:
     return app
 
 
-async def post_init(app: Application) -> None:
-    global engine
-    engine = BotEngine(notify=notify_admins)
-    if config.VALIDATE_SYMBOLS_ON_START:
-        asyncio.create_task(engine.validate_symbols_once(force=True))
-    asyncio.create_task(engine.scan_loop(config.SCAN_INTERVAL_SECONDS))
-    asyncio.create_task(engine.monitor_loop(config.RESULT_CHECK_INTERVAL_SECONDS))
-
-
 def run() -> None:
     app = build_application()
-    app.post_init = post_init
     app.run_polling(close_loop=False)

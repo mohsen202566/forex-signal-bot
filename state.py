@@ -33,7 +33,26 @@ class BotState:
             state.mode = "NORMAL"
         state.min_rr = max(1.0, float(state.min_rr))
         state.default_rr = max(state.min_rr, float(state.default_rr))
-        state.symbols = [str(s).upper() for s in state.symbols]
+        # مهاجرت امن نمادها بعد از آپدیت: TONUSDT در OKX SWAP این پروژه معتبر نبود؛ WIFUSDT جایگزین شد.
+        original_symbols = list(state.symbols or [])
+        cleaned: list[str] = []
+        for raw in original_symbols:
+            sym = str(raw).upper().replace("-", "").replace("/", "")
+            if sym == "TONUSDT":
+                sym = "WIFUSDT"
+            if sym and sym not in cleaned:
+                cleaned.append(sym)
+
+        # اگر لیست قبلی از پیش‌فرض‌های ربات بوده و با آپدیت ناقص مانده، آن را با لیست ۳۵تایی جدید همسان کن.
+        default_set = set(config.DEFAULT_SYMBOLS_35)
+        if len(cleaned) >= 30 and ("WIFUSDT" not in cleaned or any(x not in default_set for x in cleaned)):
+            cleaned = list(config.DEFAULT_SYMBOLS_35)
+        state.symbols = cleaned
+        if original_symbols != cleaned:
+            try:
+                state.save()
+            except Exception:
+                pass
         return state
 
     def save(self) -> None:

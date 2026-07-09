@@ -164,3 +164,10 @@ Result source = OKX 5m candles
 - `CHECK_TOOBIT_SYMBOLS_ON_START=false` پیش‌فرض است.
 - در حالت REAL، قبل از ارسال سفارش واقعی، نماد همچنان با خود Toobit اعتبارسنجی می‌شود.
 - اگر خواستی Toobit symbols را هم در شروع چک کنی، در `.env` بگذار: `CHECK_TOOBIT_SYMBOLS_ON_START=true`.
+
+
+## v9 fix
+- Toobit exchangeInfo دیگر برای اسکن/شروع ربات خوانده نمی‌شود تا HTTP 404 باعث توقف یا اخطار تکراری نشود.
+- اجرای REAL با markPrice و order خود Toobit اعتبارسنجی می‌شود.
+- TONUSDT از state قدیمی به WIFUSDT مهاجرت می‌کند.
+- اگر runtime_state.json لیست قدیمی داشت، خود ربات آن را با ۳۵ نماد جدید همسان می‌کند.

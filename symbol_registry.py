@@ -43,7 +43,7 @@ class SymbolValidationReport:
         if self.toobit_checked:
             lines.append(f"Toobit symbols seen: {self.toobit_count}")
         elif self.toobit_error:
-            lines.append("Toobit list check: skipped/failed; REAL order still validates before execution")
+            lines.append("Toobit list check: skipped; REAL order validates with markPrice/order")
         if self.valid_common:
             lines.append("Valid: " + ", ".join(self.valid_common))
         if self.missing_okx:
@@ -100,9 +100,9 @@ def validate_symbols(symbols: list[str], okx: OKXClient | None = None, toobit: T
 
     okx_set = load_okx_symbols(okx)
 
-    # پیش‌فرض: برای سرعت و جلوگیری از 404، Toobit را در شروع چک نمی‌کنیم.
-    # اجرای REAL همچنان قبل از سفارش با Toobit validate_symbol می‌شود.
-    check_toobit = bool(getattr(config, "CHECK_TOOBIT_SYMBOLS_ON_START", False))
+    # برای جلوگیری قطعی از HTTP 404 توبیت، لیست نمادهای Toobit در شروع/اسکن خوانده نمی‌شود.
+    # اجرای REAL همچنان با markPrice/order خود Toobit قبل از سفارش چک می‌شود.
+    check_toobit = False
     toobit_set: set[str] = set()
     toobit_error: str | None = None
     if check_toobit:

@@ -26,6 +26,7 @@ class BotEngine:
         self.running = False
         self.last_rejections: dict[str, str] = {}
         self.last_signal: TradeSignal | None = None
+        self.last_scan_summary: dict[str, int | str] = {}
         self.symbol_report: SymbolValidationReport | None = None
         self.valid_symbols: set[str] = set()
         self._validation_attempted = False
@@ -99,6 +100,8 @@ class BotEngine:
             scan_symbols = [s for s in scan_symbols if s in self.valid_symbols]
 
         signals: list[TradeSignal] = []
+        rejected = 0
+        failed = 0
         for symbol in scan_symbols:
             try:
                 market = self.okx.get_market_data(symbol)
@@ -106,14 +109,28 @@ class BotEngine:
                 if isinstance(result, TradeSignal):
                     signals.append(result)
                     self.last_signal = result
+                    logger.info("scan accepted: %s | %s", symbol, result.direction)
                     exec_result = self.manager.execute_or_track(result, state)
                     if config.SEND_SIGNAL_MESSAGES:
                         messages.append("🚨 سیگنال معتبر\n" + result.text() + f"\nAction: {exec_result.get('action')}\n{exec_result.get('reason','')}")
                 else:
+                    rejected += 1
                     self.last_rejections[symbol] = result.reason
+                    logger.info("scan rejected: %s | %s", symbol, result.reason)
             except Exception as exc:
+                failed += 1
                 self.last_rejections[symbol] = str(exc)
                 logger.warning("اسکن %s ناموفق بود: %s", symbol, exc)
+        self.last_scan_summary = {
+            "symbols": len(scan_symbols),
+            "signals": len(signals),
+            "rejected": rejected,
+            "failed": failed,
+        }
+        logger.info(
+            "scan cycle finished | symbols=%s | signals=%s | rejected=%s | failed=%s",
+            len(scan_symbols), len(signals), rejected, failed,
+        )
         return signals, messages
 
     async def scan_once(self) -> list[TradeSignal]:
@@ -134,14 +151,18 @@ class BotEngine:
 
     async def scan_loop(self, interval_seconds: int) -> None:
         self.running = True
+        logger.info("scan_loop started | interval=%s", interval_seconds)
         while self.running:
             await self.scan_once()
             await asyncio.sleep(max(5, int(interval_seconds)))
 
     async def monitor_loop(self, interval_seconds: int) -> None:
         self.running = True
+        logger.info("monitor_loop started | interval=%s", interval_seconds)
         while self.running:
-            await self.check_results_once()
+            closed = await self.check_results_once()
+            if closed:
+                logger.info("monitor closed trades: %s", len(closed))
             await asyncio.sleep(max(5, int(interval_seconds)))
 
     async def loop(self, interval_seconds: int) -> None:

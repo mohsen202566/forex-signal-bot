@@ -61,8 +61,10 @@ class TradeManager:
             self.record_signal(signal, state, "REAL_BLOCKED", {"reason": "REAL_TRADING_ENABLED=false"})
             return {"ok": False, "action": "real_blocked", "reason": "اجازه اجرای واقعی در config فعال نیست"}
         try:
-            exchange_symbols = self.toobit.get_exchange_symbols()
-            toobit_symbol, symbol_info = self.toobit.validate_symbol(signal.symbol, exchange_symbols)
+            # مهم: به exchangeInfo توبیت وابسته نیستیم، چون روی بعضی VPSها 404 می‌دهد.
+            # اعتبارسنجی واقعی با markPrice و سپس order انجام می‌شود.
+            toobit_symbol = signal.symbol.upper()
+            symbol_info = None
             toobit_mark = self.toobit.get_mark_price(toobit_symbol)
             dev = pct_distance(toobit_mark, signal.entry_price)
             if dev > config.MAX_TOOBIT_OKX_PRICE_DEVIATION_PCT:

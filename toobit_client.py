@@ -157,7 +157,17 @@ class ToobitClient:
         return self._request("GET", self.path_exchange_info, signed=False)
 
     def get_exchange_symbols(self) -> dict[str, dict[str, Any]]:
-        payload = self.get_exchange_info()
+        """خواندن لیست نمادهای Toobit.
+
+        بعضی اکانت‌ها/VPSها endpoint exchangeInfo را با 404 برمی‌گردانند.
+        در این حالت نباید اسکن OKX یا پنل ربات خراب شود؛ پس dict خالی برمی‌گردانیم.
+        اجرای REAL همچنان با markPrice/order خود Toobit قبل از سفارش اعتبارسنجی می‌شود.
+        """
+        try:
+            payload = self.get_exchange_info()
+        except Exception as exc:
+            logger.warning("خواندن symbols توبیت ناموفق بود و نادیده گرفته شد: %s", exc)
+            return {}
         raw_symbols = []
         if isinstance(payload, dict):
             if isinstance(payload.get("symbols"), list):
@@ -179,6 +189,10 @@ class ToobitClient:
     def validate_symbol(self, internal_symbol: str, exchange_symbols: dict[str, dict[str, Any]] | None = None) -> tuple[str, dict[str, Any]]:
         if exchange_symbols is None:
             exchange_symbols = self.get_exchange_symbols()
+        # اگر exchangeInfo در دسترس نیست، نماد داخلی را به Toobit پاس می‌دهیم؛
+        # markPrice/order خود صرافی اعتبارسنجی نهایی را انجام می‌دهد.
+        if not exchange_symbols:
+            return toobit_symbol_candidates(internal_symbol)[0], {}
         for candidate in toobit_symbol_candidates(internal_symbol):
             key = candidate.upper()
             if key in exchange_symbols:
