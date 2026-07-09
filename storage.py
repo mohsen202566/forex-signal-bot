@@ -107,6 +107,12 @@ class Storage:
                 "profit_total": 0.0,
                 "stats_reset_at": int(time.time()),
                 "profit_reset_at": int(time.time()),
+                "toobit_connected": False,
+                "toobit_margin_usdt": 0.0,
+                "toobit_available_usdt": 0.0,
+                "toobit_total_usdt": 0.0,
+                "toobit_last_error": "",
+                "toobit_last_update": 0,
             }
             for key, value in defaults.items():
                 if self.get(key, None) is None:

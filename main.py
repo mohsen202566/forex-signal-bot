@@ -187,12 +187,47 @@ class TradingBotApp:
                     self.storage.add_health_event("profiles", "warning", f"daily profile failed: {exc}")
             time.sleep(30)
 
+    def toobit_status_loop(self) -> None:
+        """کش سبک وضعیت توبیت برای پنل ترید/سلامت.
+        این لوپ جداست تا هیچ دستور تلگرام یا پنل، مسیر تحلیل را کند نکند.
+        """
+        while not self._stop.is_set():
+            try:
+                bal = self.toobit.get_futures_balance()
+                now_ts = int(time.time())
+                self.storage.set("toobit_connected", True)
+                self.storage.set("toobit_margin_usdt", float(bal.get("margin", 0.0) or 0.0))
+                self.storage.set("toobit_available_usdt", float(bal.get("available", 0.0) or 0.0))
+                self.storage.set("toobit_total_usdt", float(bal.get("total", 0.0) or 0.0))
+                self.storage.set("toobit_last_error", "")
+                self.storage.set("toobit_last_update", now_ts)
+                self.health.mark("toobit")
+            except Exception as exc:
+                self.storage.set("toobit_connected", False)
+                self.storage.set("toobit_last_error", str(exc)[:240])
+                self.storage.set("toobit_last_update", int(time.time()))
+                self.storage.add_health_event("toobit_balance", "warning", f"balance/status failed: {exc}")
+            time.sleep(max(5, int(getattr(config, "TOOBIT_STATUS_INTERVAL_SECONDS", 15))))
+
+    def startup_profile_update(self) -> None:
+        """یک بار بعد از روشن شدن ربات پروفایل‌ها را در بک‌گراند می‌سازد.
+        مسیر تحلیل کند نمی‌شود؛ تا قبل از آماده شدن پروفایل‌ها، risk_engine سیگنال خام صادر نمی‌کند.
+        """
+        try:
+            self.profiles.update_all()
+            self.health.mark("profiles")
+            self._last_profile_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        except Exception as exc:
+            self.storage.add_health_event("profiles", "warning", f"startup profile failed: {exc}")
+
     def run(self) -> None:
         threads = [
             threading.Thread(target=self.analysis_loop, daemon=True),
             threading.Thread(target=self.monitor_loop, daemon=True),
             threading.Thread(target=self.telegram_loop, daemon=True),
             threading.Thread(target=self.profile_loop, daemon=True),
+            threading.Thread(target=self.toobit_status_loop, daemon=True),
+            threading.Thread(target=self.startup_profile_update, daemon=True),
         ]
         for t in threads:
             t.start()

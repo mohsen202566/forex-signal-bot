@@ -45,10 +45,16 @@ def build_risk_plan(signal: StrategySignal, storage: Storage) -> RiskPlan | None
     if entry <= 0:
         return None
     profile = storage.get_profile(signal.symbol_id) or {}
+    # برای جلوگیری از سیگنال‌های خام مثل استاپ APT، تا وقتی پروفایل نویز/TP آماده نباشد
+    # سیگنال صادر نمی‌شود. این محاسبه فقط lookup سبک است و سرعت هسته ۱ و ۲ را کم نمی‌کند.
+    if getattr(config, "REQUIRE_PROFILE_READY", True):
+        if not profile or float(profile.get("min_sl_pct") or 0.0) <= 0:
+            return None
+        if int(profile.get("signal_count") or 0) < int(getattr(config, "PROFILE_MIN_SIGNALS", 8)):
+            return None
     min_sl_pct = float(profile.get("min_sl_pct") or 0.0)
     if min_sl_pct <= 0:
-        # fallback سبک برای وقتی هنوز پروفایل روزانه ساخته نشده
-        min_sl_pct = 0.35
+        min_sl_pct = float(getattr(config, "RISK_FALLBACK_MIN_SL_PCT", 0.55))
     sl_pct = max(min_sl_pct, 0.05)
     base_tp_pct = sl_pct * config.RISK_REWARD
     trade_usdt = float(storage.get("trade_usdt", config.TRADE_USDT_DEFAULT))

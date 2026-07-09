@@ -77,8 +77,12 @@ COMPRESSION_RATIO_MAX = 0.72
 MIN_COMPRESSION_BARS = 12
 PREMOVE_PRICE_MOVE_MAX_PCT = 0.35
 FLOW_BIAS_LOOKBACK = 5
-FLOW_BIAS_MIN_ABS = 0.12
-ABSORPTION_MIN_SCORE = 0.45
+FLOW_BIAS_MIN_ABS = 0.22
+ABSORPTION_MIN_SCORE = 0.58
+# بعد از استاپ اول مشخص شد سیگنال ضعیف نباید اصلاً صادر شود.
+# این gate مربوط به کیفیت Direction Lock است، نه تخمین قدرت روند.
+MIN_SIGNAL_STRENGTH_SCORE = 55.0
+ALLOW_WEAK_SIGNALS = False
 SIGNAL_COOLDOWN_SECONDS_PER_SYMBOL = 12 * 60
 
 # -----------------------------
@@ -92,9 +96,15 @@ TP_PROFILE_PERCENTILE = 70
 PROFILE_UPDATE_HOUR_UTC = 0
 PROFILE_UPDATE_MINUTE_UTC = 5
 VIRTUAL_MONITOR_MAX_MINUTES = 90
+REQUIRE_PROFILE_READY = True
+PROFILE_STALE_MAX_HOURS = 36
+RISK_FALLBACK_MIN_SL_PCT = 0.55
 
 # -----------------------------
 # Storage
 # -----------------------------
 DB_PATH = os.getenv("BOT_DB_PATH", "bot_state.sqlite3")
 LOG_LEVEL = os.getenv("BOT_LOG_LEVEL", "INFO")
+
+# کش وضعیت اتصال و مارجین توبیت برای پنل سریع
+TOOBIT_STATUS_INTERVAL_SECONDS = int(os.getenv("TOOBIT_STATUS_INTERVAL_SECONDS", "15"))

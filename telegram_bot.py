@@ -110,16 +110,45 @@ class TelegramBot:
         self.storage.set(key, val)
         self.send_message(f"✅ {label} روی {val} تنظیم شد.")
 
+    def _age_text(self, ts: int | float | None) -> str:
+        try:
+            ts_i = int(ts or 0)
+        except Exception:
+            ts_i = 0
+        if ts_i <= 0:
+            return "هنوز آپدیت نشده"
+        sec = max(0, int(time.time()) - ts_i)
+        if sec < 60:
+            return f"{sec} ثانیه قبل"
+        return f"{sec // 60} دقیقه قبل"
+
     def panel_trade(self) -> str:
         trading = "✅ روشن" if self.storage.get("trading_enabled", False) else "⛔ خاموش"
         auto = "✅ فعال" if self.storage.get("auto_signal_enabled", True) else "⛔ غیرفعال"
         max_pos = int(self.storage.get("max_positions", config.MAX_POSITIONS_DEFAULT))
         open_real = self.storage.count_real_open()
         free = max(0, max_pos - open_real)
+
+        toobit_connected = bool(self.storage.get("toobit_connected", False))
+        toobit_margin = float(self.storage.get("toobit_margin_usdt", 0.0) or 0.0)
+        toobit_available = float(self.storage.get("toobit_available_usdt", 0.0) or 0.0)
+        toobit_total = float(self.storage.get("toobit_total_usdt", 0.0) or 0.0)
+        toobit_error = str(self.storage.get("toobit_last_error", "") or "")
+        toobit_updated = self._age_text(self.storage.get("toobit_last_update", 0))
+        if toobit_connected:
+            toobit_line = f"✅ وصل | آپدیت: {toobit_updated}"
+        else:
+            short_error = (toobit_error[:90] + "...") if len(toobit_error) > 90 else toobit_error
+            toobit_line = f"❌ قطع/خطا | {short_error or 'دیتای موفق ثبت نشده'}"
+
         return (
             "⚙️ پنل ترید\n\n"
             f"ترید واقعی: {trading}\n"
             f"اتو سیگنال: {auto}\n"
+            f"اتصال توبیت: {toobit_line}\n"
+            f"مارجین توبیت: {toobit_margin:.4f} USDT\n"
+            f"موجودی آزاد توبیت: {toobit_available:.4f} USDT\n"
+            f"موجودی کل توبیت: {toobit_total:.4f} USDT\n"
             f"دلار هر ترید: {self.storage.get('trade_usdt', config.TRADE_USDT_DEFAULT)} USDT\n"
             f"لوریج: {self.storage.get('leverage', config.LEVERAGE_DEFAULT)}x\n"
             f"اسلات واقعی: {open_real}/{max_pos}\n"

@@ -44,17 +44,27 @@ class HealthManager:
     def report(self) -> str:
         events = self.storage.active_health_events()
         black = self.storage.blacklist_rows()
-        status = "✅ سالم" if not events else "⚠️ هشدار"
+        toobit_connected = bool(self.storage.get("toobit_connected", False))
+        toobit_margin = float(self.storage.get("toobit_margin_usdt", 0.0) or 0.0)
+        toobit_available = float(self.storage.get("toobit_available_usdt", 0.0) or 0.0)
+        toobit_error = str(self.storage.get("toobit_last_error", "") or "")
+        toobit_updated = int(self.storage.get("toobit_last_update", 0) or 0)
+        status = "✅ سالم" if not events and toobit_connected else "⚠️ هشدار"
         critical = [e for e in events if str(e.get("severity", "")).lower() in ("critical", "error", "❌")]
-        if critical:
+        if critical or (not toobit_connected and toobit_error):
             status = "❌ مشکل جدی"
+        if toobit_connected:
+            toobit_line = f"✅ وصل | مارجین {toobit_margin:.4f} USDT | آزاد {toobit_available:.4f} USDT | آپدیت {self.age(toobit_updated)}"
+        else:
+            short_error = (toobit_error[:110] + "...") if len(toobit_error) > 110 else toobit_error
+            toobit_line = f"❌ قطع/خطا | {short_error or 'دیتای موفق ثبت نشده'}"
         lines = [
             "🩺 سلامت ربات 5M",
             "",
             f"وضعیت کلی: {status}",
             "",
             f"OKX Data: آخرین موفقیت {self.age(self.last_okx_ts)}",
-            f"Toobit Trade: آخرین موفقیت {self.age(self.last_toobit_ts)}",
+            f"Toobit Trade: {toobit_line}",
             f"Signal Engine: آخرین تحلیل {self.age(self.last_signal_loop_ts)}",
             f"Monitoring: آخرین چک {self.age(self.last_monitor_loop_ts)}",
             f"Profiles: آخرین آپدیت {self.age(self.last_profile_update_ts)}",

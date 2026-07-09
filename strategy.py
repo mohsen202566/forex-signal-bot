@@ -102,6 +102,14 @@ def analyze_symbol(symbol_id: str, okx_symbol: str, toobit_symbol: str, candles:
         return None
     entry = float(candles[-1]["close"])
     strength, strength_score = estimate_strength(candles, comp_score, bias, absorb)
+
+    # Gate کیفیت سیگنال: سیگنال ضعیف یا مرزی باعث استاپ سریع می‌شود.
+    # اینجا قدرت روند را شرط نمی‌کنیم؛ فقط قفل جهت/کیفیت حداقلی سیگنال را چک می‌کنیم.
+    if (not getattr(config, "ALLOW_WEAK_SIGNALS", False)) and strength == "ضعیف":
+        return None
+    if strength_score < float(getattr(config, "MIN_SIGNAL_STRENGTH_SCORE", 55.0)):
+        return None
+
     return StrategySignal(
         symbol_id=symbol_id,
         okx_symbol=okx_symbol,
