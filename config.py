@@ -108,3 +108,10 @@ LOG_LEVEL = os.getenv("BOT_LOG_LEVEL", "INFO")
 
 # کش وضعیت اتصال و مارجین توبیت برای پنل سریع
 TOOBIT_STATUS_INTERVAL_SECONDS = int(os.getenv("TOOBIT_STATUS_INTERVAL_SECONDS", "15"))
+
+# -----------------------------
+# Lightweight reject diagnostics
+# -----------------------------
+DEBUG_REJECTS = True
+REJECT_SUMMARY_EVERY_CYCLES = 1
+REJECT_DETAIL_LIMIT_PER_CYCLE = 8

@@ -22,6 +22,12 @@ class StrategySignal:
     absorption_score: float
     reason: str
 
+@dataclass
+class StrategyAnalysisResult:
+    signal: StrategySignal | None
+    reject_reason: str
+    details: dict[str, float | str]
+
 def pct_range(c: dict[str, float]) -> float:
     close = float(c["close"])
     return (float(c["high"]) - float(c["low"])) / close * 100.0 if close > 0 else 0.0
@@ -89,28 +95,39 @@ def estimate_strength(candles: list[dict[str, float]], compression_score: float,
         label = "ضعیف"
     return label, round(score * 100.0, 2)
 
-def analyze_symbol(symbol_id: str, okx_symbol: str, toobit_symbol: str, candles: list[dict[str, float]]) -> StrategySignal | None:
+def analyze_symbol_detailed(symbol_id: str, okx_symbol: str, toobit_symbol: str, candles: list[dict[str, float]]) -> StrategyAnalysisResult:
     comp_ok, comp_score, comp_reason = detect_compression(candles)
+    details: dict[str, float | str] = {
+        "compression_score": round(comp_score * 100.0, 2),
+        "compression_detail": comp_reason,
+    }
     if not comp_ok:
-        return None
+        reason = "candles_too_few" if comp_reason == "candles_too_few" else "compression_fail"
+        return StrategyAnalysisResult(None, reason, details)
+
     bias = pre_move_flow_bias(candles)
+    details["flow_bias"] = round(bias, 4)
     if abs(bias) < config.FLOW_BIAS_MIN_ABS:
-        return None
+        return StrategyAnalysisResult(None, "flow_fail", details)
+
     side = "LONG" if bias > 0 else "SHORT"
+    details["side"] = side
     absorb = absorption_score(candles, side)
+    details["absorption_score"] = round(absorb * 100.0, 2)
     if absorb < config.ABSORPTION_MIN_SCORE:
-        return None
+        return StrategyAnalysisResult(None, "absorption_fail", details)
+
     entry = float(candles[-1]["close"])
     strength, strength_score = estimate_strength(candles, comp_score, bias, absorb)
+    details["strength"] = strength
+    details["strength_score"] = strength_score
 
-    # Gate کیفیت سیگنال: سیگنال ضعیف یا مرزی باعث استاپ سریع می‌شود.
-    # اینجا قدرت روند را شرط نمی‌کنیم؛ فقط قفل جهت/کیفیت حداقلی سیگنال را چک می‌کنیم.
     if (not getattr(config, "ALLOW_WEAK_SIGNALS", False)) and strength == "ضعیف":
-        return None
+        return StrategyAnalysisResult(None, "weak_strength", details)
     if strength_score < float(getattr(config, "MIN_SIGNAL_STRENGTH_SCORE", 55.0)):
-        return None
+        return StrategyAnalysisResult(None, "min_strength_fail", details)
 
-    return StrategySignal(
+    signal = StrategySignal(
         symbol_id=symbol_id,
         okx_symbol=okx_symbol,
         toobit_symbol=toobit_symbol,
@@ -123,3 +140,8 @@ def analyze_symbol(symbol_id: str, okx_symbol: str, toobit_symbol: str, candles:
         absorption_score=round(absorb * 100.0, 2),
         reason=f"Compression + FlowBias + Absorption | {comp_reason}",
     )
+    return StrategyAnalysisResult(signal, "accepted", details)
+
+def analyze_symbol(symbol_id: str, okx_symbol: str, toobit_symbol: str, candles: list[dict[str, float]]) -> StrategySignal | None:
+    """سازگاری با کدهای قبلی و profile builder."""
+    return analyze_symbol_detailed(symbol_id, okx_symbol, toobit_symbol, candles).signal

@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+from collections import Counter
 
 import config
 from health import HealthManager
@@ -16,7 +17,7 @@ from okx_client import OKXClient
 from profiles import ProfileBuilder
 from risk_engine import build_risk_plan
 from storage import Storage
-from strategy import analyze_symbol
+from strategy import analyze_symbol_detailed
 from symbols import SYMBOLS, SymbolMap
 from telegram_bot import TelegramBot
 from toobit_client import ToobitFuturesClient
@@ -53,11 +54,13 @@ class TradingBotApp:
         self._scan_count = 0
         self._signal_count = 0
 
-    def can_signal(self, sym: SymbolMap) -> bool:
+    def signal_eligibility(self, sym: SymbolMap) -> tuple[bool, str]:
         if self.storage.is_blacklisted(sym.id):
-            return False
+            return False, "blacklisted"
         last = self._last_signal_ts.get(sym.id, 0)
-        return time.time() - last >= config.SIGNAL_COOLDOWN_SECONDS_PER_SYMBOL
+        if time.time() - last < config.SIGNAL_COOLDOWN_SECONDS_PER_SYMBOL:
+            return False, "cooldown"
+        return True, "eligible"
 
     def reserve_real_slot(self) -> int | None:
         max_pos = int(self.storage.get("max_positions", config.MAX_POSITIONS_DEFAULT))
@@ -105,18 +108,35 @@ class TradingBotApp:
             self.storage.add_health_event("toobit_order", "warning", f"open real failed: {exc}", sym.id)
             return False, None
 
-    def analyze_one(self, sym: SymbolMap) -> None:
-        if not self.can_signal(sym):
-            return
+    def analyze_one(self, sym: SymbolMap) -> tuple[str, dict]:
+        eligible, eligibility_reason = self.signal_eligibility(sym)
+        if not eligible:
+            return eligibility_reason, {}
         try:
             candles = self.okx.get_candles(sym.okx)
             self.health.mark("okx")
-            sig = analyze_symbol(sym.id, sym.okx, sym.toobit, candles)
-            if not sig:
-                return
+            analysis = analyze_symbol_detailed(sym.id, sym.okx, sym.toobit, candles)
+            if not analysis.signal:
+                return analysis.reject_reason, analysis.details
+            sig = analysis.signal
+
             risk = build_risk_plan(sig, self.storage)
-            if not risk or not risk.min_net_profit_ok:
-                return
+            if risk is None:
+                profile = self.storage.get_profile(sig.symbol_id) or {}
+                if not profile or float(profile.get("min_sl_pct") or 0.0) <= 0:
+                    return "noise_profile_fail", analysis.details
+                if int(profile.get("signal_count") or 0) < int(getattr(config, "PROFILE_MIN_SIGNALS", 8)):
+                    d = dict(analysis.details)
+                    d["profile_signal_count"] = int(profile.get("signal_count") or 0)
+                    return "tp_profile_samples_fail", d
+                return "risk_plan_fail", analysis.details
+            if not risk.min_net_profit_ok:
+                reason = "min_net_profit_fail" if risk.estimated_net_profit < config.MIN_NET_PROFIT_USDT else "tp_profile_fail"
+                d = dict(analysis.details)
+                d["estimated_net_profit"] = round(risk.estimated_net_profit, 6)
+                d["risk_reason"] = risk.reason
+                return reason, d
+
             trading_on = bool(self.storage.get("trading_enabled", False))
             auto_on = bool(self.storage.get("auto_signal_enabled", True))
             slot = self.reserve_real_slot() if trading_on and auto_on else None
@@ -152,10 +172,12 @@ class TradingBotApp:
             self._last_signal_ts[sym.id] = int(time.time())
             self._signal_count += 1
             logger.info("SIGNAL id=%s symbol=%s side=%s strength=%s mode=%s entry=%.8g tp=%.8g sl=%.8g", signal_id, sym.id, data["side"], data["strength"], data["trade_mode"], data["entry"], data["tp"], data["sl"])
+            return "accepted", analysis.details
         except Exception as exc:
             logger.warning("SYMBOL_SKIPPED symbol=%s error=%s", sym.id, exc)
             self.storage.add_health_event("analysis", "warning", f"symbol skipped: {exc}", sym.id)
             self.storage.blacklist_symbol(sym.id, str(exc)[:180], config.SYMBOL_ERROR_BLACKLIST_SECONDS)
+            return "symbol_error", {"error": str(exc)[:180]}
 
     def _check_real_after_70s(self, signal_id: int, sym: SymbolMap) -> None:
         time.sleep(config.ORDER_OPEN_CHECK_SECONDS)
@@ -177,12 +199,36 @@ class TradingBotApp:
     def analysis_loop(self) -> None:
         while not self._stop.is_set():
             start = time.time()
+            rejects: Counter[str] = Counter()
+            detail_rows: list[tuple[str, str, dict]] = []
             for sym in SYMBOLS:
-                self.analyze_one(sym)
+                reason, details = self.analyze_one(sym)
+                rejects[reason] += 1
+                if (
+                    getattr(config, "DEBUG_REJECTS", True)
+                    and reason not in {"accepted", "compression_fail", "candles_too_few", "cooldown", "blacklisted"}
+                    and len(detail_rows) < int(getattr(config, "REJECT_DETAIL_LIMIT_PER_CYCLE", 8))
+                ):
+                    detail_rows.append((sym.id, reason, details))
             self.health.mark("signal")
             self._scan_count += 1
             elapsed = time.time() - start
             logger.info("SCAN_DONE cycle=%s symbols=%s elapsed=%.2fs total_signals=%s open_signals=%s", self._scan_count, len(SYMBOLS), elapsed, self._signal_count, len(self.storage.get_open_signals()))
+
+            every = max(1, int(getattr(config, "REJECT_SUMMARY_EVERY_CYCLES", 1)))
+            if getattr(config, "DEBUG_REJECTS", True) and self._scan_count % every == 0:
+                ordered = [
+                    "compression_fail", "candles_too_few", "flow_fail", "absorption_fail",
+                    "weak_strength", "min_strength_fail", "noise_profile_fail",
+                    "tp_profile_samples_fail", "tp_profile_fail", "min_net_profit_fail",
+                    "risk_plan_fail", "cooldown", "blacklisted", "symbol_error", "accepted",
+                ]
+                summary = " ".join(f"{k}={rejects.get(k, 0)}" for k in ordered)
+                logger.info("REJECT_SUMMARY cycle=%s %s", self._scan_count, summary)
+                for symbol_id, reason, details in detail_rows:
+                    compact = ",".join(f"{k}={v}" for k, v in details.items() if k != "compression_detail")
+                    logger.info("SIGNAL_REJECTED symbol=%s reason=%s %s", symbol_id, reason, compact)
+
             time.sleep(max(1.0, config.ANALYSIS_INTERVAL_SECONDS - elapsed))
 
     def monitor_loop(self) -> None:
