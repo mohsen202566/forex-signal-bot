@@ -77,16 +77,6 @@ class Storage:
                     net_rr REAL DEFAULT 0,
                     raw_json TEXT DEFAULT '{}'
                 );
-                CREATE TABLE IF NOT EXISTS profiles (
-                    symbol_id TEXT PRIMARY KEY,
-                    noise_median REAL DEFAULT 0,
-                    noise_p70 REAL DEFAULT 0,
-                    min_sl_pct REAL DEFAULT 0,
-                    tp_median REAL DEFAULT 0,
-                    tp_p70 REAL DEFAULT 0,
-                    signal_count INTEGER DEFAULT 0,
-                    updated_at INTEGER NOT NULL
-                );
                 CREATE TABLE IF NOT EXISTS health_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     component TEXT NOT NULL,
@@ -239,23 +229,6 @@ class Storage:
     def add_profit(self, amount: float) -> None:
         self.set("profit_today", float(self.get("profit_today", 0.0)) + float(amount))
         self.set("profit_total", float(self.get("profit_total", 0.0)) + float(amount))
-
-    def upsert_profile(self, symbol_id: str, data: dict[str, Any]) -> None:
-        with self.connect() as db:
-            db.execute(
-                """INSERT OR REPLACE INTO profiles(symbol_id,noise_median,noise_p70,min_sl_pct,tp_median,tp_p70,signal_count,updated_at)
-                VALUES(?,?,?,?,?,?,?,?)""",
-                (
-                    symbol_id, float(data.get("noise_median", 0)), float(data.get("noise_p70", 0)),
-                    float(data.get("min_sl_pct", 0)), float(data.get("tp_median", 0)), float(data.get("tp_p70", 0)),
-                    int(data.get("signal_count", 0)), int(data.get("updated_at", time.time())),
-                ),
-            )
-
-    def get_profile(self, symbol_id: str) -> dict[str, Any] | None:
-        with self.connect() as db:
-            row = db.execute("SELECT * FROM profiles WHERE symbol_id=?", (symbol_id,)).fetchone()
-            return dict(row) if row else None
 
     def add_health_event(self, component: str, severity: str, message: str, symbol_id: str | None = None) -> None:
         with self.connect() as db:

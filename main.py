@@ -1,6 +1,6 @@
 """نقطه شروع ربات 5M با معماری واچ‌لیست زنده.
 
-پنل‌ها، توبیت، مانیتور، پروفایل و دستورات مستقل از مسیر تحلیل‌اند.
+پنل‌ها، توبیت، مانیتور و دستورات مستقل از مسیر تحلیل‌اند.
 تلگرام فقط سیگنال نهایی را می‌بیند؛ رویدادهای واچ فقط در لاگ فارسی VPS ثبت می‌شوند.
 """
 from __future__ import annotations
@@ -9,14 +9,12 @@ import logging
 import sys
 import threading
 import time
-from datetime import datetime, timezone
 from collections import Counter
 
 import config
 from health import HealthManager
 from monitor import Monitor
 from okx_client import OKXClient
-from profiles import ProfileBuilder
 from risk_engine import build_risk_plan
 from storage import Storage
 from strategy import StrategySignal, WatchState, detect_watch_candidate, evaluate_watch
@@ -50,10 +48,8 @@ class TradingBotApp:
         self.toobit = ToobitFuturesClient()
         self.telegram = TelegramBot(self.storage, self.health)
         self.monitor = Monitor(self.okx, self.toobit, self.storage, self.telegram)
-        self.profiles = ProfileBuilder(self.okx, self.storage)
         self._stop = threading.Event()
         self._last_signal_ts: dict[str, int] = {}
-        self._last_profile_day: str | None = None
         self._scan_count = 0
         self._signal_count = 0
         self._watch: dict[str, WatchState] = {}
@@ -246,8 +242,7 @@ class TradingBotApp:
                     candles = self.okx.get_candles(sym.okx)
                     self.health.mark("okx")
                     self.storage.clear_health_events("analysis", sym.id)
-                    profile = self.storage.get_profile(sym.id) or {}
-                    candidate, reason, details = detect_watch_candidate(candles, profile)
+                    candidate, reason, details = detect_watch_candidate(candles)
                     if not candidate:
                         reasons[reason] += 1
                         continue
@@ -415,23 +410,6 @@ class TradingBotApp:
             self.health.mark("telegram")
             self._stop.wait(config.TELEGRAM_POLL_SECONDS)
 
-    def profile_loop(self) -> None:
-        while not self._stop.is_set():
-            now = datetime.now(timezone.utc)
-            day = now.strftime("%Y-%m-%d")
-            should_run = self._last_profile_day != day and now.hour == config.PROFILE_UPDATE_HOUR_UTC and now.minute >= config.PROFILE_UPDATE_MINUTE_UTC
-            if should_run:
-                try:
-                    logger.info("[پروفایل] به‌روزرسانی روزانه شروع شد")
-                    self.profiles.update_all()
-                    self.health.mark("profiles")
-                    logger.info("[پروفایل] به‌روزرسانی روزانه تمام شد")
-                    self._last_profile_day = day
-                except Exception as exc:
-                    logger.warning("[پروفایل] به‌روزرسانی روزانه ناموفق بود | خطا=%s", exc)
-                    self.storage.add_health_event("profiles", "warning", f"daily profile failed: {exc}")
-            self._stop.wait(30)
-
     def toobit_status_loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -458,24 +436,12 @@ class TradingBotApp:
                 self.storage.add_health_event("toobit_balance", "warning", f"balance/status failed: {exc}")
             self._stop.wait(max(5, int(getattr(config, "TOOBIT_STATUS_INTERVAL_SECONDS", 15))))
 
-    def startup_profile_update(self) -> None:
-        try:
-            logger.info("[پروفایل] به‌روزرسانی شروع برنامه آغاز شد")
-            self.profiles.update_all()
-            self.health.mark("profiles")
-            self._last_profile_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            logger.info("[پروفایل] به‌روزرسانی شروع برنامه تمام شد")
-        except Exception as exc:
-            logger.warning("[پروفایل] به‌روزرسانی شروع برنامه ناموفق بود | خطا=%s", exc)
-            self.storage.add_health_event("profiles", "warning", f"startup profile failed: {exc}")
-
     def run(self) -> None:
         threads = [
             threading.Thread(target=self.light_scan_loop, daemon=True, name="اسکن-سبک"),
             threading.Thread(target=self.watch_loop, daemon=True, name="واچ-زنده"),
             threading.Thread(target=self.monitor_loop, daemon=True, name="مانیتور-نتیجه"),
             threading.Thread(target=self.telegram_loop, daemon=True, name="تلگرام"),
-            threading.Thread(target=self.profile_loop, daemon=True, name="پروفایل-روزانه"),
             threading.Thread(target=self.toobit_status_loop, daemon=True, name="وضعیت-توبیت"),
         ]
         logger.info("[شروع ربات] نسخه=واچ‌لیست-زنده | تعداد ارز=%s | فاصله اسکن=%.2f ثانیه", len(SYMBOLS), config.LIGHT_SCAN_INTERVAL_SECONDS)

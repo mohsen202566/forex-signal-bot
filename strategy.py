@@ -85,7 +85,7 @@ class WatchEvaluation:
 
 @dataclass
 class StrategyAnalysisResult:
-    """فقط برای سازگاری با پروفایل‌ساز قدیمی."""
+    """خروجی تحلیل تاریخی/تستی؛ در مسیر زنده استفاده نمی‌شود."""
     signal: StrategySignal | None
     reject_reason: str
     details: dict[str, float | str]
@@ -123,7 +123,6 @@ def pre_move_flow_bias(candles: list[dict[str, float]]) -> float:
 
 def detect_watch_candidate(
     candles: list[dict[str, float]],
-    profile: dict[str, Any] | None = None,
 ) -> tuple[WatchCandidate | None, str, dict[str, float | str]]:
     """نشانه اولیه را نرم می‌گیرد؛ این مرحله سیگنال صادر نمی‌کند."""
     if len(candles) < 24:
@@ -157,10 +156,8 @@ def detect_watch_candidate(
     close_px = float(current["close"])
     current_move = abs(close_px - open_px) / max(open_px, 1e-9) * 100.0
 
-    profile = profile or {}
-    expected = float(profile.get("tp_p70") or profile.get("tp_median") or 0.0)
-    if expected <= 0:
-        expected = max(float(profile.get("noise_p70") or 0.0) * 2.2, 0.35)
+    # حد دیرشدن از TP ثابت پنج‌دقیقه‌ای گرفته می‌شود؛ هیچ پروفایل تاریخی دخالت ندارد.
+    expected = float(config.FIXED_TP_PCT_5M)
     # فقط وقتی بخش بزرگی از موج احتمالی طی شده باشد دیر محسوب می‌شود؛ نه با حد خشک کوچک.
     late_limit = max(
         float(getattr(config, "WATCH_LATE_MIN_PCT", 0.10)),
@@ -414,11 +411,10 @@ def evaluate_watch(state: WatchState, snapshot: dict[str, Any], now: float | Non
 
 
 # ---------------------------------------------------------------------------
-# سازگاری با ProfileBuilder قدیمی: فقط برای ساخت پروفایل روزانه از کندل‌ها.
-# در مسیر زنده استفاده نمی‌شود.
+# سازگاری با تست‌های تاریخی؛ در مسیر زنده استفاده نمی‌شود.
 # ---------------------------------------------------------------------------
 def analyze_symbol_detailed(symbol_id: str, okx_symbol: str, toobit_symbol: str, candles: list[dict[str, float]]) -> StrategyAnalysisResult:
-    candidate, reason, details = detect_watch_candidate(candles, profile=None)
+    candidate, reason, details = detect_watch_candidate(candles)
     if not candidate:
         return StrategyAnalysisResult(None, "watch_candidate_fail", details)
     if candidate.side == "UNCERTAIN":

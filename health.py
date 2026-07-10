@@ -15,7 +15,6 @@ class HealthManager:
         self.last_signal_loop_ts = 0
         self.last_monitor_loop_ts = 0
         self.last_telegram_ts = 0
-        self.last_profile_update_ts = 0
 
     def mark(self, name: str) -> None:
         now = int(time.time())
@@ -29,8 +28,6 @@ class HealthManager:
             self.last_monitor_loop_ts = now
         elif name == "telegram":
             self.last_telegram_ts = now
-        elif name == "profiles":
-            self.last_profile_update_ts = now
 
     @staticmethod
     def age(ts: int) -> str:
@@ -67,7 +64,6 @@ class HealthManager:
             f"Toobit Trade: {toobit_line}",
             f"Signal Engine: آخرین تحلیل {self.age(self.last_signal_loop_ts)}",
             f"Monitoring: آخرین چک {self.age(self.last_monitor_loop_ts)}",
-            f"Profiles: آخرین آپدیت {self.age(self.last_profile_update_ts)}",
             "",
             f"ارزهای blacklist موقت: {len(black)}",
         ]

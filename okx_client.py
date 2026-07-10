@@ -73,7 +73,7 @@ class OKXClient:
 
 
     def get_history_candles(self, inst_id: str, total_limit: int, bar: str = config.OKX_BAR) -> list[dict[str, float]]:
-        """دریافت صفحه‌بندی‌شده تاریخچه؛ برای پروفایل روزانه و خارج از مسیر زنده."""
+        """دریافت صفحه‌بندی‌شده تاریخچه برای تست و بررسی‌های خارج از مسیر زنده."""
         wanted = max(20, int(total_limit))
         rows_by_ts: dict[int, dict[str, float]] = {}
         after: str | None = None
