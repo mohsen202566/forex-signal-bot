@@ -59,6 +59,7 @@ class TradingBotApp:
         self._watch: dict[str, WatchState] = {}
         self._watch_lock = threading.RLock()
         self._slot_lock = threading.RLock()
+        self._reserved_slots: set[int] = set()
         self._last_watch_progress: dict[str, float] = {}
         self._watch_stats: Counter[str] = Counter()
         self._last_watch_summary = 0.0
@@ -82,8 +83,10 @@ class TradingBotApp:
         with self._slot_lock:
             max_pos = int(self.storage.get("max_positions", config.MAX_POSITIONS_DEFAULT))
             used = {int(x.get("slot_id")) for x in self.storage.get_open_signals() if int(x.get("is_real") or 0) and x.get("slot_id")}
+            used.update(self._reserved_slots)
             for slot in range(1, max_pos + 1):
                 if slot not in used:
+                    self._reserved_slots.add(slot)
                     return slot
             return None
 
@@ -165,7 +168,12 @@ class TradingBotApp:
             "raw": {"reason": sig.reason, "risk_reason": risk.reason, "strength_score": sig.strength_score,
                     "flow_bias": sig.flow_bias, "direction_confidence": sig.absorption_score},
         }
-        signal_id = self.storage.create_signal(data)
+        try:
+            signal_id = self.storage.create_signal(data)
+        except Exception:
+            self._release_reserved_slot(slot)
+            raise
+        self._release_reserved_slot(slot)
         data["id"] = signal_id
         msg_id = self.send_signal_message(data, risk)
         if msg_id:
@@ -201,6 +209,20 @@ class TradingBotApp:
             logger.warning("[ترید واقعی] بررسی ۷۰ ثانیه‌ای ناموفق بود | شماره=%s | ارز=%s | خطا=%s", signal_id, sym.id, exc)
             self.storage.update_signal(signal_id, status="open", is_real=0, trade_mode="virtual", slot_id=None, close_reason="POSITION_CHECK_FAILED")
             self.storage.add_health_event("toobit_position", "warning", f"70s check failed: {exc}", sym.id)
+
+    @staticmethod
+    def _is_transient_data_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(token in text for token in (
+            "429", "too many requests", "timeout", "timed out", "connection",
+            "temporarily", "remote disconnected", "502", "503", "504",
+        ))
+
+    def _release_reserved_slot(self, slot: int | None) -> None:
+        if slot is None:
+            return
+        with self._slot_lock:
+            self._reserved_slots.discard(int(slot))
 
     def light_scan_loop(self) -> None:
         """اسکن ارزان همه ارزها؛ فقط نشانه اولیه را وارد واچ می‌کند."""
@@ -255,9 +277,12 @@ class TradingBotApp:
                     reasons["وارد واچ"] += 1
                 except Exception as exc:
                     reasons["خطای داده"] += 1
-                    logger.warning("[اسکن] ارز به علت خطا رد شد | ارز=%s | خطا=%s", sym.id, exc)
+                    transient = self._is_transient_data_error(exc)
+                    logger.warning("[اسکن] ارز به علت خطا رد شد | ارز=%s | موقت=%s | خطا=%s", sym.id, transient, exc)
                     self.storage.add_health_event("analysis", "warning", f"light scan skipped: {exc}", sym.id)
-                    self.storage.blacklist_symbol(sym.id, str(exc)[:180], config.SYMBOL_ERROR_BLACKLIST_SECONDS)
+                    # Rate limit و timeout مشکل خود ارز نیستند؛ blacklist طولانی باعث خشک‌شدن کل ربات می‌شد.
+                    if not transient:
+                        self.storage.blacklist_symbol(sym.id, str(exc)[:180], config.SYMBOL_ERROR_BLACKLIST_SECONDS)
 
             elapsed = time.time() - cycle_start
             with self._watch_lock:
@@ -294,6 +319,7 @@ class TradingBotApp:
                     continue
                 try:
                     snapshot = self.okx.get_micro_snapshot(state.okx_symbol)
+                    state.data_error_count = 0
                     self.health.mark("okx")
                     self.storage.clear_health_events("analysis", state.symbol_id)
                     evaluation = evaluate_watch(state, snapshot)
@@ -306,6 +332,7 @@ class TradingBotApp:
                         state.side_changes += 1
                         state.confirm_count = 0
                         state.bad_count = 0
+                        state.direction_locked = False
                         logger.info(
                             "[واچ] جهت واچ تغییر کرد | ارز=%s | از=%s | به=%s | دلیل=%s",
                             state.symbol_id, self._fa_side(old), self._fa_side(state.side), evaluation.reason_fa,
@@ -345,12 +372,14 @@ class TradingBotApp:
                             state.symbol_id, self._fa_side(evaluation.side if evaluation.side != "UNCERTAIN" else state.side), evaluation.reason_fa, self._metrics_text(evaluation.metrics),
                         )
                 except Exception as exc:
-                    state.bad_count += 1
-                    logger.warning("[واچ] خطای داده؛ واچ فعلاً حفظ شد | ارز=%s | شمار خطا=%s | خطا=%s", state.symbol_id, state.bad_count, exc)
-                    if state.bad_count >= int(config.WATCH_BAD_OBSERVATIONS_TO_REMOVE):
+                    transient = self._is_transient_data_error(exc)
+                    state.data_error_count += 1
+                    logger.warning("[واچ] خطای داده؛ واچ فعلاً حفظ شد | ارز=%s | شمار خطا=%s | موقت=%s | خطا=%s", state.symbol_id, state.data_error_count, transient, exc)
+                    # خطای شبکه نباید به‌عنوان تناقض بازار شمرده شود یا واچ خوب را حذف کند.
+                    if not transient and state.data_error_count >= int(config.WATCH_BAD_OBSERVATIONS_TO_REMOVE):
                         with self._watch_lock:
                             self._watch.pop(state.symbol_id, None)
-                        logger.warning("[حذف واچ] ارز=%s | دلیل=خطای داده چند بار تکرار شد", state.symbol_id)
+                        logger.warning("[حذف واچ] ارز=%s | دلیل=خطای داده غیرموقت چند بار تکرار شد", state.symbol_id)
                         self.storage.blacklist_symbol(state.symbol_id, str(exc)[:180], config.SYMBOL_ERROR_BLACKLIST_SECONDS)
 
             now = time.time()

@@ -91,20 +91,25 @@ def build_risk_plan(signal: StrategySignal, storage: Storage) -> RiskPlan | None
     )
     net_profit, net_loss, cost, net_rr = estimate_net_outcomes(notional, tp_pct, sl_pct)
 
-    # TP profile فقط بررسی می‌کند کف سود خالص واقع‌بینانه است. نبود/کمبود نمونه، سیگنال را خفه نمی‌کند.
+    # پروفایل TP نباید RR خالص کامل را به فیلتر ورود تبدیل کند؛ نقش آن طبق
+    # معماری پروژه فقط این است که بسنجد آیا حداقل سود خالص ۵ سنت در حرکت‌های
+    # مشابه واقع‌بینانه بوده است یا نه. RR خالص ۱.۳۵ همچنان در خود TP حفظ می‌شود.
     tp_p70 = float(profile.get("tp_p70") or 0.0)
     samples = int(profile.get("signal_count") or 0)
     profile_ready = samples >= int(getattr(config, "PROFILE_MIN_SIGNALS", 8)) and tp_p70 > 0
-    profile_ok = (not profile_ready) or tp_p70 >= tp_pct * float(getattr(config, "TP_PROFILE_TOLERANCE", 0.85))
+    min_profit_tp_pct = (float(config.MIN_NET_PROFIT_USDT) + cost) / notional * 100.0
+    profile_ok = (not profile_ready) or tp_p70 >= min_profit_tp_pct * float(getattr(config, "TP_PROFILE_TOLERANCE", 0.85))
 
+    # پروفایل TP در نسخه فعلی از داده کندلی ساخته می‌شود و میکروساختار زنده
+    # واچ‌لیست را بازسازی نمی‌کند؛ بنابراین نباید سیگنال معتبر را خفه کند.
+    # فقط به‌صورت هشدار/اطلاعات نگه داشته می‌شود. دو شرط قطعی، RR خالص و کف سودند.
     valid = (
         net_profit + 1e-9 >= float(config.MIN_NET_PROFIT_USDT)
         and net_rr + 1e-9 >= float(config.RISK_REWARD)
-        and profile_ok
     )
     reason = "RR خالص ۱.۳۵ + کف سود خالص + استاپ نویز هر ارز"
-    if not profile_ok:
-        reason = "حرکت P70 موقعیت‌های مشابه برای TP خالص لازم کافی نیست"
+    if profile_ready and not profile_ok:
+        reason += " | هشدار: پروفایل تاریخی حرکت محافظه‌کارانه‌تر است"
 
     return RiskPlan(
         entry=entry,

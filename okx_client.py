@@ -141,9 +141,22 @@ class OKXClient:
         return {"bids": parse(item.get("bids")), "asks": parse(item.get("asks"))}
 
     def get_micro_snapshot(self, inst_id: str) -> dict[str, float]:
-        """دو درخواست سبک فقط برای ارزهای داخل واچ‌لیست."""
-        trades = self.get_recent_trades(inst_id)
+        """Snapshot خرد فقط از معاملات واقعاً تازه.
+
+        استفاده از آخرین N معامله بدون محدودیت زمانی می‌توانست تریدهای قدیمی را
+        چند بار به‌عنوان تأیید جدید بشمارد. این نسخه یک پنجره زمانی کوتاه دارد و
+        timestamp آخرین معامله را هم برمی‌گرداند تا Strategy نمونه تکراری را نشمارد.
+        """
+        trades_all = self.get_recent_trades(inst_id)
         book = self.get_order_book(inst_id)
+        now_ms = int(time.time() * 1000)
+        window_ms = int(float(getattr(config, "OKX_MICRO_WINDOW_SECONDS", 10)) * 1000)
+        recent = [t for t in trades_all if int(t.get("ts") or 0) >= now_ms - window_ms]
+        min_trades = int(getattr(config, "OKX_MICRO_MIN_TRADES", 8))
+        # در بازار آرام، به‌جای صفرکردن کور، آخرین چند معامله را می‌گیریم؛ اما
+        # timestamp آن‌ها حفظ می‌شود تا snapshot تکراری تأیید جدید محسوب نشود.
+        trades = recent if len(recent) >= min_trades else trades_all[-max(min_trades, 24):]
+
         buy = sum(float(t["size"]) for t in trades if t.get("side") == "buy")
         sell = sum(float(t["size"]) for t in trades if t.get("side") == "sell")
         total = buy + sell or 1e-12
@@ -161,13 +174,22 @@ class OKXClient:
         best_bid = book["bids"][0][0] if book["bids"] else 0.0
         best_ask = book["asks"][0][0] if book["asks"] else 0.0
         mid = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else (float(trades[-1]["price"]) if trades else 0.0)
+        first_px = float(trades[0]["price"]) if trades else mid
+        last_px = float(trades[-1]["price"]) if trades else mid
+        micro_return_pct = (last_px - first_px) / first_px * 100.0 if first_px > 0 else 0.0
+        newest_ts = max((int(t.get("ts") or 0) for t in trades), default=0)
+        oldest_ts = min((int(t.get("ts") or 0) for t in trades), default=0)
         return {
             "trade_imbalance": trade_imbalance,
             "book_imbalance": book_imbalance,
             "intensity_acceleration": intensity_acceleration,
             "mid_price": mid,
-            "last_price": float(trades[-1]["price"]) if trades else mid,
+            "last_price": last_px,
+            "micro_return_pct": micro_return_pct,
             "trade_count": float(len(trades)),
+            "newest_trade_ts": float(newest_ts),
+            "oldest_trade_ts": float(oldest_ts),
+            "fresh_trade_count": float(len(recent)),
         }
 
     @staticmethod
