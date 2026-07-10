@@ -65,6 +65,10 @@ class WatchState:
     bad_count: int = 0
     last_price: float = 0.0
     last_update: float = 0.0
+    trade_history: list[float] = field(default_factory=list)
+    book_history: list[float] = field(default_factory=list)
+    response_history: list[float] = field(default_factory=list)
+    intensity_history: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -203,28 +207,61 @@ def detect_watch_candidate(
     ), "ورود به واچ", details
 
 
-def _direction_from_micro(trade_imbalance: float, book_imbalance: float, response_pct: float) -> tuple[str, bool, float]:
-    """جهت را از توافق فشار اجراشده و واکنش قیمت می‌گیرد.
+def _trim_append(values: list[float], value: float, limit: int) -> None:
+    values.append(float(value))
+    if len(values) > limit:
+        del values[:-limit]
 
-    همه مؤلفه‌ها اجباری نیستند؛ دو شاهد هم‌جهت و نبود تناقض شدید کافی است.
+
+def _direction_from_micro(
+    trade_history: list[float],
+    book_history: list[float],
+    response_history: list[float],
+) -> tuple[str, bool, float, str]:
+    """قفل جهت بر پایه فشار اجراشده + پاسخ واقعی قیمت.
+
+    دفتر سفارش فقط شاهد کمکی است؛ به‌تنهایی اجازه قفل جهت ندارد چون spoofing ممکن است.
+    جهت باید در چند مشاهده کوتاه پایدار باشد و قیمت خلاف فشار حرکت نکرده باشد.
     """
     trade_min = float(getattr(config, "WATCH_TRADE_IMBALANCE_MIN", 0.10))
     book_min = float(getattr(config, "WATCH_BOOK_IMBALANCE_MIN", 0.07))
-    response_min = float(getattr(config, "WATCH_PRICE_RESPONSE_MIN_PCT", 0.004))
-    conflict = float(getattr(config, "WATCH_STRONG_CONFLICT", 0.16))
+    response_min = float(getattr(config, "WATCH_PRICE_RESPONSE_MIN_PCT", 0.006))
+    adverse_max = float(getattr(config, "WATCH_MAX_ADVERSE_RESPONSE_PCT", 0.012))
+    needed = int(getattr(config, "WATCH_MIN_CONSISTENT_SAMPLES", 2))
 
-    long_votes = int(trade_imbalance >= trade_min) + int(book_imbalance >= book_min) + int(response_pct >= response_min)
-    short_votes = int(trade_imbalance <= -trade_min) + int(book_imbalance <= -book_min) + int(response_pct <= -response_min)
+    if not trade_history or not response_history:
+        return "UNCERTAIN", False, 0.0, "نمونه کافی برای قفل جهت نیست"
 
-    long_conflict = trade_imbalance <= -conflict or (book_imbalance <= -conflict and response_pct < 0)
-    short_conflict = trade_imbalance >= conflict or (book_imbalance >= conflict and response_pct > 0)
+    recent_trade = trade_history[-max(needed, 3):]
+    recent_resp = response_history[-max(needed, 3):]
+    recent_book = book_history[-max(needed, 3):] if book_history else [0.0]
 
-    confidence = max(long_votes, short_votes) / 3.0
-    if long_votes >= 2 and not long_conflict and long_votes > short_votes:
-        return "LONG", True, confidence
-    if short_votes >= 2 and not short_conflict and short_votes > long_votes:
-        return "SHORT", True, confidence
-    return "UNCERTAIN", False, confidence
+    long_trade_count = sum(v >= trade_min for v in recent_trade)
+    short_trade_count = sum(v <= -trade_min for v in recent_trade)
+    long_response_count = sum(v >= response_min for v in recent_resp)
+    short_response_count = sum(v <= -response_min for v in recent_resp)
+    avg_trade = sum(recent_trade) / len(recent_trade)
+    avg_resp = sum(recent_resp) / len(recent_resp)
+    avg_book = sum(recent_book) / len(recent_book)
+
+    # شرط لازم: فشار معاملات و پاسخ قیمت هر دو هم‌جهت و پایدار باشند.
+    long_core = long_trade_count >= needed and long_response_count >= needed and avg_trade > 0 and avg_resp > 0
+    short_core = short_trade_count >= needed and short_response_count >= needed and avg_trade < 0 and avg_resp < 0
+    long_conflict = min(recent_resp) < -adverse_max or avg_trade < -trade_min
+    short_conflict = max(recent_resp) > adverse_max or avg_trade > trade_min
+
+    book_support_long = avg_book >= book_min
+    book_support_short = avg_book <= -book_min
+    # دفتر مخالف قوی، اعتماد را کم می‌کند ولی یک snapshot به‌تنهایی سیگنال را نمی‌کشد.
+    if long_core and not long_conflict:
+        consistency = min(long_trade_count, long_response_count) / max(len(recent_trade), 1)
+        confidence = 0.62 + 0.23 * consistency + (0.10 if book_support_long else 0.0)
+        return "LONG", True, min(confidence, 0.98), "فشار خرید و پاسخ قیمت پایدار و هم‌جهت‌اند"
+    if short_core and not short_conflict:
+        consistency = min(short_trade_count, short_response_count) / max(len(recent_trade), 1)
+        confidence = 0.62 + 0.23 * consistency + (0.10 if book_support_short else 0.0)
+        return "SHORT", True, min(confidence, 0.98), "فشار فروش و پاسخ قیمت پایدار و هم‌جهت‌اند"
+    return "UNCERTAIN", False, max(0.0, min(0.6, abs(avg_trade) * 0.6 + abs(avg_resp) * 3.0)), "فشار و پاسخ قیمت هنوز توافق پایدار ندارند"
 
 
 def evaluate_watch(state: WatchState, snapshot: dict[str, Any], now: float | None = None) -> WatchEvaluation:
@@ -239,7 +276,15 @@ def evaluate_watch(state: WatchState, snapshot: dict[str, Any], now: float | Non
     intensity_accel = float(snapshot.get("intensity_acceleration") or 0.0)
     response_pct = (price - state.start_price) / max(state.start_price, 1e-9) * 100.0
     displacement = abs(response_pct)
-    side, locked, confidence = _direction_from_micro(trade_imbalance, book_imbalance, response_pct)
+
+    hist_limit = int(getattr(config, "WATCH_DIRECTION_HISTORY", 5))
+    _trim_append(state.trade_history, trade_imbalance, hist_limit)
+    _trim_append(state.book_history, book_imbalance, hist_limit)
+    _trim_append(state.response_history, response_pct, hist_limit)
+    _trim_append(state.intensity_history, intensity_accel, hist_limit)
+    side, locked, confidence, lock_reason = _direction_from_micro(
+        state.trade_history, state.book_history, state.response_history
+    )
 
     metrics: dict[str, float | str] = {
         "سن_واچ_ثانیه": round(age, 1),
@@ -248,6 +293,7 @@ def evaluate_watch(state: WatchState, snapshot: dict[str, Any], now: float | Non
         "شتاب_معاملات": round(intensity_accel, 4),
         "واکنش_قیمت_درصد": round(response_pct, 4),
         "اعتماد_جهت": round(confidence * 100.0, 1),
+        "نمونه_جهت": len(state.trade_history),
         "حد_دیرشدن_درصد": round(state.late_limit_pct, 4),
     }
 
@@ -256,56 +302,47 @@ def evaluate_watch(state: WatchState, snapshot: dict[str, Any], now: float | Non
     if displacement > state.late_limit_pct:
         return WatchEvaluation("REMOVE", "قیمت پیش از تأیید بیش‌ازحد حرکت کرد و ورود دیر شد", state.side, None, metrics)
 
-    # قبل از قفل جهت، تنها یک بار اجازه چرخش داریم تا حرکت معکوس واقعی از دست نرود.
-    if locked and side != "UNCERTAIN" and side != state.side and not state.direction_locked:
+    # تغییر جهت فقط پس از قفل پایدار جهت جدید مجاز است.
+    if locked and side != "UNCERTAIN" and side != state.side and state.side != "UNCERTAIN" and not state.direction_locked:
         if state.side_changes < int(getattr(config, "WATCH_MAX_SIDE_CHANGES", 1)):
-            return WatchEvaluation("SIDE_CHANGED", "جریان سفارش به‌طور واضح چرخید", side, None, metrics)
+            return WatchEvaluation("SIDE_CHANGED", "چرخش پایدار فشار و پاسخ قیمت تأیید شد", side, None, metrics)
         state.bad_count += 1
 
-    # شروع حرکت: یک شاهد بسیار قوی یا دو شاهد متوسط. Compression اجباری نیست.
     strong_trade = abs(trade_imbalance) >= float(getattr(config, "WATCH_STRONG_TRADE_IMBALANCE", 0.24))
-    strong_book = abs(book_imbalance) >= float(getattr(config, "WATCH_STRONG_BOOK_IMBALANCE", 0.20))
     accelerated = intensity_accel >= float(getattr(config, "WATCH_INTENSITY_ACCEL_MIN", 0.18))
     price_started = displacement >= float(getattr(config, "WATCH_MIN_START_DISPLACEMENT_PCT", 0.003))
-    start_confirmed = strong_trade or (accelerated and (strong_book or price_started)) or (strong_book and price_started)
+    # شروع واقعی باید شدت/شتاب معاملات داشته باشد؛ order book به تنهایی آغاز حرکت نیست.
+    start_confirmed = (strong_trade and price_started) or (accelerated and price_started and abs(trade_imbalance) >= float(getattr(config, "WATCH_TRADE_IMBALANCE_MIN", 0.10)))
 
-    # تناقض واضح و پایدار حذف می‌کند؛ یک نوسان کوتاه واچ را نمی‌کشد.
+    adverse = float(getattr(config, "WATCH_MAX_ADVERSE_RESPONSE_PCT", 0.012))
     contradiction = (
-        (state.side == "LONG" and trade_imbalance < -0.18 and response_pct < -0.01)
-        or (state.side == "SHORT" and trade_imbalance > 0.18 and response_pct > 0.01)
+        (state.side == "LONG" and response_pct < -adverse and trade_imbalance < 0)
+        or (state.side == "SHORT" and response_pct > adverse and trade_imbalance > 0)
     )
-    if contradiction:
-        state.bad_count += 1
-    else:
-        state.bad_count = max(0, state.bad_count - 1)
+    state.bad_count = state.bad_count + 1 if contradiction else max(0, state.bad_count - 1)
     if state.bad_count >= int(getattr(config, "WATCH_BAD_OBSERVATIONS_TO_REMOVE", 3)):
         return WatchEvaluation("REMOVE", "تناقض پایدار بین جهت واچ و جریان واقعی بازار", state.side, None, metrics)
 
     if not locked or side == "UNCERTAIN":
-        return WatchEvaluation("KEEP", "شروع زیر نظر است اما جهت هنوز بدون تناقض قفل نشده", state.side, None, metrics)
-
+        state.confirm_count = 0
+        return WatchEvaluation("KEEP", f"{lock_reason}؛ واچ ادامه دارد", state.side, None, metrics)
     if not start_confirmed:
-        return WatchEvaluation("KEEP", "جهت روشن‌تر شده اما شتاب شروع حرکت هنوز کافی نیست", side, None, metrics)
+        state.confirm_count = 0
+        return WatchEvaluation("KEEP", "جهت معتبر است اما شتاب شروع موج هنوز کافی نیست", side, None, metrics)
 
-    # سیگنال قوی در یک مشاهده صادر می‌شود؛ حالت متوسط دو مشاهده متوالی می‌خواهد.
-    strong_confirmation = strong_trade and (strong_book or price_started)
-    state.confirm_count = state.confirm_count + 1 if side == state.side or state.side == "UNCERTAIN" else 1
-    needed = 1 if strong_confirmation else int(getattr(config, "WATCH_CONFIRMATIONS_REQUIRED", 2))
+    state.side = side
+    state.direction_locked = True
+    state.confirm_count += 1
+    strong_confirmation = strong_trade and accelerated and confidence >= 0.80
+    needed = int(getattr(config, "WATCH_STRONG_CONFIRMATIONS_REQUIRED", 2)) if strong_confirmation else int(getattr(config, "WATCH_CONFIRMATIONS_REQUIRED", 3))
     if state.confirm_count < needed:
-        return WatchEvaluation("KEEP", "تأیید اول دریافت شد؛ برای حذف نویز یک مشاهده دیگر لازم است", side, None, metrics)
+        return WatchEvaluation("KEEP", f"تأیید {state.confirm_count} از {needed} دریافت شد؛ نویز کوتاه حذف می‌شود", side, None, metrics)
 
-    strength_score = min(100.0, (
-        abs(trade_imbalance) * 38.0
-        + abs(book_imbalance) * 24.0
-        + min(max(intensity_accel, 0.0), 1.5) * 20.0
-        + confidence * 18.0
-    ))
-    if strength_score >= 76:
-        strength = "خیلی قوی"
-    elif strength_score >= 60:
-        strength = "قوی"
-    else:
-        strength = "متوسط"
+    avg_trade = sum(state.trade_history[-3:]) / min(3, len(state.trade_history))
+    avg_book = sum(state.book_history[-3:]) / min(3, len(state.book_history))
+    avg_accel = sum(state.intensity_history[-3:]) / min(3, len(state.intensity_history))
+    strength_score = min(100.0, 45.0 + abs(avg_trade) * 80.0 + max(avg_accel, 0.0) * 18.0 + confidence * 22.0 + abs(avg_book) * 8.0)
+    strength = "خیلی قوی" if strength_score >= 82 else ("قوی" if strength_score >= 68 else "متوسط")
 
     signal = StrategySignal(
         symbol_id=state.symbol_id,
@@ -316,14 +353,14 @@ def evaluate_watch(state: WatchState, snapshot: dict[str, Any], now: float | Non
         strength=strength,
         strength_score=round(strength_score, 2),
         compression_score=round(state.compression_score * 100.0, 2),
-        flow_bias=round(trade_imbalance, 4),
+        flow_bias=round(avg_trade, 4),
         absorption_score=round(confidence * 100.0, 2),
         reason=(
-            f"شروع حرکت زنده + قفل جهت | ماشه={state.trigger} | "
-            f"معاملات={trade_imbalance:.3f} دفتر={book_imbalance:.3f} پاسخ={response_pct:.4f}%"
+            f"شروع موج + قفل جهت پایدار | ماشه={state.trigger} | "
+            f"میانگین معاملات={avg_trade:.3f} دفتر={avg_book:.3f} پاسخ={response_pct:.4f}% تأیید={state.confirm_count}"
         ),
     )
-    return WatchEvaluation("SIGNAL", "شروع حرکت و جهت هم‌زمان تأیید شدند", side, signal, metrics)
+    return WatchEvaluation("SIGNAL", "شروع موج و جهت پایدار هم‌زمان تأیید شدند", side, signal, metrics)
 
 
 # ---------------------------------------------------------------------------

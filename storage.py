@@ -68,6 +68,13 @@ class Storage:
                     mfe REAL DEFAULT 0,
                     mae REAL DEFAULT 0,
                     order_id TEXT,
+                    trade_usdt REAL DEFAULT 0,
+                    leverage INTEGER DEFAULT 1,
+                    notional_usdt REAL DEFAULT 0,
+                    estimated_net_profit REAL DEFAULT 0,
+                    estimated_net_loss REAL DEFAULT 0,
+                    estimated_cost REAL DEFAULT 0,
+                    net_rr REAL DEFAULT 0,
                     raw_json TEXT DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS profiles (
@@ -97,6 +104,21 @@ class Storage:
                 );
                 """
             )
+            # مهاجرت سازگار برای دیتابیس‌های نسخه‌های قبلی؛ هیچ داده‌ای حذف نمی‌شود.
+            existing = {r[1] for r in db.execute("PRAGMA table_info(signals)").fetchall()}
+            migrations = {
+                "trade_usdt": "REAL DEFAULT 0",
+                "leverage": "INTEGER DEFAULT 1",
+                "notional_usdt": "REAL DEFAULT 0",
+                "estimated_net_profit": "REAL DEFAULT 0",
+                "estimated_net_loss": "REAL DEFAULT 0",
+                "estimated_cost": "REAL DEFAULT 0",
+                "net_rr": "REAL DEFAULT 0",
+            }
+            for name, ddl in migrations.items():
+                if name not in existing:
+                    db.execute(f"ALTER TABLE signals ADD COLUMN {name} {ddl}")
+
             defaults = {
                 "trading_enabled": config.TRADING_ENABLED_DEFAULT,
                 "auto_signal_enabled": config.AUTO_SIGNAL_ENABLED_DEFAULT,
@@ -139,13 +161,18 @@ class Storage:
         now = int(time.time())
         cols = [
             "symbol_id", "okx_symbol", "toobit_symbol", "side", "strength", "entry", "tp", "sl", "rr",
-            "trade_mode", "status", "is_real", "slot_id", "message_id", "created_at", "order_id", "raw_json"
+            "trade_mode", "status", "is_real", "slot_id", "message_id", "created_at", "order_id",
+            "trade_usdt", "leverage", "notional_usdt", "estimated_net_profit", "estimated_net_loss",
+            "estimated_cost", "net_rr", "raw_json"
         ]
         vals = [
             data.get("symbol_id"), data.get("okx_symbol"), data.get("toobit_symbol"), data.get("side"),
             data.get("strength"), data.get("entry"), data.get("tp"), data.get("sl"), data.get("rr"),
             data.get("trade_mode", "virtual"), data.get("status", "open"), int(bool(data.get("is_real"))),
             data.get("slot_id"), data.get("message_id"), data.get("created_at", now), data.get("order_id"),
+            float(data.get("trade_usdt") or 0.0), int(data.get("leverage") or 1), float(data.get("notional_usdt") or 0.0),
+            float(data.get("estimated_net_profit") or 0.0), float(data.get("estimated_net_loss") or 0.0),
+            float(data.get("estimated_cost") or 0.0), float(data.get("net_rr") or 0.0),
             json.dumps(data.get("raw", {}), ensure_ascii=False),
         ]
         with self.connect() as db:
@@ -157,7 +184,9 @@ class Storage:
             return
         allowed = {
             "status", "message_id", "opened_at", "closed_at", "entry_real", "exit_price", "gross_pnl",
-            "fee_usdt", "net_pnl", "close_reason", "mfe", "mae", "order_id", "slot_id", "raw_json"
+            "fee_usdt", "net_pnl", "close_reason", "mfe", "mae", "order_id", "slot_id", "raw_json",
+            "is_real", "trade_mode", "trade_usdt", "leverage", "notional_usdt", "estimated_net_profit",
+            "estimated_net_loss", "estimated_cost", "net_rr"
         }
         parts, vals = [], []
         for k, v in fields.items():
@@ -234,6 +263,13 @@ class Storage:
                 "INSERT INTO health_events(component,severity,message,symbol_id,created_at) VALUES(?,?,?,?,?)",
                 (component, severity, message, symbol_id, int(time.time())),
             )
+
+    def clear_health_events(self, component: str, symbol_id: str | None = None) -> None:
+        with self.connect() as db:
+            if symbol_id is None:
+                db.execute("UPDATE health_events SET cleared_at=? WHERE cleared_at IS NULL AND component=?", (int(time.time()), component))
+            else:
+                db.execute("UPDATE health_events SET cleared_at=? WHERE cleared_at IS NULL AND component=? AND symbol_id=?", (int(time.time()), component, symbol_id))
 
     def active_health_events(self) -> list[dict[str, Any]]:
         with self.connect() as db:

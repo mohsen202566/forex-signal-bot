@@ -46,6 +46,8 @@ class OKXClient:
         return float(item.get("last") or item.get("lastPx") or 0.0)
 
     def get_candles(self, inst_id: str, bar: str = config.OKX_BAR, limit: int = config.OKX_CANDLE_LIMIT) -> list[dict[str, float]]:
+        # endpoint کندل زنده در هر درخواست حداکثر ۳۰۰ ردیف برمی‌گرداند.
+        limit = max(20, min(int(limit), 300))
         payload = self._get("/api/v5/market/candles", {"instId": inst_id, "bar": bar, "limit": str(limit)})
         rows = payload.get("data") if isinstance(payload, dict) else []
         out: list[dict[str, float]] = []
@@ -68,6 +70,43 @@ class OKXClient:
         if len(out) < 20:
             raise OKXError(f"candles too few: {inst_id}")
         return out
+
+
+    def get_history_candles(self, inst_id: str, total_limit: int, bar: str = config.OKX_BAR) -> list[dict[str, float]]:
+        """دریافت صفحه‌بندی‌شده تاریخچه؛ برای پروفایل روزانه و خارج از مسیر زنده."""
+        wanted = max(20, int(total_limit))
+        rows_by_ts: dict[int, dict[str, float]] = {}
+        after: str | None = None
+        while len(rows_by_ts) < wanted:
+            batch_limit = min(300, wanted - len(rows_by_ts))
+            params = {"instId": inst_id, "bar": bar, "limit": str(batch_limit)}
+            if after:
+                params["after"] = after
+            payload = self._get("/api/v5/market/history-candles", params)
+            raw = payload.get("data") if isinstance(payload, dict) else []
+            if not raw:
+                break
+            oldest = None
+            for r in raw:
+                try:
+                    item = {
+                        "ts": int(r[0]), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
+                        "close": float(r[4]), "volume": float(r[5]),
+                        "vol_ccy": float(r[6]) if len(r) > 6 else 0.0,
+                        "vol_quote": float(r[7]) if len(r) > 7 else 0.0,
+                        "confirm": int(r[8]) if len(r) > 8 else 1,
+                    }
+                    rows_by_ts[item["ts"]] = item
+                    oldest = item["ts"] if oldest is None else min(oldest, item["ts"])
+                except Exception:
+                    continue
+            if oldest is None or (after is not None and str(oldest) == after):
+                break
+            after = str(oldest)
+            if len(raw) < batch_limit:
+                break
+        out = [rows_by_ts[k] for k in sorted(rows_by_ts)]
+        return out[-wanted:]
 
     def get_recent_trades(self, inst_id: str, limit: int = config.OKX_MICRO_TRADES_LIMIT) -> list[dict[str, float | str]]:
         payload = self._get("/api/v5/market/trades", {"instId": inst_id, "limit": str(max(20, min(int(limit), 500)))})

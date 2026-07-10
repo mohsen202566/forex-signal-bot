@@ -58,6 +58,7 @@ class TradingBotApp:
         self._signal_count = 0
         self._watch: dict[str, WatchState] = {}
         self._watch_lock = threading.RLock()
+        self._slot_lock = threading.RLock()
         self._last_watch_progress: dict[str, float] = {}
         self._watch_stats: Counter[str] = Counter()
         self._last_watch_summary = 0.0
@@ -77,11 +78,14 @@ class TradingBotApp:
         return True, "مجاز"
 
     def reserve_real_slot(self) -> int | None:
-        max_pos = int(self.storage.get("max_positions", config.MAX_POSITIONS_DEFAULT))
-        open_real = self.storage.count_real_open()
-        if open_real >= max_pos:
+        # جلوگیری از رزرو هم‌زمان یک اسلات توسط دو سیگنال.
+        with self._slot_lock:
+            max_pos = int(self.storage.get("max_positions", config.MAX_POSITIONS_DEFAULT))
+            used = {int(x.get("slot_id")) for x in self.storage.get_open_signals() if int(x.get("is_real") or 0) and x.get("slot_id")}
+            for slot in range(1, max_pos + 1):
+                if slot not in used:
+                    return slot
             return None
-        return open_real + 1
 
     def send_signal_message(self, signal_data: dict, risk) -> int | None:
         side_icon = "🟢" if signal_data["side"] == "LONG" else "🔴"
@@ -129,9 +133,9 @@ class TradingBotApp:
             return False, reason
         risk = build_risk_plan(sig, self.storage)
         if risk is None:
-            return False, "پروفایل استاپ یا برنامه ریسک آماده نبود"
+            return False, "برنامه ریسک معتبر ساخته نشد"
         if not risk.min_net_profit_ok:
-            return False, "حداقل سود خالص پنج سنت تأمین نشد"
+            return False, risk.reason
 
         trading_on = bool(self.storage.get("trading_enabled", False))
         auto_on = bool(self.storage.get("auto_signal_enabled", True))
@@ -147,11 +151,19 @@ class TradingBotApp:
             "tp": risk.tp,
             "sl": risk.sl,
             "rr": risk.rr,
+            "net_rr": risk.net_rr,
+            "trade_usdt": risk.trade_usdt,
+            "leverage": risk.leverage,
+            "notional_usdt": risk.notional_usdt,
+            "estimated_net_profit": risk.estimated_net_profit,
+            "estimated_net_loss": risk.estimated_net_loss,
+            "estimated_cost": risk.fee_estimate,
             "trade_mode": "real" if is_real else "virtual",
             "status": "pending" if is_real else "open",
             "is_real": is_real,
             "slot_id": slot,
-            "raw": {"reason": sig.reason, "risk_reason": risk.reason},
+            "raw": {"reason": sig.reason, "risk_reason": risk.reason, "strength_score": sig.strength_score,
+                    "flow_bias": sig.flow_bias, "direction_confidence": sig.absorption_score},
         }
         signal_id = self.storage.create_signal(data)
         data["id"] = signal_id
@@ -162,7 +174,7 @@ class TradingBotApp:
             opened_sent, order_id = self.try_open_real(sym, data, risk)
             self.storage.update_signal(signal_id, order_id=order_id)
             if not opened_sent:
-                self.storage.update_signal(signal_id, status="open", is_real=0, slot_id=None, close_reason="REAL_OPEN_FAILED_TO_VIRTUAL")
+                self.storage.update_signal(signal_id, status="open", is_real=0, trade_mode="virtual", slot_id=None, close_reason="REAL_OPEN_FAILED_TO_VIRTUAL")
             else:
                 threading.Thread(target=self._check_real_after_70s, args=(signal_id, sym), daemon=True, name=f"بررسی-پوزیشن-{sym.id}").start()
         self._last_signal_ts[sym.id] = int(time.time())
@@ -183,11 +195,11 @@ class TradingBotApp:
                 self.storage.update_signal(signal_id, status="open", opened_at=int(time.time()))
             else:
                 logger.warning("[ترید واقعی] پوزیشن باز نشد و اسلات آزاد شد | شماره=%s | ارز=%s", signal_id, sym.id)
-                self.storage.update_signal(signal_id, status="open", is_real=0, slot_id=None, close_reason="NOT_OPENED_AFTER_70S")
+                self.storage.update_signal(signal_id, status="open", is_real=0, trade_mode="virtual", slot_id=None, close_reason="NOT_OPENED_AFTER_70S")
                 self.storage.add_health_event("toobit_position", "warning", "بعد ۷۰ ثانیه پوزیشن باز نبود؛ اسلات آزاد شد", sym.id)
         except Exception as exc:
             logger.warning("[ترید واقعی] بررسی ۷۰ ثانیه‌ای ناموفق بود | شماره=%s | ارز=%s | خطا=%s", signal_id, sym.id, exc)
-            self.storage.update_signal(signal_id, status="open", is_real=0, slot_id=None, close_reason="POSITION_CHECK_FAILED")
+            self.storage.update_signal(signal_id, status="open", is_real=0, trade_mode="virtual", slot_id=None, close_reason="POSITION_CHECK_FAILED")
             self.storage.add_health_event("toobit_position", "warning", f"70s check failed: {exc}", sym.id)
 
     def light_scan_loop(self) -> None:
@@ -211,6 +223,7 @@ class TradingBotApp:
                 try:
                     candles = self.okx.get_candles(sym.okx)
                     self.health.mark("okx")
+                    self.storage.clear_health_events("analysis", sym.id)
                     profile = self.storage.get_profile(sym.id) or {}
                     candidate, reason, details = detect_watch_candidate(candles, profile)
                     if not candidate:
@@ -282,6 +295,7 @@ class TradingBotApp:
                 try:
                     snapshot = self.okx.get_micro_snapshot(state.okx_symbol)
                     self.health.mark("okx")
+                    self.storage.clear_health_events("analysis", state.symbol_id)
                     evaluation = evaluate_watch(state, snapshot)
                     state.last_price = float(snapshot.get("mid_price") or snapshot.get("last_price") or state.last_price)
                     state.last_update = time.time()
@@ -405,6 +419,7 @@ class TradingBotApp:
                 self.storage.set("toobit_last_error", "")
                 self.storage.set("toobit_last_update", now_ts)
                 self.health.mark("toobit")
+                self.storage.clear_health_events("toobit_balance")
                 logger.info("[توبیت] اتصال سالم | آزاد=%.4f | کل=%.4f | مارجین قابل استفاده=%.4f", available_usdt, total_usdt, usable_margin_usdt)
             except Exception as exc:
                 logger.warning("[توبیت] اتصال یا دریافت موجودی ناموفق | خطا=%s", exc)
@@ -433,7 +448,6 @@ class TradingBotApp:
             threading.Thread(target=self.telegram_loop, daemon=True, name="تلگرام"),
             threading.Thread(target=self.profile_loop, daemon=True, name="پروفایل-روزانه"),
             threading.Thread(target=self.toobit_status_loop, daemon=True, name="وضعیت-توبیت"),
-            threading.Thread(target=self.startup_profile_update, daemon=True, name="پروفایل-شروع"),
         ]
         logger.info("[شروع ربات] نسخه=واچ‌لیست-زنده | تعداد ارز=%s | فاصله اسکن=%.2f ثانیه", len(SYMBOLS), config.LIGHT_SCAN_INTERVAL_SECONDS)
         for thread in threads:

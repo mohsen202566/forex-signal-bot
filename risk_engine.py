@@ -1,5 +1,8 @@
-"""Smart TP/SL Engine.
-کار لحظه‌ای این فایل فقط چند محاسبه سبک و خواندن پروفایل آماده است.
+"""موتور سبک و قطعی مدیریت ریسک.
+
+قانون اصلی: نسبت سود به زیان ۱.۳۵ بر اساس PnL خالص پس از هزینه رفت‌وبرگشت
+محاسبه می‌شود، نه صرفاً فاصله قیمت. در مسیر زنده فقط lookup پروفایل و چند
+محاسبه عددی انجام می‌شود.
 """
 from __future__ import annotations
 
@@ -9,92 +12,114 @@ import config
 from storage import Storage
 from strategy import StrategySignal
 
-@dataclass
+
+@dataclass(frozen=True)
 class RiskPlan:
     entry: float
     tp: float
     sl: float
     rr: float
+    net_rr: float
     sl_pct: float
     tp_pct: float
     min_net_profit_ok: bool
     estimated_net_profit: float
+    estimated_net_loss: float
     fee_estimate: float
+    notional_usdt: float
+    trade_usdt: float
+    leverage: int
     reason: str
 
+
 def price_from_pct(entry: float, side: str, pct: float) -> float:
-    if side.upper() == "LONG":
-        return entry * (1.0 + pct / 100.0)
-    return entry * (1.0 - pct / 100.0)
+    return entry * (1.0 + pct / 100.0) if side.upper() == "LONG" else entry * (1.0 - pct / 100.0)
+
 
 def sl_from_pct(entry: float, side: str, pct: float) -> float:
-    if side.upper() == "LONG":
-        return entry * (1.0 - pct / 100.0)
-    return entry * (1.0 + pct / 100.0)
+    return entry * (1.0 - pct / 100.0) if side.upper() == "LONG" else entry * (1.0 + pct / 100.0)
 
-def estimate_net_profit(trade_usdt: float, leverage: int, tp_pct: float) -> tuple[float, float]:
-    notional = float(trade_usdt) * float(leverage)
-    gross = notional * (float(tp_pct) / 100.0)
-    fee = notional * ((config.FALLBACK_FEE_PCT_PER_SIDE * 2.0) / 100.0)
-    slip = notional * ((config.SLIPPAGE_PCT_PER_SIDE * 2.0) / 100.0)
-    net = gross - fee - slip
-    return net, fee + slip
+
+def round_trip_cost(notional: float) -> float:
+    pct = 2.0 * (float(config.FALLBACK_FEE_PCT_PER_SIDE) + float(config.SLIPPAGE_PCT_PER_SIDE))
+    return float(notional) * pct / 100.0
+
+
+def estimate_net_outcomes(notional: float, tp_pct: float, sl_pct: float) -> tuple[float, float, float, float]:
+    """net_profit, net_loss_abs, cost, net_rr."""
+    cost = round_trip_cost(notional)
+    net_profit = notional * tp_pct / 100.0 - cost
+    net_loss = notional * sl_pct / 100.0 + cost
+    net_rr = net_profit / net_loss if net_loss > 0 else 0.0
+    return net_profit, net_loss, cost, net_rr
+
+
+def required_tp_pct_for_net_rr(notional: float, sl_pct: float, target_rr: float, min_net_profit: float) -> float:
+    """حل دقیق فاصله TP برای RR خالص و کف سود خالص."""
+    if notional <= 0:
+        return 0.0
+    cost = round_trip_cost(notional)
+    net_loss = notional * sl_pct / 100.0 + cost
+    gross_for_rr = target_rr * net_loss + cost
+    gross_for_min = min_net_profit + cost
+    return max(gross_for_rr, gross_for_min) / notional * 100.0
+
 
 def build_risk_plan(signal: StrategySignal, storage: Storage) -> RiskPlan | None:
     entry = float(signal.entry)
     if entry <= 0:
         return None
+
     profile = storage.get_profile(signal.symbol_id) or {}
-    # برای جلوگیری از سیگنال‌های خام مثل استاپ APT، تا وقتی پروفایل نویز/TP آماده نباشد
-    # سیگنال صادر نمی‌شود. این محاسبه فقط lookup سبک است و سرعت هسته ۱ و ۲ را کم نمی‌کند.
-    if getattr(config, "REQUIRE_PROFILE_READY", True):
-        if not profile or float(profile.get("min_sl_pct") or 0.0) <= 0:
-            return None
-        if int(profile.get("signal_count") or 0) < int(getattr(config, "PROFILE_MIN_SIGNALS", 8)):
-            return None
     min_sl_pct = float(profile.get("min_sl_pct") or 0.0)
     if min_sl_pct <= 0:
+        # نبود پروفایل نباید موتور شکار را خاموش کند؛ fallback محافظه‌کارانه فقط در ریسک استفاده می‌شود.
         min_sl_pct = float(getattr(config, "RISK_FALLBACK_MIN_SL_PCT", 0.55))
-    sl_pct = max(min_sl_pct, 0.05)
-    base_tp_pct = sl_pct * config.RISK_REWARD
+    sl_pct = max(min_sl_pct, float(getattr(config, "RISK_ABSOLUTE_MIN_SL_PCT", 0.05)))
+
     trade_usdt = float(storage.get("trade_usdt", config.TRADE_USDT_DEFAULT))
     leverage = int(storage.get("leverage", config.LEVERAGE_DEFAULT))
-    net, fee_est = estimate_net_profit(trade_usdt, leverage, base_tp_pct)
-    final_tp_pct = base_tp_pct
-    if net < config.MIN_NET_PROFIT_USDT:
-        notional = trade_usdt * leverage
-        required_gross = config.MIN_NET_PROFIT_USDT + fee_est
-        final_tp_pct = (required_gross / max(notional, 1e-9)) * 100.0
-        net, fee_est = estimate_net_profit(trade_usdt, leverage, final_tp_pct)
-    tp_profile_p70 = float(profile.get("tp_p70") or 0.0)
-    # پروفایل فقط حداقل سود خالص را واقعی‌بودن‌سنجی می‌کند، نه اینکه سیگنال‌های خوب را خفه کند.
-    if tp_profile_p70 > 0:
-        min_profit_tp_pct = final_tp_pct if net >= config.MIN_NET_PROFIT_USDT else base_tp_pct
-        profile_ok = tp_profile_p70 >= min_profit_tp_pct * 0.85
-    else:
-        profile_ok = True
-    if net < config.MIN_NET_PROFIT_USDT or not profile_ok:
-        return RiskPlan(
-            entry=entry,
-            tp=price_from_pct(entry, signal.side, final_tp_pct),
-            sl=sl_from_pct(entry, signal.side, sl_pct),
-            rr=config.RISK_REWARD,
-            sl_pct=sl_pct,
-            tp_pct=final_tp_pct,
-            min_net_profit_ok=False,
-            estimated_net_profit=net,
-            fee_estimate=fee_est,
-            reason="حداقل سود خالص ۵ سنت یا پروفایل TP کافی نیست",
-        )
+    if trade_usdt <= 0 or leverage <= 0:
+        return None
+    notional = trade_usdt * leverage
+
+    tp_pct = required_tp_pct_for_net_rr(
+        notional=notional,
+        sl_pct=sl_pct,
+        target_rr=float(config.RISK_REWARD),
+        min_net_profit=float(config.MIN_NET_PROFIT_USDT),
+    )
+    net_profit, net_loss, cost, net_rr = estimate_net_outcomes(notional, tp_pct, sl_pct)
+
+    # TP profile فقط بررسی می‌کند کف سود خالص واقع‌بینانه است. نبود/کمبود نمونه، سیگنال را خفه نمی‌کند.
+    tp_p70 = float(profile.get("tp_p70") or 0.0)
+    samples = int(profile.get("signal_count") or 0)
+    profile_ready = samples >= int(getattr(config, "PROFILE_MIN_SIGNALS", 8)) and tp_p70 > 0
+    profile_ok = (not profile_ready) or tp_p70 >= tp_pct * float(getattr(config, "TP_PROFILE_TOLERANCE", 0.85))
+
+    valid = (
+        net_profit + 1e-9 >= float(config.MIN_NET_PROFIT_USDT)
+        and net_rr + 1e-9 >= float(config.RISK_REWARD)
+        and profile_ok
+    )
+    reason = "RR خالص ۱.۳۵ + کف سود خالص + استاپ نویز هر ارز"
+    if not profile_ok:
+        reason = "حرکت P70 موقعیت‌های مشابه برای TP خالص لازم کافی نیست"
+
     return RiskPlan(
         entry=entry,
-        tp=price_from_pct(entry, signal.side, final_tp_pct),
+        tp=price_from_pct(entry, signal.side, tp_pct),
         sl=sl_from_pct(entry, signal.side, sl_pct),
-        rr=config.RISK_REWARD,
+        rr=float(config.RISK_REWARD),
+        net_rr=net_rr,
         sl_pct=sl_pct,
-        tp_pct=final_tp_pct,
-        min_net_profit_ok=True,
-        estimated_net_profit=net,
-        fee_estimate=fee_est,
-        reason="RR ثابت + حداقل سود خالص + پروفایل آماده",
+        tp_pct=tp_pct,
+        min_net_profit_ok=valid,
+        estimated_net_profit=net_profit,
+        estimated_net_loss=net_loss,
+        fee_estimate=cost,
+        notional_usdt=notional,
+        trade_usdt=trade_usdt,
+        leverage=leverage,
+        reason=reason,
     )
