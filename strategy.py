@@ -30,6 +30,7 @@ class StrategySignal:
     flow_bias: float
     absorption_score: float
     reason: str
+    diagnostic_context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -406,6 +407,23 @@ def evaluate_watch(state: WatchState, snapshot: dict[str, Any], now: float | Non
             f"شروع موج + قفل جهت پایدار | ماشه={state.trigger} | "
             f"میانگین معاملات={avg_trade:.3f} دفتر={avg_book:.3f} پاسخ={response_pct:.4f}% تأیید={state.confirm_count}"
         ),
+        diagnostic_context={
+            "watch_trigger": state.trigger,
+            "watch_age_seconds": round(age, 2),
+            "watch_start_price": state.start_price,
+            "pre_entry_displacement_pct": round(response_pct, 6),
+            "late_limit_pct": round(state.late_limit_pct, 6),
+            "avg_trade_imbalance": round(avg_trade, 6),
+            "avg_book_imbalance": round(avg_book, 6),
+            "avg_intensity_acceleration": round(avg_accel, 6),
+            "direction_confidence_pct": round(confidence * 100.0, 2),
+            "confirm_count": state.confirm_count,
+            "side_changes": state.side_changes,
+            "trade_history": [round(x, 6) for x in state.trade_history[-5:]],
+            "book_history": [round(x, 6) for x in state.book_history[-5:]],
+            "response_history": [round(x, 6) for x in state.response_history[-5:]],
+            "intensity_history": [round(x, 6) for x in state.intensity_history[-5:]],
+        },
     )
     return WatchEvaluation("SIGNAL", "شروع موج و جهت پایدار هم‌زمان تأیید شدند", side, signal, metrics)
 

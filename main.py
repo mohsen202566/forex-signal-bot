@@ -161,8 +161,14 @@ class TradingBotApp:
             "status": "pending" if is_real else "open",
             "is_real": is_real,
             "slot_id": slot,
-            "raw": {"reason": sig.reason, "risk_reason": risk.reason, "strength_score": sig.strength_score,
-                    "flow_bias": sig.flow_bias, "direction_confidence": sig.absorption_score},
+            "raw": {
+                "reason": sig.reason,
+                "risk_reason": risk.reason,
+                "strength_score": sig.strength_score,
+                "flow_bias": sig.flow_bias,
+                "direction_confidence": sig.absorption_score,
+                "diagnostic_context": dict(sig.diagnostic_context or {}),
+            },
         }
         try:
             signal_id = self.storage.create_signal(data)

@@ -75,6 +75,9 @@ class Storage:
                     estimated_net_loss REAL DEFAULT 0,
                     estimated_cost REAL DEFAULT 0,
                     net_rr REAL DEFAULT 0,
+                    stop_primary TEXT DEFAULT '',
+                    stop_confidence REAL DEFAULT 0,
+                    stop_analysis_json TEXT DEFAULT '{}',
                     raw_json TEXT DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS health_events (
@@ -104,6 +107,9 @@ class Storage:
                 "estimated_net_loss": "REAL DEFAULT 0",
                 "estimated_cost": "REAL DEFAULT 0",
                 "net_rr": "REAL DEFAULT 0",
+                "stop_primary": "TEXT DEFAULT ''",
+                "stop_confidence": "REAL DEFAULT 0",
+                "stop_analysis_json": "TEXT DEFAULT '{}'",
             }
             for name, ddl in migrations.items():
                 if name not in existing:
@@ -176,13 +182,14 @@ class Storage:
             "status", "message_id", "opened_at", "closed_at", "entry_real", "exit_price", "gross_pnl",
             "fee_usdt", "net_pnl", "close_reason", "mfe", "mae", "order_id", "slot_id", "raw_json",
             "is_real", "trade_mode", "trade_usdt", "leverage", "notional_usdt", "estimated_net_profit",
-            "estimated_net_loss", "estimated_cost", "net_rr"
+            "estimated_net_loss", "estimated_cost", "net_rr", "stop_primary", "stop_confidence",
+            "stop_analysis_json"
         }
         parts, vals = [], []
         for k, v in fields.items():
             if k in allowed:
                 parts.append(f"{k}=?")
-                vals.append(v if k != "raw_json" or isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+                vals.append(v if k not in {"raw_json", "stop_analysis_json"} or isinstance(v, str) else json.dumps(v, ensure_ascii=False))
         if not parts:
             return
         vals.append(signal_id)
