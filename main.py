@@ -3,6 +3,8 @@
 """
 from __future__ import annotations
 
+import logging
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -19,6 +21,23 @@ from symbols import SYMBOLS, SymbolMap
 from telegram_bot import TelegramBot
 from toobit_client import ToobitFuturesClient
 
+
+def _build_logger() -> logging.Logger:
+    level = getattr(logging, str(getattr(config, "LOG_LEVEL", "INFO")).upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)s | %(threadName)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+        force=True,
+    )
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    return logging.getLogger("futures_hunt_2")
+
+
+logger = _build_logger()
+
 class TradingBotApp:
     def __init__(self):
         self.storage = Storage()
@@ -31,6 +50,8 @@ class TradingBotApp:
         self._stop = threading.Event()
         self._last_signal_ts: dict[str, int] = {}
         self._last_profile_day: str | None = None
+        self._scan_count = 0
+        self._signal_count = 0
 
     def can_signal(self, sym: SymbolMap) -> bool:
         if self.storage.is_blacklisted(sym.id):
@@ -77,8 +98,10 @@ class TradingBotApp:
                 client_order_id=client_id,
             )
             self.health.mark("toobit")
+            logger.info("REAL_ORDER_SENT symbol=%s side=%s order_id=%s", sym.id, data["side"], res.get("order_id") or client_id)
             return True, str(res.get("order_id") or client_id)
         except Exception as exc:
+            logger.warning("REAL_ORDER_FAILED symbol=%s error=%s", sym.id, exc)
             self.storage.add_health_event("toobit_order", "warning", f"open real failed: {exc}", sym.id)
             return False, None
 
@@ -127,7 +150,10 @@ class TradingBotApp:
                 else:
                     threading.Thread(target=self._check_real_after_70s, args=(signal_id, sym), daemon=True).start()
             self._last_signal_ts[sym.id] = int(time.time())
+            self._signal_count += 1
+            logger.info("SIGNAL id=%s symbol=%s side=%s strength=%s mode=%s entry=%.8g tp=%.8g sl=%.8g", signal_id, sym.id, data["side"], data["strength"], data["trade_mode"], data["entry"], data["tp"], data["sl"])
         except Exception as exc:
+            logger.warning("SYMBOL_SKIPPED symbol=%s error=%s", sym.id, exc)
             self.storage.add_health_event("analysis", "warning", f"symbol skipped: {exc}", sym.id)
             self.storage.blacklist_symbol(sym.id, str(exc)[:180], config.SYMBOL_ERROR_BLACKLIST_SECONDS)
 
@@ -137,11 +163,14 @@ class TradingBotApp:
             opened = self.toobit.check_position_opened(sym.toobit)
             self.health.mark("toobit")
             if opened:
+                logger.info("REAL_POSITION_CONFIRMED signal_id=%s symbol=%s", signal_id, sym.id)
                 self.storage.update_signal(signal_id, status="open", opened_at=int(time.time()))
             else:
+                logger.warning("REAL_POSITION_NOT_OPEN signal_id=%s symbol=%s slot_released=true", signal_id, sym.id)
                 self.storage.update_signal(signal_id, status="open", is_real=0, slot_id=None, close_reason="NOT_OPENED_AFTER_70S")
                 self.storage.add_health_event("toobit_position", "warning", "بعد ۷۰ ثانیه پوزیشن باز نبود؛ اسلات آزاد شد", sym.id)
         except Exception as exc:
+            logger.warning("REAL_POSITION_CHECK_FAILED signal_id=%s symbol=%s error=%s", signal_id, sym.id, exc)
             self.storage.update_signal(signal_id, status="open", is_real=0, slot_id=None, close_reason="POSITION_CHECK_FAILED")
             self.storage.add_health_event("toobit_position", "warning", f"70s check failed: {exc}", sym.id)
 
@@ -151,7 +180,9 @@ class TradingBotApp:
             for sym in SYMBOLS:
                 self.analyze_one(sym)
             self.health.mark("signal")
+            self._scan_count += 1
             elapsed = time.time() - start
+            logger.info("SCAN_DONE cycle=%s symbols=%s elapsed=%.2fs total_signals=%s open_signals=%s", self._scan_count, len(SYMBOLS), elapsed, self._signal_count, len(self.storage.get_open_signals()))
             time.sleep(max(1.0, config.ANALYSIS_INTERVAL_SECONDS - elapsed))
 
     def monitor_loop(self) -> None:
@@ -160,6 +191,7 @@ class TradingBotApp:
                 self.monitor.tick()
                 self.health.mark("monitor")
             except Exception as exc:
+                logger.warning("MONITOR_LOOP_ERROR error=%s", exc)
                 self.storage.add_health_event("monitor_loop", "warning", str(exc))
             time.sleep(5)
 
@@ -180,10 +212,13 @@ class TradingBotApp:
             )
             if should_run:
                 try:
+                    logger.info("PROFILE_UPDATE_START mode=daily")
                     self.profiles.update_all()
                     self.health.mark("profiles")
+                    logger.info("PROFILE_UPDATE_DONE mode=daily")
                     self._last_profile_day = day
                 except Exception as exc:
+                    logger.warning("PROFILE_UPDATE_FAILED mode=daily error=%s", exc)
                     self.storage.add_health_event("profiles", "warning", f"daily profile failed: {exc}")
             time.sleep(30)
 
@@ -208,7 +243,9 @@ class TradingBotApp:
                 self.storage.set("toobit_last_error", "")
                 self.storage.set("toobit_last_update", now_ts)
                 self.health.mark("toobit")
+                logger.info("TOOBIT_STATUS connected=true available=%.4f total=%.4f usable_margin=%.4f", available_usdt, total_usdt, usable_margin_usdt)
             except Exception as exc:
+                logger.warning("TOOBIT_STATUS connected=false error=%s", exc)
                 self.storage.set("toobit_connected", False)
                 self.storage.set("toobit_last_error", str(exc)[:240])
                 self.storage.set("toobit_last_update", int(time.time()))
@@ -220,10 +257,13 @@ class TradingBotApp:
         مسیر تحلیل کند نمی‌شود؛ تا قبل از آماده شدن پروفایل‌ها، risk_engine سیگنال خام صادر نمی‌کند.
         """
         try:
+            logger.info("PROFILE_UPDATE_START mode=startup")
             self.profiles.update_all()
             self.health.mark("profiles")
             self._last_profile_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            logger.info("PROFILE_UPDATE_DONE mode=startup")
         except Exception as exc:
+            logger.warning("PROFILE_UPDATE_FAILED mode=startup error=%s", exc)
             self.storage.add_health_event("profiles", "warning", f"startup profile failed: {exc}")
 
     def run(self) -> None:
@@ -235,15 +275,17 @@ class TradingBotApp:
             threading.Thread(target=self.toobit_status_loop, daemon=True),
             threading.Thread(target=self.startup_profile_update, daemon=True),
         ]
+        logger.info("BOT_START version=live-logging symbols=%s analysis_interval=%ss", len(SYMBOLS), config.ANALYSIS_INTERVAL_SECONDS)
         for t in threads:
             t.start()
-        print("Trading bot started. Press Ctrl+C to stop.")
+            logger.info("THREAD_STARTED name=%s", t.name)
+        logger.info("BOT_READY trading_enabled=%s auto_signal=%s", self.storage.get("trading_enabled", False), self.storage.get("auto_signal_enabled", True))
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             self._stop.set()
-            print("Stopping...")
+            logger.info("BOT_STOP requested=keyboard_interrupt")
 
 if __name__ == "__main__":
     TradingBotApp().run()

@@ -3,12 +3,15 @@ Real از Toobit چک می‌شود؛ Virtual از OKX. نتیجه باید رو
 """
 from __future__ import annotations
 
+import logging
 import time
 
 import config
 from okx_client import OKXClient
 from storage import Storage
 from toobit_client import ToobitFuturesClient, safe_float
+
+logger = logging.getLogger("futures_hunt_2.monitor")
 
 class Monitor:
     def __init__(self, okx: OKXClient, toobit: ToobitFuturesClient, storage: Storage, telegram=None):
@@ -57,6 +60,7 @@ class Monitor:
         mfe, mae = self.okx.max_favorable_adverse(candles, sig["side"], float(sig["entry"]), int(sig["created_at"]) * 1000)
         self.storage.update_signal(sig["id"], status="closed", closed_at=int(time.time()), exit_price=exit_price, gross_pnl=gross, fee_usdt=fee, net_pnl=net, close_reason=reason, mfe=mfe, mae=mae)
         self.storage.add_profit(net)
+        logger.info("SIGNAL_CLOSED id=%s symbol=%s mode=virtual result=%s net=%.4f exit=%.8g mfe=%.3f mae=%.3f", sig["id"], sig["symbol_id"], reason, net, exit_price, mfe, mae)
         self._send_result(sig, reason, exit_price, net, gross, fee, mfe, mae)
 
     def check_real(self, sig: dict) -> None:
@@ -72,6 +76,7 @@ class Monitor:
         gross, fee, net = self._pnl(sig["side"], float(sig.get("entry_real") or sig["entry"]), exit_price, trade_usdt, leverage)
         self.storage.update_signal(sig["id"], status="closed", closed_at=int(time.time()), exit_price=exit_price, gross_pnl=gross, fee_usdt=fee, net_pnl=net, close_reason=reason)
         self.storage.add_profit(net)
+        logger.info("SIGNAL_CLOSED id=%s symbol=%s mode=real result=%s net=%.4f exit=%.8g", sig["id"], sig["symbol_id"], reason, net, exit_price)
         self._send_result(sig, reason, exit_price, net, gross, fee)
 
     def tick(self) -> None:
@@ -82,5 +87,6 @@ class Monitor:
                 else:
                     self.check_virtual(sig)
             except Exception as exc:
+                logger.warning("MONITOR_SIGNAL_ERROR id=%s symbol=%s error=%s", sig.get("id"), sig.get("symbol_id"), exc)
                 self.storage.add_health_event("monitor", "warning", f"monitor failed: {exc}", sig.get("symbol_id"))
                 continue
