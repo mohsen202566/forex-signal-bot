@@ -1,17 +1,15 @@
-"""موتور تحلیل زنده ۵ دقیقه‌ای.
+"""موتور یکپارچه استراتژی ۱۵ دقیقه‌ای.
 
-معماری:
-۱) اسکن سبک همه ارزها و ورود نرم به واچ‌لیست.
-۲) مانیتور سریع ارزهای واچ با معاملات اخیر و عمق سفارش OKX.
-۳) صدور سیگنال فقط وقتی «شروع حرکت» و «جهت بدون تناقض» هم‌زمان تأیید شوند.
-
-هیچ کار شبکه‌ای یا محاسبه روزانه داخل این فایل انجام نمی‌شود.
+تصمیم نهایی از یک سناریوی واحد ساخته می‌شود؛ جهت، قدرت، تازگی، ورود و ایمنی
+فقط شواهد هستند و هیچ‌کدام مستقل معامله صادر نمی‌کنند. واچ خرد OKX صرفاً
+برای revalidation اجرای زنده است و معماری کندلی را بازنویسی نمی‌کند.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from statistics import median
 from typing import Any
+import math
 import time
 
 import config
@@ -35,7 +33,7 @@ class StrategySignal:
 
 @dataclass
 class WatchCandidate:
-    side: str  # LONG / SHORT / UNCERTAIN
+    side: str
     trigger: str
     start_price: float
     early_flow: float
@@ -73,11 +71,12 @@ class WatchState:
     intensity_history: list[float] = field(default_factory=list)
     last_snapshot_trade_ts: int = 0
     evidence_score: float = 0.0
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class WatchEvaluation:
-    action: str  # KEEP / SIGNAL / REMOVE / SIDE_CHANGED
+    action: str
     reason_fa: str
     side: str
     signal: StrategySignal | None
@@ -86,14 +85,17 @@ class WatchEvaluation:
 
 @dataclass
 class StrategyAnalysisResult:
-    """خروجی تحلیل تاریخی/تستی؛ در مسیر زنده استفاده نمی‌شود."""
     signal: StrategySignal | None
     reject_reason: str
     details: dict[str, float | str]
 
 
+def _safe_median(xs: list[float], default: float = 0.0) -> float:
+    return median(xs) if xs else default
+
+
 def pct_range(c: dict[str, float]) -> float:
-    close = float(c["close"])
+    close = float(c.get("close") or 0.0)
     return (float(c["high"]) - float(c["low"])) / close * 100.0 if close > 0 else 0.0
 
 
@@ -101,359 +103,293 @@ def _volume(c: dict[str, float]) -> float:
     return max(float(c.get("vol_quote") or c.get("volume") or 0.0), 0.0)
 
 
-def _safe_median(values: list[float], default: float = 0.0) -> float:
-    return median(values) if values else default
+def _closed(candles: list[dict[str, float]]) -> list[dict[str, float]]:
+    return [c for c in candles if int(c.get("confirm", 1)) == 1]
 
 
-def pre_move_flow_bias(candles: list[dict[str, float]]) -> float:
-    """پروکسی سبک جریان سفارش برای مرحله اسکن عمومی.
-
-    در مرحله واچ، جهت از معاملات واقعی و دفتر سفارش گرفته می‌شود؛ بنابراین
-    این عدد فقط برای ورود نرم به واچ است و قفل جهت نیست.
-    """
-    recent = candles[-max(3, int(config.FLOW_BIAS_LOOKBACK)):]
-    total_vol = sum(_volume(c) for c in recent) or 1e-9
-    value = 0.0
-    for c in recent:
-        rng = max(float(c["high"]) - float(c["low"]), 1e-12)
-        body = (float(c["close"]) - float(c["open"])) / rng
-        close_location = ((float(c["close"]) - float(c["low"])) / rng - 0.5) * 2.0
-        value += (0.65 * max(-1.0, min(1.0, body)) + 0.35 * close_location) * (_volume(c) / total_vol)
-    return max(-1.0, min(1.0, value))
+def _ema(values: list[float], period: int) -> list[float]:
+    if not values: return []
+    alpha = 2.0 / (period + 1.0)
+    out = [values[0]]
+    for v in values[1:]: out.append(alpha * v + (1 - alpha) * out[-1])
+    return out
 
 
-def detect_watch_candidate(
-    candles: list[dict[str, float]],
-) -> tuple[WatchCandidate | None, str, dict[str, float | str]]:
-    """نشانه اولیه را نرم می‌گیرد؛ این مرحله سیگنال صادر نمی‌کند."""
-    if len(candles) < 24:
-        return None, "داده کندلی کافی نیست", {"تعداد_کندل": len(candles)}
+def _atr(candles: list[dict[str, float]], period: int = 14) -> list[float]:
+    if not candles: return []
+    trs: list[float] = []
+    prev = float(candles[0]["close"])
+    for c in candles:
+        h,l = float(c["high"]), float(c["low"])
+        trs.append(max(h-l, abs(h-prev), abs(l-prev)))
+        prev = float(c["close"])
+    return _ema(trs, period)
 
-    current = candles[-1]
-    # baseline فقط از کندل‌های بسته‌شده گرفته می‌شود. مقایسه کندل زنده نیمه‌کاره
-    # با کندل کامل، دلیل اصلی خشک‌شدن واچ‌ها بود.
-    completed = [c for c in candles[:-1] if int(c.get("confirm", 1)) == 1]
-    prev = completed[-17:] if len(completed) >= 17 else candles[-18:-1]
-    recent_completed = completed[-5:] if len(completed) >= 5 else candles[-6:-1]
-    current_range = pct_range(current)
-    base_ranges = [pct_range(c) for c in prev]
-    recent_ranges = [pct_range(c) for c in recent_completed]
-    base_range = _safe_median(base_ranges, 1e-9) or 1e-9
 
-    ts_ms = int(current.get("ts") or 0)
-    elapsed_sec = max(1.0, min(300.0, (time.time() * 1000.0 - ts_ms) / 1000.0)) if ts_ms > 0 else 300.0
-    progress = max(0.08, min(1.0, elapsed_sec / 300.0))
-    # حجم تقریباً با زمان و دامنه تقریباً با ریشه زمان مقیاس می‌شود.
-    projected_volume = _volume(current) / progress
-    normalized_range = current_range / max(progress ** 0.5, 0.28)
-    range_ratio = normalized_range / base_range
-    compression_ratio = _safe_median(recent_ranges, base_range) / base_range
+def _resample_1h(candles: list[dict[str, float]]) -> list[dict[str, float]]:
+    out=[]; bucket=[]; key=None
+    for c in candles:
+        ts=int(c["ts"]); k=ts//3_600_000
+        if key is None: key=k
+        if k != key:
+            if len(bucket)==4:
+                out.append({"ts":bucket[0]["ts"],"open":bucket[0]["open"],"high":max(x["high"] for x in bucket),
+                            "low":min(x["low"] for x in bucket),"close":bucket[-1]["close"],"volume":sum(_volume(x) for x in bucket),"confirm":1})
+            bucket=[]; key=k
+        bucket.append(c)
+    if len(bucket)==4:
+        out.append({"ts":bucket[0]["ts"],"open":bucket[0]["open"],"high":max(x["high"] for x in bucket),
+                    "low":min(x["low"] for x in bucket),"close":bucket[-1]["close"],"volume":sum(_volume(x) for x in bucket),"confirm":1})
+    return out
 
-    base_vol = _safe_median([_volume(c) for c in prev], 1e-9) or 1e-9
-    volume_ratio = projected_volume / base_vol
-    flow = pre_move_flow_bias(candles)
 
-    open_px = float(current["open"])
-    close_px = float(current["close"])
-    current_move = abs(close_px - open_px) / max(open_px, 1e-9) * 100.0
+def _swing_points(candles: list[dict[str,float]], atrs: list[float]) -> tuple[list[tuple[int,float]], list[tuple[int,float]]]:
+    highs=[]; lows=[]
+    for i in range(2, len(candles)-2):
+        h=float(candles[i]["high"]); l=float(candles[i]["low"])
+        if h>float(candles[i-1]["high"]) and h>float(candles[i-2]["high"]) and h>=float(candles[i+1]["high"]) and h>=float(candles[i+2]["high"]):
+            follow=min(float(x["low"]) for x in candles[i+1:min(len(candles),i+6)])
+            if h-follow >= max(h*0.003, atrs[i]*float(config.SWING_VALIDATION_ATR)): highs.append((i,h))
+        if l<float(candles[i-1]["low"]) and l<float(candles[i-2]["low"]) and l<=float(candles[i+1]["low"]) and l<=float(candles[i+2]["low"]):
+            follow=max(float(x["high"]) for x in candles[i+1:min(len(candles),i+6)])
+            if follow-l >= max(l*0.003, atrs[i]*float(config.SWING_VALIDATION_ATR)): lows.append((i,l))
+    return highs,lows
 
-    # حد دیرشدن از TP ثابت پنج‌دقیقه‌ای گرفته می‌شود؛ هیچ پروفایل تاریخی دخالت ندارد.
-    expected = float(config.FIXED_TP_PCT_5M)
-    # فقط وقتی بخش بزرگی از موج احتمالی طی شده باشد دیر محسوب می‌شود؛ نه با حد خشک کوچک.
-    late_limit = max(
-        float(getattr(config, "WATCH_LATE_MIN_PCT", 0.10)),
-        min(float(getattr(config, "WATCH_LATE_MAX_PCT", 0.45)), expected * float(getattr(config, "WATCH_LATE_EXPECTED_FRACTION", 0.30))),
-    )
 
-    compression_ready = compression_ratio <= float(getattr(config, "WATCH_COMPRESSION_SOFT_RATIO", 0.92))
-    volume_ignition = volume_ratio >= float(getattr(config, "WATCH_VOLUME_RATIO_MIN", 1.18))
-    range_ignition = range_ratio >= float(getattr(config, "WATCH_RANGE_RATIO_MIN", 1.12))
-    flow_hint = abs(flow) >= float(getattr(config, "WATCH_EARLY_FLOW_MIN", 0.045))
+def _pressure(candles: list[dict[str,float]], lookback: int) -> tuple[float,float,float]:
+    xs=candles[-lookback:]
+    ranges=[max(float(c["high"])-float(c["low"]),1e-12) for c in xs]
+    cap=2.0*(_safe_median(ranges,1e-9) or 1e-9)
+    bull=bear=path=0.0
+    for c,r in zip(xs,ranges):
+        eff=min(r,cap)/r
+        body=(float(c["close"])-float(c["open"]))/r
+        close_loc=((float(c["close"])-float(c["low"]))/r-0.5)*2.0
+        val=(0.65*body+0.35*close_loc)*eff
+        if val>=0: bull+=val
+        else: bear+=-val
+        path += abs(float(c["close"])-float(c["open"]))
+    delta=(bull-bear)/max(bull+bear,1e-9)
+    net=abs(float(xs[-1]["close"])-float(xs[0]["open"])) if xs else 0.0
+    efficiency=net/max(path,1e-9)
+    return delta,bull/max(bull+bear,1e-9),efficiency
 
-    details: dict[str, float | str] = {
-        "فشار_اولیه": round(flow, 4),
-        "نسبت_حجم": round(volume_ratio, 3),
-        "نسبت_دامنه": round(range_ratio, 3),
-        "نسبت_فشردگی": round(compression_ratio, 3),
-        "حرکت_فعلی_درصد": round(current_move, 4),
-        "حد_دیرشدن_درصد": round(late_limit, 4),
-        "پیشرفت_کندل": round(progress, 3),
+
+def _obstacle_distance(candles: list[dict[str,float]], side: str, price: float) -> float:
+    # فقط سطوحی که تا همان لحظه قابل مشاهده‌اند.
+    recent=candles[-80:-1]
+    if side=="LONG":
+        levels=sorted({float(c["high"]) for c in recent if float(c["high"])>price})
+        return ((levels[0]-price)/price*100.0) if levels else 99.0
+    levels=sorted({float(c["low"]) for c in recent if float(c["low"])<price}, reverse=True)
+    return ((price-levels[0])/price*100.0) if levels else 99.0
+
+
+def _build_scenario(candles: list[dict[str,float]], side: str) -> dict[str,Any]:
+    closes=[float(c["close"]) for c in candles]
+    atrs=_atr(candles, config.ATR_PERIOD); atr=max(atrs[-1],1e-12); price=closes[-1]
+    ema20=_ema(closes,config.EMA_FAST); ema50=_ema(closes,config.EMA_SLOW)
+    highs,lows=_swing_points(candles,atrs)
+    last_h=highs[-2:] if len(highs)>=2 else highs
+    last_l=lows[-2:] if len(lows)>=2 else lows
+    delta,bull_share,eff=_pressure(candles,config.PRESSURE_LOOKBACK)
+    sign=1 if side=="LONG" else -1
+
+    structure=0.0; structural="MIXED"
+    if len(last_h)>=2 and len(last_l)>=2:
+        hh=last_h[-1][1]>last_h[-2][1]; hl=last_l[-1][1]>last_l[-2][1]
+        lh=last_h[-1][1]<last_h[-2][1]; ll=last_l[-1][1]<last_l[-2][1]
+        if hh and hl: structural="LONG"
+        elif lh and ll: structural="SHORT"
+        elif (hh and ll) or (lh and hl): structural="MIXED"
+        if side=="LONG": structure=45.0 if structural=="LONG" else (25.0 if hh or hl else 5.0)
+        else: structure=45.0 if structural=="SHORT" else (25.0 if lh or ll else 5.0)
+
+    level=(last_h[-1][1] if side=="LONG" and last_h else last_l[-1][1] if side=="SHORT" and last_l else price)
+    buffer=max(price*0.0005, atr*float(config.BREAK_BUFFER_ATR))
+    close_break=(price>level+buffer) if side=="LONG" else (price<level-buffer)
+    prev_close=float(candles[-2]["close"])
+    accepted=close_break and ((prev_close>level) if side=="LONG" else (prev_close<level))
+    pressure_aligned=max(0.0, sign*delta)
+    acceptance=30.0*(0.45*(1 if close_break else 0)+0.35*(1 if accepted else 0)+0.20*pressure_aligned)
+
+    oneh=_resample_1h(candles)
+    htf=10.0
+    wind="NEUTRAL"
+    if len(oneh)>=55:
+        hc=[float(c["close"]) for c in oneh]; hema=_ema(hc,50)
+        slope=(hema[-1]-hema[-6])/max(hema[-6],1e-12)
+        aligned=(hc[-1]>hema[-1] and slope>0) if side=="LONG" else (hc[-1]<hema[-1] and slope<0)
+        opposite=(hc[-1]<hema[-1] and slope<0) if side=="LONG" else (hc[-1]>hema[-1] and slope>0)
+        if aligned: htf=20.0; wind="TAILWIND"
+        elif opposite: htf=3.0; wind="HEADWIND"
+
+    ema_aligned=(ema20[-1]>ema50[-1] and price>ema20[-1]) if side=="LONG" else (ema20[-1]<ema50[-1] and price<ema20[-1])
+    ema_score=5.0 if ema_aligned else 1.0
+    direction_score=structure+acceptance+htf+ema_score
+
+    # قدرت: impulse, acceptance, persistence, efficiency
+    recent=candles[-4:]
+    impulse_range=(max(float(c["high"]) for c in recent)-min(float(c["low"]) for c in recent))/atr
+    impulse=min(100.0, max(0.0, 35+impulse_range*28+pressure_aligned*30))
+    acceptance_score=min(100.0, max(0.0, (70 if accepted else 42 if close_break else 18)+pressure_aligned*25))
+    persistence=min(100.0,max(0.0,50+sign*delta*42))
+    efficiency_score=min(100.0,max(0.0,eff*125))
+    strength=0.25*impulse+0.30*acceptance_score+0.25*persistence+0.20*efficiency_score
+
+    # تازگی از مبدأ آخرین swing مخالف
+    origin_idx=(last_l[-1][0] if side=="LONG" and last_l else last_h[-1][0] if side=="SHORT" and last_h else len(candles)-2)
+    origin_price=(last_l[-1][1] if side=="LONG" and last_l else last_h[-1][1] if side=="SHORT" and last_h else prev_close)
+    age=max(0,len(candles)-1-origin_idx)
+    distance=abs(price-origin_price)/atr
+    time_score=max(0.0,100-age*16)
+    dist_score=max(0.0,100-distance*58)
+    structural_score=max(0.0,100-max(0,age-1)*13)
+    obstacle=_obstacle_distance(candles,side,price)
+    opportunity_score=min(100.0,max(0.0,obstacle/max(config.MIN_CLEAR_PATH_PCT,1e-9)*75))
+    freshness=0.20*time_score+0.25*dist_score+0.25*structural_score+0.30*opportunity_score
+
+    # ورود: شکست مستقیم یا اولین پولبک ساده
+    current=candles[-1]; rng=max(float(current["high"])-float(current["low"]),1e-12)
+    body_ratio=abs(float(current["close"])-float(current["open"]))/rng
+    close_loc=(float(current["close"])-float(current["low"]))/rng
+    close_good=close_loc>=0.70 if side=="LONG" else close_loc<=0.30
+    range_atr=rng/atr
+    direct=accepted and 0.55<=body_ratio and 0.55<=range_atr<=1.35 and close_good
+    # pullback پایان‌یافته: کندل قبل خلاف جهت و کندل فعلی trigger را شکسته
+    prev=candles[-2]
+    prev_opposite=(float(prev["close"])<float(prev["open"])) if side=="LONG" else (float(prev["close"])>float(prev["open"]))
+    trigger=(float(current["close"])>float(prev["high"])) if side=="LONG" else (float(current["close"])<float(prev["low"]))
+    pullback=prev_opposite and trigger and body_ratio>=0.45 and close_good
+    entry_type="DIRECT_BREAKOUT" if direct else "FIRST_PULLBACK" if pullback else "WAIT"
+    location=max(0.0,min(100.0,100-distance*55))
+    trigger_score=90.0 if direct or pullback else 35.0
+    invalidation_distance=abs(price-origin_price)/price*100.0
+    invalidation=90.0 if invalidation_distance<=config.FIXED_SL_PCT_15M else max(0.0,70-(invalidation_distance-config.FIXED_SL_PCT_15M)*100)
+    atr_pct=atr/price*100.0
+    bracket_ok=(config.MIN_FIXED_BRACKET_ATR_PCT<=atr_pct<=config.MAX_FIXED_BRACKET_ATR_PCT and obstacle>=config.MIN_CLEAR_PATH_PCT)
+    execution=85.0 if bracket_ok else 30.0
+    entry_score=0.30*location+0.30*trigger_score+0.25*invalidation+0.15*execution
+
+    # ایمنی محیط مستقل: کارایی، نویز سایه، رنج و براکت
+    wick_ratios=[]
+    for c in candles[-8:]:
+        rr=max(float(c["high"])-float(c["low"]),1e-12)
+        wick=(rr-abs(float(c["close"])-float(c["open"])))/rr
+        wick_ratios.append(wick)
+    wick_noise=_safe_median(wick_ratios,0.5)
+    safety=max(0.0,min(100.0,45+eff*45-wick_noise*20+(15 if bracket_ok else -20)))
+
+    direction_integrity=structural==side and not (wind=="HEADWIND" and not accepted)
+    trigger_valid=entry_type!="WAIT"
+    invalidation_ok=invalidation_distance<=config.FIXED_SL_PCT_15M*1.05
+    feasibility=bracket_ok
+    coherence=1.0
+    if not accepted: coherence-=0.08
+    if wind=="HEADWIND": coherence-=0.10
+    if pressure_aligned<0.15: coherence-=0.07
+    coherence=max(0.70,coherence)
+    base=0.25*direction_score+0.20*strength+0.20*freshness+0.25*entry_score+0.10*safety
+    final=base*coherence
+
+    return {
+        "side":side,"structural_direction":structural,"direction_score":round(direction_score,2),"strength_score":round(strength,2),
+        "freshness_score":round(freshness,2),"entry_score":round(entry_score,2),"safety_score":round(safety,2),
+        "final_score":round(final,2),"coherence":round(coherence,3),"accepted":accepted,"close_break":close_break,
+        "entry_type":entry_type,"direction_integrity":direction_integrity,"trigger_valid":trigger_valid,
+        "invalidation_ok":invalidation_ok,"feasibility":feasibility,"obstacle_pct":round(obstacle,4),
+        "atr_pct":round(atr_pct,4),"age_bars":age,"distance_atr":round(distance,4),"one_hour_wind":wind,
+        "origin_price":origin_price,"breakout_level":level,"flow":round(delta,4),"efficiency":round(eff,4),
+        "bracket_ok":bracket_ok,
     }
 
-    # ورود به واچ عمداً OR است تا حرکت‌ها با یک الگوی اجباری خفه نشوند.
-    trigger = ""
-    if compression_ready and flow_hint:
-        trigger = "فشردگی در حال آزاد شدن"
-    elif volume_ignition and flow_hint:
-        trigger = "افزایش اولیه شدت معاملات"
-    elif range_ignition and flow_hint:
-        trigger = "شروع گسترش دامنه همراه فشار جهت‌دار"
-    elif volume_ignition and range_ignition:
-        trigger = "شتاب هم‌زمان حجم و دامنه"
-    elif flow_hint and (volume_ratio >= 0.88 or range_ratio >= 0.88):
-        # ورود نرم به واچ است، نه سیگنال؛ این مسیر حرکت‌های خوبی را که هنوز
-        # آستانه کامل حجم/دامنه را لمس نکرده‌اند از دست نمی‌دهد.
-        trigger = "فشار اولیه زودهنگام"
-    elif compression_ready and (volume_ratio >= 0.82 or range_ratio >= 0.82):
-        trigger = "آمادگی فشردگی بدون جهت اولیه"
-    else:
-        return None, "نشانه اولیه شروع حرکت کافی نبود", details
 
-    if current_move > late_limit:
-        return None, "حرکت قبل از ورود به واچ بیش‌ازحد جلو رفته بود", details
-
-    if flow >= float(getattr(config, "WATCH_TENTATIVE_SIDE_MIN", 0.06)):
-        side = "LONG"
-    elif flow <= -float(getattr(config, "WATCH_TENTATIVE_SIDE_MIN", 0.06)):
-        side = "SHORT"
-    else:
-        side = "UNCERTAIN"
-
-    comp_score = max(0.0, min(1.0, 1.0 - compression_ratio))
-    return WatchCandidate(
-        side=side,
-        trigger=trigger,
-        start_price=close_px,
-        early_flow=flow,
-        compression_score=comp_score,
-        volume_ratio=volume_ratio,
-        range_ratio=range_ratio,
-        expected_move_pct=expected,
-        late_limit_pct=late_limit,
-        details=details,
-    ), "ورود به واچ", details
-
-
-def _trim_append(values: list[float], value: float, limit: int) -> None:
-    values.append(float(value))
-    if len(values) > limit:
-        del values[:-limit]
-
-
-def _direction_from_micro(
-    trade_history: list[float],
-    book_history: list[float],
-    response_history: list[float],
-) -> tuple[str, bool, float, str]:
-    """قفل جهت با شواهد پایدار، نه الزام چند شرط کاملاً هم‌زمان.
-
-    فشار معاملات علت اصلی است؛ پاسخ قیمت باید هم‌جهت یا دست‌کم غیرمخالف باشد.
-    دفتر سفارش فقط اعتماد را تنظیم می‌کند و هرگز به‌تنهایی جهت نمی‌سازد.
-    """
-    trade_min = float(getattr(config, "WATCH_TRADE_IMBALANCE_MIN", 0.075))
-    book_min = float(getattr(config, "WATCH_BOOK_IMBALANCE_MIN", 0.07))
-    response_min = float(getattr(config, "WATCH_PRICE_RESPONSE_MIN_PCT", 0.003))
-    adverse_max = float(getattr(config, "WATCH_MAX_ADVERSE_RESPONSE_PCT", 0.012))
-    needed = int(getattr(config, "WATCH_MIN_CONSISTENT_SAMPLES", 2))
-
-    if len(trade_history) < needed or not response_history:
-        return "UNCERTAIN", False, 0.0, "نمونه تازه کافی برای قفل جهت نیست"
-
-    n = max(needed, 3)
-    recent_trade = trade_history[-n:]
-    recent_resp = response_history[-n:]
-    recent_book = book_history[-n:] if book_history else [0.0]
-    avg_trade = sum(recent_trade) / len(recent_trade)
-    avg_resp = sum(recent_resp) / len(recent_resp)
-    avg_book = sum(recent_book) / len(recent_book)
-    long_votes = sum(v >= trade_min for v in recent_trade)
-    short_votes = sum(v <= -trade_min for v in recent_trade)
-
-    long_pressure = long_votes >= needed and avg_trade >= trade_min * 0.65
-    short_pressure = short_votes >= needed and avg_trade <= -trade_min * 0.65
-    long_response_ok = avg_resp >= response_min * 0.45 and min(recent_resp) > -adverse_max
-    short_response_ok = avg_resp <= -response_min * 0.45 and max(recent_resp) < adverse_max
-
-    if long_pressure and long_response_ok:
-        consistency = long_votes / len(recent_trade)
-        confidence = 0.60 + 0.24 * consistency + min(0.09, max(0.0, avg_resp) * 6.0)
-        if avg_book >= book_min:
-            confidence += 0.07
-        elif avg_book <= -float(getattr(config, "WATCH_STRONG_BOOK_IMBALANCE", 0.20)):
-            confidence -= 0.06
-        return "LONG", True, max(0.0, min(confidence, 0.97)), "فشار خرید پایدار است و قیمت خلاف آن مقاومت نکرده"
-    if short_pressure and short_response_ok:
-        consistency = short_votes / len(recent_trade)
-        confidence = 0.60 + 0.24 * consistency + min(0.09, max(0.0, -avg_resp) * 6.0)
-        if avg_book <= -book_min:
-            confidence += 0.07
-        elif avg_book >= float(getattr(config, "WATCH_STRONG_BOOK_IMBALANCE", 0.20)):
-            confidence -= 0.06
-        return "SHORT", True, max(0.0, min(confidence, 0.97)), "فشار فروش پایدار است و قیمت خلاف آن مقاومت نکرده"
-
-    return "UNCERTAIN", False, max(0.0, min(0.58, abs(avg_trade) * 0.75 + abs(avg_resp) * 4.0)), "فشار و پاسخ قیمت هنوز توافق قابل اتکا ندارند"
-
-
-def evaluate_watch(state: WatchState, snapshot: dict[str, Any], now: float | None = None) -> WatchEvaluation:
-    now = now or time.time()
-    age = now - state.created_at
-    price = float(snapshot.get("mid_price") or snapshot.get("last_price") or 0.0)
-    if price <= 0:
-        return WatchEvaluation("KEEP", "قیمت معتبر دریافت نشد؛ واچ حفظ شد", state.side, None, {"سن_واچ_ثانیه": round(age, 1)})
-
-    trade_imbalance = float(snapshot.get("trade_imbalance") or 0.0)
-    book_imbalance = float(snapshot.get("book_imbalance") or 0.0)
-    intensity_accel = float(snapshot.get("intensity_acceleration") or 0.0)
-    newest_trade_ts = int(float(snapshot.get("newest_trade_ts") or 0.0))
-    is_fresh_snapshot = newest_trade_ts <= 0 or newest_trade_ts > state.last_snapshot_trade_ts
-    response_pct = (price - state.start_price) / max(state.start_price, 1e-9) * 100.0
-    step_base = state.last_price if state.last_price > 0 else state.start_price
-    step_response_pct = (price - step_base) / max(step_base, 1e-9) * 100.0
-    displacement = abs(response_pct)
-
-    # پاسخ مؤثر ترکیبی است: بخش اصلی از جابه‌جایی از نقطه شروع و بخش کوچک‌تر
-    # از آخرین مشاهده. این کار هم شروع موج را می‌بیند و هم جلوی قفل‌شدن روی
-    # یک جهش قدیمی که دیگر ادامه ندارد را می‌گیرد.
-    effective_response = 0.70 * response_pct + 0.30 * step_response_pct
-
-    hist_limit = int(getattr(config, "WATCH_DIRECTION_HISTORY", 5))
-    if is_fresh_snapshot:
-        _trim_append(state.trade_history, trade_imbalance, hist_limit)
-        _trim_append(state.book_history, book_imbalance, hist_limit)
-        _trim_append(state.response_history, effective_response, hist_limit)
-        _trim_append(state.intensity_history, intensity_accel, hist_limit)
-        state.last_snapshot_trade_ts = newest_trade_ts
-    else:
-        # داده تکراری نه تأیید است و نه رد؛ فقط واچ را نگه می‌داریم.
-        state.last_price = price
-        state.last_update = now
-        return WatchEvaluation("KEEP", "معامله تازه‌ای از نمونه قبلی نرسیده؛ واچ بدون تغییر حفظ شد", state.side, None, {
-            "سن_واچ_ثانیه": round(age, 1), "عدم_تعادل_معاملات": round(trade_imbalance, 4),
-            "واکنش_قیمت_از_شروع_درصد": round(response_pct, 4), "نمونه_تازه": 0,
-        })
-    side, locked, confidence, lock_reason = _direction_from_micro(
-        state.trade_history, state.book_history, state.response_history
-    )
-
-    state.last_price = price
-    state.last_update = now
-
-    metrics: dict[str, float | str] = {
-        "سن_واچ_ثانیه": round(age, 1),
-        "عدم_تعادل_معاملات": round(trade_imbalance, 4),
-        "عدم_تعادل_دفتر": round(book_imbalance, 4),
-        "شتاب_معاملات": round(intensity_accel, 4),
-        "واکنش_قیمت_از_شروع_درصد": round(response_pct, 4),
-        "واکنش_قیمت_آخرین_نمونه_درصد": round(step_response_pct, 4),
-        "اعتماد_جهت": round(confidence * 100.0, 1),
-        "نمونه_جهت": len(state.trade_history),
-        "حد_دیرشدن_درصد": round(state.late_limit_pct, 4),
+def detect_watch_candidate(candles: list[dict[str,float]]) -> tuple[WatchCandidate|None,str,dict[str,float|str]]:
+    closed=_closed(candles)
+    if len(closed)<80:
+        return None,"داده کندلی بسته‌شده کافی نیست",{"تعداد_کندل":len(closed)}
+    long_s=_build_scenario(closed,"LONG"); short_s=_build_scenario(closed,"SHORT")
+    winner=long_s if long_s["final_score"]>=short_s["final_score"] else short_s
+    loser=short_s if winner is long_s else long_s
+    edge=winner["final_score"]-loser["final_score"]
+    details={
+        "امتیاز_لانگ":long_s["final_score"],"امتیاز_شورت":short_s["final_score"],"اختلاف":round(edge,2),
+        "جهت":winner["direction_score"],"قدرت":winner["strength_score"],"تازگی":winner["freshness_score"],
+        "ورود":winner["entry_score"],"ایمنی":winner["safety_score"],"نوع_ورود":winner["entry_type"],
+        "فاصله_مانع":winner["obstacle_pct"],"ATR_درصد":winner["atr_pct"],
     }
-
-    if age > float(getattr(config, "WATCH_TTL_SECONDS", 300)):
-        return WatchEvaluation("REMOVE", "زمان منطقی واچ تمام شد", state.side, None, metrics)
-    if displacement > state.late_limit_pct:
-        return WatchEvaluation("REMOVE", "قیمت پیش از تأیید بیش‌ازحد حرکت کرد و ورود دیر شد", state.side, None, metrics)
-
-    # تغییر جهت فقط پس از قفل پایدار جهت جدید مجاز است.
-    if locked and side != "UNCERTAIN" and side != state.side and state.side != "UNCERTAIN" and not state.direction_locked:
-        if state.side_changes < int(getattr(config, "WATCH_MAX_SIDE_CHANGES", 1)):
-            return WatchEvaluation("SIDE_CHANGED", "چرخش پایدار فشار و پاسخ قیمت تأیید شد", side, None, metrics)
-        state.bad_count += 1
-
-    recent_trade = state.trade_history[-3:]
-    recent_accel = state.intensity_history[-3:]
-    avg_abs_trade = sum(abs(v) for v in recent_trade) / max(len(recent_trade), 1)
-    max_accel = max(recent_accel) if recent_accel else 0.0
-    strong_trade = avg_abs_trade >= float(getattr(config, "WATCH_STRONG_TRADE_IMBALANCE", 0.18))
-    accelerated = max_accel >= float(getattr(config, "WATCH_INTENSITY_ACCEL_MIN", 0.08))
-    micro_return = abs(float(snapshot.get("micro_return_pct") or 0.0))
-    price_started = max(displacement, micro_return) >= float(getattr(config, "WATCH_MIN_START_DISPLACEMENT_PCT", 0.0015))
-    # یکی از دو شاهد شدت یا شتاب کافی است؛ جهت همچنان باید جداگانه قفل شده باشد.
-    start_confirmed = price_started and (strong_trade or accelerated or avg_abs_trade >= float(getattr(config, "WATCH_TRADE_IMBALANCE_MIN", 0.075)) * 1.15)
-
-    adverse = float(getattr(config, "WATCH_MAX_ADVERSE_RESPONSE_PCT", 0.012))
-    contradiction = (
-        (state.side == "LONG" and response_pct < -adverse and trade_imbalance < 0)
-        or (state.side == "SHORT" and response_pct > adverse and trade_imbalance > 0)
-    )
-    state.bad_count = state.bad_count + 1 if contradiction else max(0, state.bad_count - 1)
-    if state.bad_count >= int(getattr(config, "WATCH_BAD_OBSERVATIONS_TO_REMOVE", 3)):
-        return WatchEvaluation("REMOVE", "تناقض پایدار بین جهت واچ و جریان واقعی بازار", state.side, None, metrics)
-
-    if not locked or side == "UNCERTAIN":
-        # یک نمونه خنثی نباید تمام تأییدهای قبلی را نابود کند؛ شمارنده آرام
-        # کم می‌شود، اما تناقض واقعی همچنان با bad_count واچ را حذف می‌کند.
-        return WatchEvaluation("KEEP", f"{lock_reason}؛ واچ ادامه دارد", state.side, None, metrics)
-    if not start_confirmed:
-        return WatchEvaluation("KEEP", "جهت معتبر است اما شتاب شروع موج هنوز کافی نیست", side, None, metrics)
-
-    state.side = side
-    state.direction_locked = True
-    state.confirm_count += 1
-    strong_confirmation = strong_trade and accelerated and confidence >= 0.78 and displacement >= float(getattr(config, "WATCH_MIN_START_DISPLACEMENT_PCT", 0.002))
-    needed = int(getattr(config, "WATCH_STRONG_CONFIRMATIONS_REQUIRED", 2)) if strong_confirmation else int(getattr(config, "WATCH_CONFIRMATIONS_REQUIRED", 3))
-    if state.confirm_count < needed:
-        return WatchEvaluation("KEEP", f"تأیید {state.confirm_count} از {needed} دریافت شد؛ نویز کوتاه حذف می‌شود", side, None, metrics)
-
-    avg_trade = sum(state.trade_history[-3:]) / min(3, len(state.trade_history))
-    avg_book = sum(state.book_history[-3:]) / min(3, len(state.book_history))
-    avg_accel = sum(state.intensity_history[-3:]) / min(3, len(state.intensity_history))
-    strength_score = min(100.0, 45.0 + abs(avg_trade) * 80.0 + max(avg_accel, 0.0) * 18.0 + confidence * 22.0 + abs(avg_book) * 8.0)
-    strength = "خیلی قوی" if strength_score >= 82 else ("قوی" if strength_score >= 68 else "متوسط")
-
-    signal = StrategySignal(
-        symbol_id=state.symbol_id,
-        okx_symbol=state.okx_symbol,
-        toobit_symbol=state.toobit_symbol,
-        side=side,
-        entry=price,
-        strength=strength,
-        strength_score=round(strength_score, 2),
-        compression_score=round(state.compression_score * 100.0, 2),
-        flow_bias=round(avg_trade, 4),
-        absorption_score=round(confidence * 100.0, 2),
-        reason=(
-            f"شروع موج + قفل جهت پایدار | ماشه={state.trigger} | "
-            f"میانگین معاملات={avg_trade:.3f} دفتر={avg_book:.3f} پاسخ={response_pct:.4f}% تأیید={state.confirm_count}"
-        ),
-        diagnostic_context={
-            "watch_trigger": state.trigger,
-            "watch_age_seconds": round(age, 2),
-            "watch_start_price": state.start_price,
-            "pre_entry_displacement_pct": round(response_pct, 6),
-            "late_limit_pct": round(state.late_limit_pct, 6),
-            "avg_trade_imbalance": round(avg_trade, 6),
-            "avg_book_imbalance": round(avg_book, 6),
-            "avg_intensity_acceleration": round(avg_accel, 6),
-            "direction_confidence_pct": round(confidence * 100.0, 2),
-            "confirm_count": state.confirm_count,
-            "side_changes": state.side_changes,
-            "trade_history": [round(x, 6) for x in state.trade_history[-5:]],
-            "book_history": [round(x, 6) for x in state.book_history[-5:]],
-            "response_history": [round(x, 6) for x in state.response_history[-5:]],
-            "intensity_history": [round(x, 6) for x in state.intensity_history[-5:]],
-        },
-    )
-    return WatchEvaluation("SIGNAL", "شروع موج و جهت پایدار هم‌زمان تأیید شدند", side, signal, metrics)
+    if not winner["direction_integrity"]: return None,"یکپارچگی جهت معتبر نبود",details
+    if winner["final_score"]<config.SCENARIO_MIN_SCORE or edge<config.SCENARIO_MIN_EDGE:
+        return None,"سناریوی برنده امتیاز یا اختلاف کافی نداشت",details
+    if not winner["trigger_valid"]: return None,"جهت و حرکت معتبرند اما تریگر ورود هنوز کامل نیست",details
+    if not winner["invalidation_ok"]: return None,"استاپ ثابت قبل از ابطال طبیعی قرار می‌گیرد",details
+    if not winner["feasibility"]: return None,"براکت ثابت با نوسان یا مانع پیش رو سازگار نیست",details
+    current=float(closed[-1]["close"])
+    late=max(config.WATCH_LATE_MIN_PCT,min(config.WATCH_LATE_MAX_PCT,config.FIXED_TP_PCT_15M*config.WATCH_LATE_EXPECTED_FRACTION))
+    return WatchCandidate(winner["side"],f"سناریوی یکپارچه {winner['entry_type']}",current,winner["flow"],
+                          max(0.0,min(1.0,1-winner["efficiency"])),1.0,1.0,config.FIXED_TP_PCT_15M,late,
+                          {**details,"scenario":winner}),"ورود به واچ اجرای زنده",details
 
 
-# ---------------------------------------------------------------------------
-# سازگاری با تست‌های تاریخی؛ در مسیر زنده استفاده نمی‌شود.
-# ---------------------------------------------------------------------------
-def analyze_symbol_detailed(symbol_id: str, okx_symbol: str, toobit_symbol: str, candles: list[dict[str, float]]) -> StrategyAnalysisResult:
-    candidate, reason, details = detect_watch_candidate(candles)
-    if not candidate:
-        return StrategyAnalysisResult(None, "watch_candidate_fail", details)
-    if candidate.side == "UNCERTAIN":
-        return StrategyAnalysisResult(None, "direction_uncertain", details)
-    score = min(100.0, 45.0 + abs(candidate.early_flow) * 100.0 + min(candidate.volume_ratio, 2.0) * 8.0)
-    strength = "قوی" if score >= 65 else "متوسط"
-    signal = StrategySignal(
-        symbol_id=symbol_id,
-        okx_symbol=okx_symbol,
-        toobit_symbol=toobit_symbol,
-        side=candidate.side,
-        entry=candidate.start_price,
-        strength=strength,
-        strength_score=round(score, 2),
-        compression_score=round(candidate.compression_score * 100.0, 2),
-        flow_bias=round(candidate.early_flow, 4),
-        absorption_score=0.0,
-        reason=f"پروکسی تاریخی واچ: {candidate.trigger}",
-    )
-    return StrategyAnalysisResult(signal, "accepted", details)
+def _trim_append(xs:list[float],v:float,limit:int)->None:
+    xs.append(float(v));
+    if len(xs)>limit: del xs[:-limit]
 
 
-def analyze_symbol(symbol_id: str, okx_symbol: str, toobit_symbol: str, candles: list[dict[str, float]]) -> StrategySignal | None:
-    return analyze_symbol_detailed(symbol_id, okx_symbol, toobit_symbol, candles).signal
+def evaluate_watch(state:WatchState,snapshot:dict[str,Any],now:float|None=None)->WatchEvaluation:
+    """واچ فقط revalidation اجرای زنده است؛ حق تغییر جهت کندلی را ندارد."""
+    now=now or time.time(); age=now-state.created_at
+    price=float(snapshot.get("mid_price") or snapshot.get("last_price") or 0.0)
+    if price<=0: return WatchEvaluation("KEEP","قیمت معتبر دریافت نشد",state.side,None,{"سن_واچ":round(age,1)})
+    newest=int(float(snapshot.get("newest_trade_ts") or 0.0))
+    if newest and newest<=state.last_snapshot_trade_ts:
+        return WatchEvaluation("KEEP","نمونه خرد تازه نرسیده",state.side,None,{"سن_واچ":round(age,1)})
+    state.last_snapshot_trade_ts=newest
+    trade=float(snapshot.get("trade_imbalance") or 0.0); book=float(snapshot.get("book_imbalance") or 0.0)
+    accel=float(snapshot.get("intensity_acceleration") or 0.0)
+    response=(price-state.start_price)/max(state.start_price,1e-9)*100.0
+    aligned_trade=trade if state.side=="LONG" else -trade
+    aligned_book=book if state.side=="LONG" else -book
+    aligned_response=response if state.side=="LONG" else -response
+    _trim_append(state.trade_history,aligned_trade,config.WATCH_DIRECTION_HISTORY)
+    _trim_append(state.book_history,aligned_book,config.WATCH_DIRECTION_HISTORY)
+    _trim_append(state.response_history,aligned_response,config.WATCH_DIRECTION_HISTORY)
+    _trim_append(state.intensity_history,accel,config.WATCH_DIRECTION_HISTORY)
+    metrics={"سن_واچ_ثانیه":round(age,1),"فشار_همجهت":round(aligned_trade,4),"دفتر_همجهت":round(aligned_book,4),
+             "پاسخ_قیمت":round(aligned_response,4),"شتاب":round(accel,4)}
+    if age>config.WATCH_TTL_SECONDS: return WatchEvaluation("REMOVE","واچ منقضی شد",state.side,None,metrics)
+    if abs(response)>state.late_limit_pct: return WatchEvaluation("REMOVE","قیمت پیش از اجرا بیش‌ازحد جابه‌جا شد",state.side,None,metrics)
+    contradiction=aligned_trade<-config.WATCH_TRADE_IMBALANCE_MIN and aligned_response<-config.WATCH_MAX_ADVERSE_RESPONSE_PCT
+    state.bad_count=state.bad_count+1 if contradiction else max(0,state.bad_count-1)
+    if state.bad_count>=config.WATCH_BAD_OBSERVATIONS_TO_REMOVE:
+        return WatchEvaluation("REMOVE","جهت کندلی با جریان و پاسخ زنده باطل شد",state.side,None,metrics)
+    needed=config.WATCH_STRONG_CONFIRMATIONS_REQUIRED if (aligned_trade>=config.WATCH_STRONG_TRADE_IMBALANCE and accel>=config.WATCH_INTENSITY_ACCEL_MIN) else config.WATCH_CONFIRMATIONS_REQUIRED
+    confirm=aligned_trade>=config.WATCH_TRADE_IMBALANCE_MIN and aligned_response>=-config.WATCH_MAX_ADVERSE_RESPONSE_PCT and (aligned_book>=-config.WATCH_STRONG_BOOK_IMBALANCE)
+    state.confirm_count=state.confirm_count+1 if confirm else max(0,state.confirm_count-1)
+    if state.confirm_count<needed:
+        return WatchEvaluation("KEEP",f"تأیید اجرای زنده {state.confirm_count} از {needed}",state.side,None,metrics)
+    scenario=state.details.get("scenario",{}) if isinstance(state.details,dict) else {}
+    score=float(scenario.get("final_score") or 0.0)
+    strength_score=float(scenario.get("strength_score") or 0.0)
+    strength="خیلی قوی" if strength_score>=82 else "قوی" if strength_score>=68 else "متوسط"
+    sig=StrategySignal(state.symbol_id,state.okx_symbol,state.toobit_symbol,state.side,price,strength,strength_score,
+                       state.compression_score,float(scenario.get("flow") or state.early_flow),float(scenario.get("direction_score") or 0.0),
+                       f"سناریوی یکپارچه ۱۵m تأیید و اجرای زنده revalidate شد؛ امتیاز نهایی {score:.1f}",
+                       {"timeframe":"15m","scenario":scenario,"watch_age_seconds":round(age,2),"side_changes":state.side_changes,
+                        "pre_entry_displacement_pct":abs(response),"late_limit_pct":state.late_limit_pct,
+                        "entry_revalidation":{"trade":aligned_trade,"book":aligned_book,"response":aligned_response,"accel":accel}})
+    return WatchEvaluation("SIGNAL","تأیید اجرای زنده کامل شد",state.side,sig,metrics)
+
+
+def analyze_symbol_detailed(symbol_id:str,okx_symbol:str,toobit_symbol:str,candles:list[dict[str,float]])->StrategyAnalysisResult:
+    candidate,reason,details=detect_watch_candidate(candles)
+    if not candidate: return StrategyAnalysisResult(None,reason,details)
+    scenario=candidate.details.get("scenario",{})
+    sig=StrategySignal(symbol_id,okx_symbol,toobit_symbol,candidate.side,candidate.start_price,
+                       "خیلی قوی" if float(scenario.get("strength_score",0))>=82 else "قوی" if float(scenario.get("strength_score",0))>=68 else "متوسط",
+                       float(scenario.get("strength_score",0)),candidate.compression_score,candidate.early_flow,
+                       float(scenario.get("direction_score",0)),candidate.trigger,{"timeframe":"15m","scenario":scenario})
+    return StrategyAnalysisResult(sig,"",details)
+
+def analyze_symbol(symbol_id:str,okx_symbol:str,toobit_symbol:str,candles:list[dict[str,float]])->StrategySignal|None:
+    return analyze_symbol_detailed(symbol_id,okx_symbol,toobit_symbol,candles).signal

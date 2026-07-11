@@ -7,6 +7,7 @@ import json
 import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -78,7 +79,10 @@ class Storage:
                     stop_primary TEXT DEFAULT '',
                     stop_confidence REAL DEFAULT 0,
                     stop_analysis_json TEXT DEFAULT '{}',
-                    raw_json TEXT DEFAULT '{}'
+                    raw_json TEXT DEFAULT '{}',
+                    result_message_sent INTEGER DEFAULT 0,
+                    result_message_retry_count INTEGER DEFAULT 0,
+                    result_message_last_error TEXT DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS health_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +114,9 @@ class Storage:
                 "stop_primary": "TEXT DEFAULT ''",
                 "stop_confidence": "REAL DEFAULT 0",
                 "stop_analysis_json": "TEXT DEFAULT '{}'",
+                "result_message_sent": "INTEGER DEFAULT 0",
+                "result_message_retry_count": "INTEGER DEFAULT 0",
+                "result_message_last_error": "TEXT DEFAULT ''",
             }
             for name, ddl in migrations.items():
                 if name not in existing:
@@ -122,6 +129,7 @@ class Storage:
                 "leverage": config.LEVERAGE_DEFAULT,
                 "max_positions": config.MAX_POSITIONS_DEFAULT,
                 "profit_today": 0.0,
+                "profit_today_date": datetime.now(timezone.utc).date().isoformat(),
                 "profit_total": 0.0,
                 "stats_reset_at": int(time.time()),
                 "profit_reset_at": int(time.time()),
@@ -183,7 +191,7 @@ class Storage:
             "fee_usdt", "net_pnl", "close_reason", "mfe", "mae", "order_id", "slot_id", "raw_json",
             "is_real", "trade_mode", "trade_usdt", "leverage", "notional_usdt", "estimated_net_profit",
             "estimated_net_loss", "estimated_cost", "net_rr", "stop_primary", "stop_confidence",
-            "stop_analysis_json"
+            "stop_analysis_json", "result_message_sent", "result_message_retry_count", "result_message_last_error"
         }
         parts, vals = [], []
         for k, v in fields.items():
@@ -205,6 +213,42 @@ class Storage:
         with self.connect() as db:
             row = db.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
             return dict(row) if row else None
+
+    def get_pending_result_messages(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM signals WHERE status='closed' AND result_message_sent=0 "
+                "AND result_message_retry_count<10 ORDER BY id ASC LIMIT ?", (int(limit),)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+
+    def close_signal_if_open(self, signal_id: int, **fields: Any) -> bool:
+        """اتمی: فقط سیگنال open/pending را یک بار می‌بندد و از ثبت دوباره سود جلوگیری می‌کند."""
+        allowed = {
+            "closed_at", "exit_price", "gross_pnl", "fee_usdt", "net_pnl", "close_reason",
+            "mfe", "mae", "raw_json", "stop_primary", "stop_confidence",
+            "stop_analysis_json", "result_message_sent", "result_message_retry_count",
+            "result_message_last_error",
+        }
+        parts = ["status='closed'"]
+        vals: list[Any] = []
+        for k, v in fields.items():
+            if k in allowed:
+                parts.append(f"{k}=?")
+                vals.append(v if k not in {"raw_json", "stop_analysis_json"} or isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+        vals.extend([int(signal_id)])
+        with self.connect() as db:
+            cur = db.execute(
+                f"UPDATE signals SET {','.join(parts)} WHERE id=? AND status IN ('open','pending')", vals
+            )
+            return int(cur.rowcount or 0) == 1
+
+    def ensure_profit_today(self) -> None:
+        today = datetime.now(timezone.utc).date().isoformat()
+        if str(self.get("profit_today_date", "")) != today:
+            self.set("profit_today", 0.0)
+            self.set("profit_today_date", today)
 
     def count_real_open(self) -> int:
         with self.connect() as db:
@@ -230,10 +274,12 @@ class Storage:
     def reset_profit(self) -> None:
         # فقط پنل سود/ضرر را صفر می‌کند؛ جزئیات نتایج هر سیگنال دست‌نخورده می‌ماند.
         self.set("profit_today", 0.0)
+        self.set("profit_today_date", datetime.now(timezone.utc).date().isoformat())
         self.set("profit_total", 0.0)
         self.set("profit_reset_at", int(time.time()))
 
     def add_profit(self, amount: float) -> None:
+        self.ensure_profit_today()
         self.set("profit_today", float(self.get("profit_today", 0.0)) + float(amount))
         self.set("profit_total", float(self.get("profit_total", 0.0)) + float(amount))
 

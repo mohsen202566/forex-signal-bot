@@ -1,4 +1,4 @@
-"""نقطه شروع ربات 5M با معماری واچ‌لیست زنده.
+"""نقطه شروع ربات 15M با معماری واچ‌لیست زنده.
 
 پنل‌ها، توبیت، مانیتور و دستورات مستقل از مسیر تحلیل‌اند.
 تلگرام فقط سیگنال نهایی را می‌بیند؛ رویدادهای واچ فقط در لاگ فارسی VPS ثبت می‌شوند.
@@ -89,7 +89,7 @@ class TradingBotApp:
     def send_signal_message(self, signal_data: dict, risk) -> int | None:
         side_icon = "🟢" if signal_data["side"] == "LONG" else "🔴"
         txt = (
-            f"📊 سیگنال 5M\n\n"
+            f"📊 سیگنال 15M\n\n"
             f"#{signal_data.get('id','?')} | {signal_data['symbol_id']}\n"
             f"{side_icon} {signal_data['side']}\n"
             f"قدرت تخمینی: {signal_data['strength']}\n"
@@ -98,7 +98,7 @@ class TradingBotApp:
             f"SL: {risk.sl:.8g}\n"
             f"RR: {risk.rr}\n"
             f"سود خالص تخمینی: {risk.estimated_net_profit:.4f} USDT\n"
-            f"مدل: شکار شروع حرکت + قفل جهت"
+            f"مدل: سناریوی یکپارچه جهت + قدرت + تازگی + ورود + ایمنی"
         )
         return self.telegram.send_message(txt)
 
@@ -197,19 +197,29 @@ class TradingBotApp:
 
     def _check_real_after_70s(self, signal_id: int, sym: SymbolMap) -> None:
         time.sleep(config.ORDER_OPEN_CHECK_SECONDS)
+        current = self.storage.get_signal(signal_id)
+        # مانیتور ممکن است معامله سریع را پیش از ۷۰ ثانیه بسته باشد؛ هرگز نتیجه بسته را زنده نکن.
+        if not current or str(current.get("status")) == "closed" or not int(current.get("is_real") or 0):
+            return
         try:
             opened = self.toobit.check_position_opened(sym.toobit)
             self.health.mark("toobit")
             if opened:
                 logger.info("[ترید واقعی] پوزیشن بعد از ۷۰ ثانیه تأیید شد | شماره=%s | ارز=%s", signal_id, sym.id)
-                self.storage.update_signal(signal_id, status="open", opened_at=int(time.time()))
-            else:
-                logger.warning("[ترید واقعی] پوزیشن باز نشد و اسلات آزاد شد | شماره=%s | ارز=%s", signal_id, sym.id)
-                self.storage.update_signal(signal_id, status="open", is_real=0, trade_mode="virtual", slot_id=None, close_reason="NOT_OPENED_AFTER_70S")
-                self.storage.add_health_event("toobit_position", "warning", "بعد ۷۰ ثانیه پوزیشن باز نبود؛ اسلات آزاد شد", sym.id)
+                self.storage.update_signal(signal_id, status="open", opened_at=int(current.get("opened_at") or time.time()))
+                return
+            # ممکن است پوزیشن خیلی سریع باز و با TP/SL بسته شده باشد؛ قبل از تبدیل به مجازی تاریخچه را بررسی کن.
+            opened_ms = int(current.get("opened_at") or current.get("created_at") or 0) * 1000
+            closed = self.toobit.get_closed_trade_result(sym.toobit, str(current.get("side") or ""), opened_ms)
+            if closed:
+                logger.info("[ترید واقعی] پوزیشن پیش از بررسی ۷۰ ثانیه‌ای بسته شده؛ مانیتور نتیجه را ثبت می‌کند | شماره=%s", signal_id)
+                return
+            logger.warning("[ترید واقعی] هیچ پوزیشن یا سابقه بسته‌شدن قطعی یافت نشد؛ به مجازی تبدیل شد | شماره=%s | ارز=%s", signal_id, sym.id)
+            self.storage.update_signal(signal_id, status="open", is_real=0, trade_mode="virtual", slot_id=None, close_reason="NOT_OPENED_AFTER_70S")
+            self.storage.add_health_event("toobit_position", "warning", "بعد ۷۰ ثانیه نه پوزیشن و نه سابقه بسته‌شدن قطعی یافت شد", sym.id)
         except Exception as exc:
-            logger.warning("[ترید واقعی] بررسی ۷۰ ثانیه‌ای ناموفق بود | شماره=%s | ارز=%s | خطا=%s", signal_id, sym.id, exc)
-            self.storage.update_signal(signal_id, status="open", is_real=0, trade_mode="virtual", slot_id=None, close_reason="POSITION_CHECK_FAILED")
+            # خطای بررسی نباید معامله واقعی احتمالی را به مجازی تبدیل کند؛ مانیتور دور بعد دوباره بررسی می‌کند.
+            logger.warning("[ترید واقعی] بررسی ۷۰ ثانیه‌ای ناموفق بود؛ وضعیت واقعی حفظ شد | شماره=%s | ارز=%s | خطا=%s", signal_id, sym.id, exc)
             self.storage.add_health_event("toobit_position", "warning", f"70s check failed: {exc}", sym.id)
 
     @staticmethod
@@ -264,6 +274,7 @@ class TradingBotApp:
                         late_limit_pct=candidate.late_limit_pct,
                         early_flow=candidate.early_flow,
                         compression_score=candidate.compression_score,
+                        details=dict(candidate.details or {}),
                         last_price=candidate.start_price,
                         last_update=time.time(),
                     )

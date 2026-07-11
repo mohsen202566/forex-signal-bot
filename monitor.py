@@ -232,11 +232,24 @@ class Monitor:
         lines.extend(["", f"یادداشت داده: {analysis.get('data_note','')}"])
         return "\n".join(lines)
 
-    def _send_result(self, sig: dict, reason: str, exit_price: float, net: float, gross: float, fee: float, mfe: float = 0.0, mae: float = 0.0, stop_analysis: dict | None = None):
-        if not self.telegram:
-            return
-        icon = "✅" if reason == "TP" else "❌"
-        title = "TP خورد" if reason == "TP" else "SL خورد"
+    @staticmethod
+    def _result_title(reason: str) -> tuple[str, str]:
+        mapping = {
+            "TP": ("✅", "TP خورد"),
+            "SL": ("❌", "SL خورد"),
+            "TIME_EXIT_PROFIT": ("🟢", "خروج زمانی با سود"),
+            "TIME_EXIT_LOSS": ("🟠", "خروج زمانی با زیان"),
+            "TIME_EXIT_FLAT": ("⚪", "خروج زمانی خنثی"),
+            "EMERGENCY_EXIT": ("🚨", "خروج اضطراری"),
+        }
+        return mapping.get(reason, ("ℹ️", reason))
+
+    def _send_result(self, sig: dict, reason: str, exit_price: float, net: float, gross: float, fee: float,
+                     mfe: float = 0.0, mae: float = 0.0, stop_analysis: dict | None = None) -> bool:
+        if not self.telegram or not bool(getattr(self.telegram, "enabled", True)):
+            # پیام در صف می‌ماند تا وقتی تلگرام فعال شد؛ retry counter بی‌دلیل مصرف نمی‌شود.
+            return False
+        icon, title = self._result_title(reason)
         text = (
             f"{icon} {title}\n\n#{sig['id']} | {sig['symbol_id']} | {sig['side']}\n"
             f"Entry: {float(sig.get('entry_real') or sig['entry']):.8g}\nExit: {exit_price:.8g}\n"
@@ -245,29 +258,78 @@ class Monitor:
         )
         if reason == "SL" and stop_analysis:
             text += self._format_stop_analysis(stop_analysis)
-        self.telegram.send_message(text, reply_to_message_id=sig.get("message_id"))
+        try:
+            message_id = self.telegram.send_message(text, reply_to_message_id=sig.get("message_id"))
+            if message_id:
+                self.storage.update_signal(sig["id"], result_message_sent=1, result_message_last_error="")
+                return True
+            raise RuntimeError("Telegram message id دریافت نشد")
+        except Exception as exc:
+            retries = int(sig.get("result_message_retry_count") or 0) + 1
+            self.storage.update_signal(sig["id"], result_message_sent=0, result_message_retry_count=retries,
+                                       result_message_last_error=str(exc)[:300])
+            self.storage.add_health_event("result_delivery", "warning", f"result send failed: {exc}", sig.get("symbol_id"))
+            return False
+
+    @staticmethod
+    def _merge_raw(sig: dict, result_raw: dict | None) -> dict:
+        base = Monitor._raw(sig)
+        merged = dict(base)
+        merged["toobit_close"] = result_raw or {}
+        return merged
+
+    @staticmethod
+    def _real_close_reason(result: dict, sig: dict, exit_price: float) -> str:
+        raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
+        text = " ".join(str(raw.get(k) or "") for k in (
+            "type", "orderType", "stopOrderType", "triggerType", "closeReason", "remark", "clientOrderId"
+        )).upper()
+        if "TAKE" in text or "TP" in text or "PROFIT" in text:
+            return "TP"
+        if "STOP" in text or "SL" in text or "LOSS" in text:
+            return "SL"
+        tp_distance = abs(exit_price - float(sig["tp"]))
+        sl_distance = abs(exit_price - float(sig["sl"]))
+        tolerance = max(float(sig["entry"]) * 0.0008, 1e-12)
+        if tp_distance <= tolerance and tp_distance < sl_distance:
+            return "TP"
+        if sl_distance <= tolerance and sl_distance < tp_distance:
+            return "SL"
+        return "EXCHANGE_CLOSE"
 
     def check_virtual(self, sig: dict) -> None:
-        # ۱ دقیقه فقط برای تعیین ترتیب برخورد؛ استراتژی همچنان ۵ دقیقه است.
+        # ۱ دقیقه فقط برای تعیین ترتیب برخورد؛ استراتژی اصلی ۱۵ دقیقه است.
         candles = self.okx.get_candles(sig["okx_symbol"], bar="1m", limit=300)
-        reason, exit_price, _ = self.okx.reached_tp_or_sl(candles, sig["side"], float(sig["tp"]), float(sig["sl"]), int(sig["created_at"]) * 1000)
+        created_ms = int(sig["created_at"]) * 1000
+        reason, exit_price, _ = self.okx.reached_tp_or_sl(
+            candles, sig["side"], float(sig["tp"]), float(sig["sl"]), created_ms
+        )
+        timed_out = time.time() - int(sig["created_at"]) > config.VIRTUAL_MONITOR_MAX_MINUTES * 60
         if not reason or exit_price is None:
-            if time.time() - int(sig["created_at"]) > config.VIRTUAL_MONITOR_MAX_MINUTES * 60:
-                self.storage.update_signal(sig["id"], status="closed", closed_at=int(time.time()), close_reason="TIMEOUT")
-            return
+            if not timed_out:
+                return
+            relevant = [c for c in candles if int(c.get("ts") or 0) > created_ms]
+            if not relevant:
+                return
+            exit_price = float(relevant[-1]["close"])
+            signed = self._signed_return(sig["side"], float(sig["entry"]), exit_price)
+            reason = "TIME_EXIT_PROFIT" if signed > 0.01 else "TIME_EXIT_LOSS" if signed < -0.01 else "TIME_EXIT_FLAT"
         gross, fee, net = self._pnl(sig, float(sig["entry"]), float(exit_price))
-        mfe, mae = self.okx.max_favorable_adverse(candles, sig["side"], float(sig["entry"]), int(sig["created_at"]) * 1000)
+        mfe, mae = self.okx.max_favorable_adverse(candles, sig["side"], float(sig["entry"]), created_ms)
         stop_analysis = self._diagnose_stop(sig, candles, float(sig["entry"]), float(exit_price), mfe, mae) if reason == "SL" else None
-        self.storage.update_signal(
-            sig["id"], status="closed", closed_at=int(time.time()), exit_price=exit_price, gross_pnl=gross,
+        closed_now = self.storage.close_signal_if_open(
+            sig["id"], closed_at=int(time.time()), exit_price=exit_price, gross_pnl=gross,
             fee_usdt=fee, net_pnl=net, close_reason=reason, mfe=mfe, mae=mae,
             stop_primary=(stop_analysis or {}).get("primary", ""),
             stop_confidence=float((stop_analysis or {}).get("confidence", 0.0)),
-            stop_analysis_json=stop_analysis or {},
+            stop_analysis_json=stop_analysis or {}, result_message_sent=0,
         )
+        if not closed_now:
+            return
         self.storage.add_profit(net)
         logger.info("[نتیجه عادی] شماره=%s | ارز=%s | نتیجه=%s | خالص=%.4f | خروج=%.8g", sig["id"], sig["symbol_id"], reason, net, exit_price)
-        self._send_result(sig, reason, exit_price, net, gross, fee, mfe, mae, stop_analysis)
+        updated = dict(sig); updated.update({"result_message_retry_count": 0})
+        self._send_result(updated, reason, exit_price, net, gross, fee, mfe, mae, stop_analysis)
 
     def check_real(self, sig: dict) -> None:
         if self.toobit.check_position_opened(sig["toobit_symbol"]):
@@ -279,18 +341,17 @@ class Monitor:
             return
         exit_price = float(result["exit_price"])
         entry = float(sig.get("entry_real") or sig["entry"])
-        gross, estimated_fee, estimated_net = self._pnl(sig, entry, exit_price)
-        real_fee = float(result.get("fee") or 0.0)
+        gross_est, estimated_fee, estimated_net = self._pnl(sig, entry, exit_price)
+        real_fee = abs(float(result.get("fee") or 0.0))
         realized = result.get("realized_pnl")
+        # realizedPnl را خالص فرض نمی‌کنیم: اگر fee جدا آمده، آن را فقط یک بار کم می‌کنیم.
         if isinstance(realized, (int, float)) and math.isfinite(float(realized)):
-            net = float(realized) - real_fee
+            gross = float(realized)
             fee = real_fee
-            gross = net + fee
+            net = gross - fee
         else:
-            fee, net = estimated_fee, estimated_net
-        tp_distance = abs(exit_price - float(sig["tp"]))
-        sl_distance = abs(exit_price - float(sig["sl"]))
-        reason = "TP" if tp_distance <= sl_distance else "SL"
+            gross, fee, net = gross_est, estimated_fee, estimated_net
+        reason = self._real_close_reason(result, sig, exit_price)
         candles: list[dict[str, float]] = []
         mfe = mae = 0.0
         stop_analysis = None
@@ -301,16 +362,34 @@ class Monitor:
                 stop_analysis = self._diagnose_stop(sig, candles, entry, exit_price, mfe, mae)
         except Exception as exc:
             logger.warning("[تحلیل استاپ] دریافت مسیر OKX برای معامله واقعی ناموفق بود | شماره=%s | خطا=%s", sig["id"], exc)
-        self.storage.update_signal(
-            sig["id"], status="closed", closed_at=int(time.time()), exit_price=exit_price, gross_pnl=gross,
-            fee_usdt=fee, net_pnl=net, close_reason=reason, mfe=mfe, mae=mae, raw_json=result.get("raw", {}),
+        closed_now = self.storage.close_signal_if_open(
+            sig["id"], closed_at=int(time.time()), exit_price=exit_price, gross_pnl=gross,
+            fee_usdt=fee, net_pnl=net, close_reason=reason, mfe=mfe, mae=mae,
+            raw_json=self._merge_raw(sig, result.get("raw", {})),
             stop_primary=(stop_analysis or {}).get("primary", ""),
             stop_confidence=float((stop_analysis or {}).get("confidence", 0.0)),
-            stop_analysis_json=stop_analysis or {},
+            stop_analysis_json=stop_analysis or {}, result_message_sent=0,
         )
+        if not closed_now:
+            return
         self.storage.add_profit(net)
         logger.info("[نتیجه واقعی] شماره=%s | ارز=%s | نتیجه=%s | خالص=%.4f | خروج=%.8g", sig["id"], sig["symbol_id"], reason, net, exit_price)
-        self._send_result(sig, reason, exit_price, net, gross, fee, mfe, mae, stop_analysis)
+        updated = dict(sig); updated.update({"result_message_retry_count": 0})
+        self._send_result(updated, reason, exit_price, net, gross, fee, mfe, mae, stop_analysis)
+
+    def retry_pending_results(self) -> None:
+        for sig in self.storage.get_pending_result_messages():
+            try:
+                analysis = sig.get("stop_analysis_json") or {}
+                if isinstance(analysis, str):
+                    try: analysis = json.loads(analysis)
+                    except Exception: analysis = {}
+                self._send_result(sig, str(sig.get("close_reason") or "CLOSED"), float(sig.get("exit_price") or 0.0),
+                                  float(sig.get("net_pnl") or 0.0), float(sig.get("gross_pnl") or 0.0),
+                                  float(sig.get("fee_usdt") or 0.0), float(sig.get("mfe") or 0.0),
+                                  float(sig.get("mae") or 0.0), analysis if isinstance(analysis, dict) else None)
+            except Exception as exc:
+                logger.warning("[ارسال مجدد نتیجه] شماره=%s | خطا=%s", sig.get("id"), exc)
 
     def tick(self) -> None:
         for sig in self.storage.get_open_signals():
@@ -322,3 +401,4 @@ class Monitor:
             except Exception as exc:
                 logger.warning("[مانیتور] خطای سیگنال | شماره=%s | ارز=%s | خطا=%s", sig.get("id"), sig.get("symbol_id"), exc)
                 self.storage.add_health_event("monitor", "warning", f"monitor failed: {exc}", sig.get("symbol_id"))
+        self.retry_pending_results()

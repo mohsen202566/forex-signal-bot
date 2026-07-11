@@ -30,7 +30,7 @@ class ProfileBuilder:
         self.storage = storage
 
     def build_symbol_profile(self, sym: SymbolMap) -> dict[str, float | int]:
-        candles = self.okx.get_history_candles(sym.okx, total_limit=config.PROFILE_LOOKBACK_DAYS * 288)
+        candles = self.okx.get_history_candles(sym.okx, total_limit=config.PROFILE_LOOKBACK_DAYS * 96)
         ranges = [pct_range(c) for c in candles if c.get("close", 0) > 0]
         noise_median = median(ranges) if ranges else 0.0
         noise_p70 = percentile(ranges, config.NOISE_PERCENTILE)
@@ -38,7 +38,7 @@ class ProfileBuilder:
 
         favorable_moves: list[float] = []
         # شبیه‌سازی سبک سیگنال‌های گذشته با همین روش اصلی.
-        horizon = 6  # ۳۰ دقیقه بعد از سیگنال
+        horizon = 16  # چهار ساعت بعد از سیگنال ۱۵ دقیقه‌ای
         for i in range(80, max(80, len(candles) - horizon)):
             window = candles[max(0, i - 100) : i + 1]
             sig = analyze_symbol(sym.id, sym.okx, sym.toobit, window)

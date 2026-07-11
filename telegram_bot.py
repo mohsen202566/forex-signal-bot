@@ -30,7 +30,11 @@ class TelegramBot:
             return None
         url = f"https://api.telegram.org/bot{self.token}/{method}"
         r = self.session.post(url, json=payload, timeout=8)
-        return r.json()
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, dict) and data.get("ok") is False:
+            raise RuntimeError(str(data.get("description") or data))
+        return data
 
     def send_message(self, text: str, reply_to_message_id: int | None = None) -> int | None:
         if not self.enabled:
@@ -54,6 +58,11 @@ class TelegramBot:
             for upd in res.get("result", []):
                 self.offset = max(self.offset, int(upd.get("update_id", 0)))
                 msg = upd.get("message") or {}
+                chat = msg.get("chat") or {}
+                incoming_chat_id = str(chat.get("id") or "")
+                if incoming_chat_id != str(self.chat_id):
+                    self.storage.add_health_event("telegram_security", "warning", "دستور از chat_id غیرمجاز نادیده گرفته شد")
+                    continue
                 text = str(msg.get("text") or "").strip()
                 if text:
                     self.handle_command(text)
@@ -123,6 +132,7 @@ class TelegramBot:
         return f"{sec // 60} دقیقه قبل"
 
     def panel_trade(self) -> str:
+        self.storage.ensure_profit_today()
         trading = "✅ روشن" if self.storage.get("trading_enabled", False) else "⛔ خاموش"
         auto = "✅ فعال" if self.storage.get("auto_signal_enabled", True) else "⛔ غیرفعال"
         max_pos = int(self.storage.get("max_positions", config.MAX_POSITIONS_DEFAULT))
@@ -163,7 +173,7 @@ class TelegramBot:
         wr = (s["tp"] / closed * 100.0) if closed else 0.0
         return (
             "📊 پنل آمار\n\n"
-            f"تعداد سیگنال صادر شده: {s['signals']}\n"
+            f"تعداد سیگنال ۱۵ دقیقه‌ای صادر شده: {s['signals']}\n"
             f"باز: {s['open']}\n"
             f"TP خورده: {s['tp']}\n"
             f"SL خورده: {s['sl']}\n"
