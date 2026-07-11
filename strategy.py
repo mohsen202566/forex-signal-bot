@@ -149,10 +149,10 @@ def _swing_points(candles: list[dict[str,float]], atrs: list[float]) -> tuple[li
         h=float(candles[i]["high"]); l=float(candles[i]["low"])
         if h>float(candles[i-1]["high"]) and h>float(candles[i-2]["high"]) and h>=float(candles[i+1]["high"]) and h>=float(candles[i+2]["high"]):
             follow=min(float(x["low"]) for x in candles[i+1:min(len(candles),i+6)])
-            if h-follow >= max(h*0.003, atrs[i]*float(config.SWING_VALIDATION_ATR)): highs.append((i,h))
+            if h-follow >= max(h*float(config.SWING_MIN_PCT)/100.0, atrs[i]*float(config.SWING_VALIDATION_ATR)): highs.append((i,h))
         if l<float(candles[i-1]["low"]) and l<float(candles[i-2]["low"]) and l<=float(candles[i+1]["low"]) and l<=float(candles[i+2]["low"]):
             follow=max(float(x["high"]) for x in candles[i+1:min(len(candles),i+6)])
-            if follow-l >= max(l*0.003, atrs[i]*float(config.SWING_VALIDATION_ATR)): lows.append((i,l))
+            if follow-l >= max(l*float(config.SWING_MIN_PCT)/100.0, atrs[i]*float(config.SWING_VALIDATION_ATR)): lows.append((i,l))
     return highs,lows
 
 
@@ -200,15 +200,39 @@ def _build_scenario(candles: list[dict[str,float]], side: str) -> dict[str,Any]:
     delta,bull_share,eff=_pressure(candles,config.PRESSURE_LOOKBACK)
     sign=1 if side=="LONG" else -1
 
-    structure=0.0; structural="MIXED"
+    # ساختار در سه سطح سنجیده می‌شود: تأییدشده، انتقالی و نامشخص.
+    # نسخه قبلی فقط وقتی جهت را معتبر می‌دانست که هم دو سقف و هم دو کف تأییدشده
+    # موجود باشند؛ در بازار واقعی این شرط اغلب ساختار را MIXED نگه می‌داشت و واچ را خفه می‌کرد.
+    structure=0.0; structural="UNRESOLVED"
+    hh=hl=lh=ll=False
+    if len(last_h)>=2:
+        hh=last_h[-1][1]>last_h[-2][1]
+        lh=last_h[-1][1]<last_h[-2][1]
+    if len(last_l)>=2:
+        hl=last_l[-1][1]>last_l[-2][1]
+        ll=last_l[-1][1]<last_l[-2][1]
+
     if len(last_h)>=2 and len(last_l)>=2:
-        hh=last_h[-1][1]>last_h[-2][1]; hl=last_l[-1][1]>last_l[-2][1]
-        lh=last_h[-1][1]<last_h[-2][1]; ll=last_l[-1][1]<last_l[-2][1]
         if hh and hl: structural="LONG"
         elif lh and ll: structural="SHORT"
         elif (hh and ll) or (lh and hl): structural="MIXED"
-        if side=="LONG": structure=45.0 if structural=="LONG" else (25.0 if hh or hl else 5.0)
-        else: structure=45.0 if structural=="SHORT" else (25.0 if lh or ll else 5.0)
+    elif hh or hl:
+        structural="LONG_TRANSITION"
+    elif lh or ll:
+        structural="SHORT_TRANSITION"
+
+    if side=="LONG":
+        if structural=="LONG": structure=45.0
+        elif structural=="LONG_TRANSITION": structure=34.0
+        elif structural=="UNRESOLVED" and (hh or hl): structure=28.0
+        elif structural=="MIXED" and hh and not ll: structure=22.0
+        else: structure=6.0
+    else:
+        if structural=="SHORT": structure=45.0
+        elif structural=="SHORT_TRANSITION": structure=34.0
+        elif structural=="UNRESOLVED" and (lh or ll): structure=28.0
+        elif structural=="MIXED" and ll and not hh: structure=22.0
+        else: structure=6.0
 
     level=(last_h[-1][1] if side=="LONG" and last_h else last_l[-1][1] if side=="SHORT" and last_l else price)
     buffer=max(price*0.0005, atr*float(config.BREAK_BUFFER_ATR))
@@ -242,9 +266,22 @@ def _build_scenario(candles: list[dict[str,float]], side: str) -> dict[str,Any]:
     efficiency_score=min(100.0,max(0.0,eff*125))
     strength=0.25*impulse+0.30*acceptance_score+0.25*persistence+0.20*efficiency_score
 
-    # تازگی از مبدأ آخرین swing مخالف
-    origin_idx=(last_l[-1][0] if side=="LONG" and last_l else last_h[-1][0] if side=="SHORT" and last_h else len(candles)-2)
-    origin_price=(last_l[-1][1] if side=="LONG" and last_l else last_h[-1][1] if side=="SHORT" and last_h else prev_close)
+    # تازگی باید سن «موج فعال» را بسنجد، نه سن آخرین Swing بزرگ که ممکن است ده‌ها کندل قدیمی باشد.
+    structural_origin_idx=(last_l[-1][0] if side=="LONG" and last_l else last_h[-1][0] if side=="SHORT" and last_h else len(candles)-2)
+    structural_origin_price=(last_l[-1][1] if side=="LONG" and last_l else last_h[-1][1] if side=="SHORT" and last_h else prev_close)
+    active_window=max(3,int(config.MAX_MOVEMENT_AGE_BARS)+2)
+    active_start=max(0,len(candles)-active_window)
+    active_slice=candles[active_start:-1] or candles[-2:-1]
+    if side=="LONG":
+        rel=min(range(len(active_slice)),key=lambda j:float(active_slice[j]["low"]))
+        impulse_origin_idx=active_start+rel; impulse_origin_price=float(active_slice[rel]["low"])
+    else:
+        rel=max(range(len(active_slice)),key=lambda j:float(active_slice[j]["high"]))
+        impulse_origin_idx=active_start+rel; impulse_origin_price=float(active_slice[rel]["high"])
+    # در نبود فشار همسو، مبدأ ساختاری محافظه‌کارانه‌تر است؛ با شروع فشار جدید، مبدأ موج فعال استفاده می‌شود.
+    use_active_origin=(pressure_aligned>=0.08 or close_break or accepted)
+    origin_idx=impulse_origin_idx if use_active_origin else structural_origin_idx
+    origin_price=impulse_origin_price if use_active_origin else structural_origin_price
     age=max(0,len(candles)-1-origin_idx)
     distance=abs(price-origin_price)/atr
     time_score=max(0.0,100-age*16)
@@ -269,11 +306,25 @@ def _build_scenario(candles: list[dict[str,float]], side: str) -> dict[str,Any]:
     entry_type="DIRECT_BREAKOUT" if direct else "FIRST_PULLBACK" if pullback else "WAIT"
     location=max(0.0,min(100.0,100-distance*55))
     trigger_score=90.0 if direct or pullback else 35.0
-    invalidation_distance=abs(price-origin_price)/price*100.0
+    # ابطال ورود باید به ساختار محلی همان ورود متصل باشد، نه لزوماً مبدأ کامل موج.
+    # استفاده از origin قدیمی تقریباً همه ستاپ‌ها را با SL ثابت ناسازگار نشان می‌داد.
+    recent_window=candles[-4:]
+    if side=="LONG":
+        micro_invalidation=min(float(c["low"]) for c in recent_window)
+        breakout_invalidation=level-buffer
+        invalidation_level=breakout_invalidation if direct else micro_invalidation if pullback else max(micro_invalidation, breakout_invalidation)
+        invalidation_distance=max(0.0,(price-invalidation_level)/price*100.0)
+    else:
+        micro_invalidation=max(float(c["high"]) for c in recent_window)
+        breakout_invalidation=level+buffer
+        invalidation_level=breakout_invalidation if direct else micro_invalidation if pullback else min(micro_invalidation, breakout_invalidation)
+        invalidation_distance=max(0.0,(invalidation_level-price)/price*100.0)
     invalidation=90.0 if invalidation_distance<=config.FIXED_SL_PCT_15M else max(0.0,70-(invalidation_distance-config.FIXED_SL_PCT_15M)*100)
     atr_pct=atr/price*100.0
-    bracket_ok=(config.MIN_FIXED_BRACKET_ATR_PCT<=atr_pct<=config.MAX_FIXED_BRACKET_ATR_PCT and obstacle>=config.MIN_CLEAR_PATH_PCT)
-    execution=85.0 if bracket_ok else 30.0
+    atr_eligible=config.MIN_FIXED_BRACKET_ATR_PCT<=atr_pct<=config.MAX_FIXED_BRACKET_ATR_PCT
+    obstacle_ok=obstacle>=config.MIN_CLEAR_PATH_PCT
+    bracket_ok=atr_eligible and obstacle_ok
+    execution=85.0 if bracket_ok else 50.0 if atr_eligible else 25.0
     entry_score=0.30*location+0.30*trigger_score+0.25*invalidation+0.15*execution
 
     # ایمنی محیط مستقل: کارایی، نویز سایه، رنج و براکت
@@ -285,7 +336,35 @@ def _build_scenario(candles: list[dict[str,float]], side: str) -> dict[str,Any]:
     wick_noise=_safe_median(wick_ratios,0.5)
     safety=max(0.0,min(100.0,45+eff*45-wick_noise*20+(15 if bracket_ok else -20)))
 
-    direction_integrity=structural==side and not (wind=="HEADWIND" and not accepted)
+    # یکپارچگی جهت یک شرط باینری شکننده نیست. سه مسیر معتبر داریم:
+    # 1) ساختار تأییدشده؛ 2) ساختار انتقالی همسو؛ 3) شکست/فشار نوظهور با زمینه همسو.
+    confirmed_structure=(structural==side)
+    transition_structure=(structural==f"{side}_TRANSITION")
+    opposite_structure=(structural in {"LONG","SHORT"} and structural!=side)
+    context_aligned=ema_aligned and wind!="HEADWIND" and pressure_aligned>=0.10 and eff>=0.10
+    emerging_direction=close_break and wind!="HEADWIND" and pressure_aligned>=0.12 and (ema_aligned or accepted)
+    reversal_accepted=opposite_structure and accepted and pressure_aligned>=0.20 and ema_aligned
+
+    if confirmed_structure:
+        integrity_state="CONFIRMED"
+        direction_integrity=True
+    elif transition_structure and context_aligned:
+        integrity_state="TRANSITION_CONFIRMED"
+        direction_integrity=True
+    elif emerging_direction or reversal_accepted:
+        integrity_state="EMERGING_ACCEPTED"
+        direction_integrity=True
+    elif structural in {"UNRESOLVED","MIXED"} and context_aligned and direction_score>=config.WATCH_DIRECTION_MIN_SCORE:
+        integrity_state="CONTEXT_ALIGNED"
+        direction_integrity=True
+    else:
+        integrity_state="CONFLICT" if opposite_structure else "INSUFFICIENT_EVIDENCE"
+        direction_integrity=False
+
+    # Headwind فقط در صورت برگشت پذیرفته‌شده مجاز است؛ نه اینکه تمام ستاپ‌های انتقالی را کورکورانه حذف کند.
+    if wind=="HEADWIND" and not reversal_accepted:
+        direction_integrity=False
+        integrity_state="HTF_HEADWIND"
     trigger_valid=entry_type!="WAIT"
     invalidation_ok=invalidation_distance<=config.FIXED_SL_PCT_15M*1.05
     feasibility=bracket_ok
@@ -294,44 +373,77 @@ def _build_scenario(candles: list[dict[str,float]], side: str) -> dict[str,Any]:
     if wind=="HEADWIND": coherence-=0.10
     if pressure_aligned<0.15: coherence-=0.07
     coherence=max(0.70,coherence)
+    # امتیاز ستاپ عمداً Entry Trigger را شامل نمی‌کند؛ تریگر در WATCH زنده تکمیل می‌شود.
+    setup_base=0.30*direction_score+0.25*strength+0.25*freshness+0.20*safety
+    setup_score=setup_base*coherence
     base=0.25*direction_score+0.20*strength+0.20*freshness+0.25*entry_score+0.10*safety
     final=base*coherence
 
     return {
         "side":side,"structural_direction":structural,"direction_score":round(direction_score,2),"strength_score":round(strength,2),
         "freshness_score":round(freshness,2),"entry_score":round(entry_score,2),"safety_score":round(safety,2),
-        "final_score":round(final,2),"coherence":round(coherence,3),"accepted":accepted,"close_break":close_break,
-        "entry_type":entry_type,"direction_integrity":direction_integrity,"trigger_valid":trigger_valid,
+        "setup_score":round(setup_score,2),"final_score":round(final,2),"coherence":round(coherence,3),"accepted":accepted,"close_break":close_break,
+        "entry_type":entry_type,"direction_integrity":direction_integrity,"direction_integrity_state":integrity_state,
+        "trigger_valid":trigger_valid,
         "invalidation_ok":invalidation_ok,"feasibility":feasibility,"obstacle_pct":round(obstacle,4),
+        "obstacle_ok":obstacle_ok,"atr_eligible":atr_eligible,"invalidation_level":round(invalidation_level,10),
+        "invalidation_distance_pct":round(invalidation_distance,4),
         "atr_pct":round(atr_pct,4),"age_bars":age,"distance_atr":round(distance,4),"one_hour_wind":wind,
-        "origin_price":origin_price,"breakout_level":level,"flow":round(delta,4),"efficiency":round(eff,4),
+        "origin_price":origin_price,"structural_origin_price":structural_origin_price,"impulse_origin_price":impulse_origin_price,
+        "origin_mode":"ACTIVE" if use_active_origin else "STRUCTURAL","breakout_level":level,"flow":round(delta,4),"efficiency":round(eff,4),
+        "structure_flags":{"hh":hh,"hl":hl,"lh":lh,"ll":ll},
         "bracket_ok":bracket_ok,
     }
 
 
 def detect_watch_candidate(candles: list[dict[str,float]]) -> tuple[WatchCandidate|None,str,dict[str,float|str]]:
+    """ستاپ کندلی را برای ورود به WATCH انتخاب می‌کند.
+
+    نکته معماری: WATCH مرحله قبل از تریگر ورود است. بنابراین نبود تریگر کندلی
+    نباید ستاپ را حذف کند؛ تریگر و اجرای نهایی در evaluate_watch با داده زنده
+    دوباره اعتبارسنجی می‌شود.
+    """
     closed=_closed(candles)
     if len(closed)<80:
         return None,"داده کندلی بسته‌شده کافی نیست",{"تعداد_کندل":len(closed)}
     long_s=_build_scenario(closed,"LONG"); short_s=_build_scenario(closed,"SHORT")
-    winner=long_s if long_s["final_score"]>=short_s["final_score"] else short_s
+    winner=long_s if long_s["setup_score"]>=short_s["setup_score"] else short_s
     loser=short_s if winner is long_s else long_s
-    edge=winner["final_score"]-loser["final_score"]
+    edge=winner["setup_score"]-loser["setup_score"]
     details={
-        "امتیاز_لانگ":long_s["final_score"],"امتیاز_شورت":short_s["final_score"],"اختلاف":round(edge,2),
-        "جهت":winner["direction_score"],"قدرت":winner["strength_score"],"تازگی":winner["freshness_score"],
-        "ورود":winner["entry_score"],"ایمنی":winner["safety_score"],"نوع_ورود":winner["entry_type"],
-        "فاصله_مانع":winner["obstacle_pct"],"ATR_درصد":winner["atr_pct"],
+        "ساختار":winner["structural_direction"],"وضعیت_یکپارچگی":winner.get("direction_integrity_state","نامشخص"),
+        "جهت":winner["direction_score"],"فشار":winner["flow"],"کارایی":winner["efficiency"],
+        "باد_یک‌ساعته":winner["one_hour_wind"],"امتیاز_ستاپ":winner["setup_score"],"اختلاف":round(edge,2),
+        "امتیاز_لانگ":long_s["setup_score"],"امتیاز_شورت":short_s["setup_score"],
+        "قدرت":winner["strength_score"],"تازگی":winner["freshness_score"],"ورود":winner["entry_score"],
+        "ایمنی":winner["safety_score"],"نوع_ورود":winner["entry_type"],"مبدأ":winner.get("origin_mode"),
+        "فاصله_مانع":winner["obstacle_pct"],"ATR_درصد":winner["atr_pct"],"فاصله_ابطال":winner["invalidation_distance_pct"],
+        "امتیاز_نهایی_فعلی":winner["final_score"],
     }
-    if not winner["direction_integrity"]: return None,"یکپارچگی جهت معتبر نبود",details
-    if winner["final_score"]<config.SCENARIO_MIN_SCORE or edge<config.SCENARIO_MIN_EDGE:
-        return None,"سناریوی برنده امتیاز یا اختلاف کافی نداشت",details
-    if not winner["trigger_valid"]: return None,"جهت و حرکت معتبرند اما تریگر ورود هنوز کامل نیست",details
-    if not winner["invalidation_ok"]: return None,"استاپ ثابت قبل از ابطال طبیعی قرار می‌گیرد",details
-    if not winner["feasibility"]: return None,"براکت ثابت با نوسان یا مانع پیش رو سازگار نیست",details
+    if not winner["direction_integrity"]:
+        state=winner.get("direction_integrity_state","INSUFFICIENT_EVIDENCE")
+        reason_map={
+            "HTF_HEADWIND":"ساختار کوتاه‌مدت با روند سالم یک‌ساعته در تضاد است",
+            "CONFLICT":"ساختار تأییدشده در جهت مخالف سناریوی برنده است",
+            "INSUFFICIENT_EVIDENCE":"شواهد ساختار، فشار و زمینه هنوز برای قفل جهت هماهنگ نشده‌اند",
+        }
+        return None,reason_map.get(state,"یکپارچگی جهت معتبر نبود"),details
+    if winner["direction_score"]<config.WATCH_DIRECTION_MIN_SCORE:
+        return None,"جهت هنوز برای ورود به واچ به‌اندازه کافی روشن نیست",details
+    if winner["strength_score"]<config.WATCH_STRENGTH_MIN_SCORE:
+        return None,"قدرت حرکت برای ورود به واچ کافی نیست",details
+    if winner["freshness_score"]<config.WATCH_FRESHNESS_MIN_SCORE:
+        return None,"حرکت برای ورود به واچ بیش‌ازحد مصرف شده است",details
+    if winner["setup_score"]<config.WATCH_SETUP_MIN_SCORE or edge<config.WATCH_SETUP_MIN_EDGE:
+        return None,"ستاپ برنده یا برتری آن برای واچ کافی نیست",details
+    # ATR نامناسب از ابتدا قابل اصلاح نیست؛ مانع و ابطال در لحظه اجرای نهایی هم بازبینی می‌شوند.
+    if not winner["atr_eligible"]:
+        return None,"نوسان بازار با براکت ثابت سازگار نیست",details
     current=float(closed[-1]["close"])
     late=max(config.WATCH_LATE_MIN_PCT,min(config.WATCH_LATE_MAX_PCT,config.FIXED_TP_PCT_15M*config.WATCH_LATE_EXPECTED_FRACTION))
-    return WatchCandidate(winner["side"],f"سناریوی یکپارچه {winner['entry_type']}",current,winner["flow"],
+    trigger_text=(f"سناریوی یکپارچه {winner['entry_type']}" if winner["trigger_valid"]
+                  else "ستاپ معتبر؛ انتظار تریگر اجرای زنده")
+    return WatchCandidate(winner["side"],trigger_text,current,winner["flow"],
                           max(0.0,min(1.0,1-winner["efficiency"])),1.0,1.0,config.FIXED_TP_PCT_15M,late,
                           {**details,"scenario":winner}),"ورود به واچ اجرای زنده",details
 
@@ -374,7 +486,22 @@ def evaluate_watch(state:WatchState,snapshot:dict[str,Any],now:float|None=None)-
     if state.confirm_count<needed:
         return WatchEvaluation("KEEP",f"تأیید اجرای زنده {state.confirm_count} از {needed}",state.side,None,metrics)
     scenario=state.details.get("scenario",{}) if isinstance(state.details,dict) else {}
-    score=float(scenario.get("final_score") or 0.0)
+    setup_score=float(scenario.get("setup_score") or 0.0)
+    if setup_score<float(config.SIGNAL_SETUP_MIN_SCORE):
+        return WatchEvaluation("REMOVE","کیفیت ستاپ در بازبینی نهایی کافی نبود",state.side,None,{**metrics,"امتیاز_ستاپ":round(setup_score,2)})
+    invalidation_level=float(scenario.get("invalidation_level") or 0.0)
+    if state.side=="LONG":
+        current_invalidation=max(0.0,(price-invalidation_level)/price*100.0) if invalidation_level>0 else 999.0
+    else:
+        current_invalidation=max(0.0,(invalidation_level-price)/price*100.0) if invalidation_level>0 else 999.0
+    if current_invalidation>float(config.FIXED_SL_PCT_15M)*1.05:
+        return WatchEvaluation("REMOVE","استاپ ثابت با ابطال محلی در قیمت اجرای فعلی سازگار نیست",state.side,None,
+                               {**metrics,"فاصله_ابطال_فعلی":round(current_invalidation,4)})
+    remaining_obstacle=float(scenario.get("obstacle_pct") or 0.0)-max(0.0,aligned_response)
+    if not bool(scenario.get("atr_eligible",False)) or remaining_obstacle<float(config.MIN_CLEAR_PATH_PCT):
+        return WatchEvaluation("REMOVE","مسیر باقی‌مانده تا TP یا نوسان براکت در قیمت اجرای فعلی معتبر نیست",state.side,None,
+                               {**metrics,"فضای_باقی‌مانده":round(remaining_obstacle,4)})
+    score=float(scenario.get("final_score") or setup_score)
     strength_score=float(scenario.get("strength_score") or 0.0)
     strength="خیلی قوی" if strength_score>=82 else "قوی" if strength_score>=68 else "متوسط"
     sig=StrategySignal(state.symbol_id,state.okx_symbol,state.toobit_symbol,state.side,price,strength,strength_score,
