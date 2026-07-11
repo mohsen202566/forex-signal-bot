@@ -175,14 +175,19 @@ def _pressure(candles: list[dict[str,float]], lookback: int) -> tuple[float,floa
     return delta,bull/max(bull+bear,1e-9),efficiency
 
 
-def _obstacle_distance(candles: list[dict[str,float]], side: str, price: float) -> float:
-    # فقط سطوحی که تا همان لحظه قابل مشاهده‌اند.
-    recent=candles[-80:-1]
-    if side=="LONG":
-        levels=sorted({float(c["high"]) for c in recent if float(c["high"])>price})
-        return ((levels[0]-price)/price*100.0) if levels else 99.0
-    levels=sorted({float(c["low"]) for c in recent if float(c["low"])<price}, reverse=True)
-    return ((price-levels[0])/price*100.0) if levels else 99.0
+def _obstacle_distance(
+    highs: list[tuple[int, float]], lows: list[tuple[int, float]], side: str, price: float
+) -> float:
+    """فاصله تا نزدیک‌ترین مانع ساختاری تأییدشده، نه هر High/Low تصادفی کندل.
+
+    استفاده از تمام سقف‌ها و کف‌های ۸۰ کندل تقریباً همیشه یک مانع بسیار نزدیک
+    می‌ساخت و براکت ۰.۹٪ را به‌اشتباه نامعتبر می‌کرد.
+    """
+    if side == "LONG":
+        levels = sorted({float(level) for _, level in highs if float(level) > price})
+        return ((levels[0] - price) / price * 100.0) if levels else 99.0
+    levels = sorted({float(level) for _, level in lows if float(level) < price}, reverse=True)
+    return ((price - levels[0]) / price * 100.0) if levels else 99.0
 
 
 def _build_scenario(candles: list[dict[str,float]], side: str) -> dict[str,Any]:
@@ -245,7 +250,7 @@ def _build_scenario(candles: list[dict[str,float]], side: str) -> dict[str,Any]:
     time_score=max(0.0,100-age*16)
     dist_score=max(0.0,100-distance*58)
     structural_score=max(0.0,100-max(0,age-1)*13)
-    obstacle=_obstacle_distance(candles,side,price)
+    obstacle=_obstacle_distance(highs,lows,side,price)
     opportunity_score=min(100.0,max(0.0,obstacle/max(config.MIN_CLEAR_PATH_PCT,1e-9)*75))
     freshness=0.20*time_score+0.25*dist_score+0.25*structural_score+0.30*opportunity_score
 

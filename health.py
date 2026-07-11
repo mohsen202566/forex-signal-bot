@@ -56,14 +56,15 @@ class HealthManager:
             short_error = (toobit_error[:110] + "...") if len(toobit_error) > 110 else toobit_error
             toobit_line = f"❌ قطع/خطا | {short_error or 'دیتای موفق ثبت نشده'}"
         lines = [
-            "🩺 سلامت ربات 5M",
+            "🩺 سلامت ربات 15M",
             "",
             f"وضعیت کلی: {status}",
             "",
             f"OKX Data: آخرین موفقیت {self.age(self.last_okx_ts)}",
             f"Toobit Trade: {toobit_line}",
-            f"Signal Engine: آخرین تحلیل {self.age(self.last_signal_loop_ts)}",
-            f"Monitoring: آخرین چک {self.age(self.last_monitor_loop_ts)}",
+            f"Market Scan: آخرین دور {self.age(int(self.storage.get('scan_last_ts', 0) or 0))}",
+            f"Signal Engine: آخرین تحلیل {self.age(self.last_signal_loop_ts or int(self.storage.get('signal_engine_last_ts', 0) or 0))}",
+            f"Monitoring: آخرین چک {self.age(self.last_monitor_loop_ts or int(self.storage.get('monitor_last_ts', 0) or 0))}",
             "",
             f"ارزهای blacklist موقت: {len(black)}",
         ]

@@ -84,7 +84,13 @@ class TelegramBot:
                 self.send_message("✅ ترید واقعی فعال شد.")
             elif t == "ترید خاموش":
                 self.storage.set("trading_enabled", False)
-                self.send_message("⛔ ترید واقعی خاموش شد. سیگنال‌ها عادی مانیتور می‌شوند.")
+                self.send_message("⛔ ترید واقعی خاموش شد. سیگنال‌ها به‌صورت مجازی صادر و مانیتور می‌شوند.")
+            elif t in ("اتو سیگنال فعال", "سیگنال فعال"):
+                self.storage.set("auto_signal_enabled", True)
+                self.send_message("✅ اتو سیگنال فعال شد.")
+            elif t in ("اتو سیگنال خاموش", "سیگنال خاموش"):
+                self.storage.set("auto_signal_enabled", False)
+                self.send_message("⛔ اتو سیگنال خاموش شد؛ اسکن ادامه دارد ولی سیگنال جدید صادر نمی‌شود.")
             elif t.startswith("ترید دلار"):
                 self._set_float(t, "trade_usdt", config.TRADE_USDT_MIN, config.TRADE_USDT_MAX, "دلار هر ترید")
             elif t.startswith("ترید لوریج"):
@@ -138,6 +144,15 @@ class TelegramBot:
         max_pos = int(self.storage.get("max_positions", config.MAX_POSITIONS_DEFAULT))
         open_real = self.storage.count_real_open()
         free = max(0, max_pos - open_real)
+        scan_ts = int(self.storage.get("scan_last_ts", 0) or 0)
+        scan_cycle = int(self.storage.get("scan_last_cycle", 0) or 0)
+        scan_symbols = int(self.storage.get("scan_last_symbols", 0) or 0)
+        scan_duration = float(self.storage.get("scan_last_duration", 0.0) or 0.0)
+        watch_active = int(self.storage.get("watch_active_count", self.storage.get("scan_last_watch_active", 0)) or 0)
+        monitor_ts = int(self.storage.get("monitor_last_ts", 0) or 0)
+        open_total = len(self.storage.get_open_signals())
+        scan_status = f"✅ فعال | دور {scan_cycle} | {scan_symbols} ارز | {self._age_text(scan_ts)} | {scan_duration:.2f}s" if scan_ts else "⚠️ هنوز دور موفق ثبت نشده"
+        monitor_status = f"✅ فعال | {self._age_text(monitor_ts)} | معاملات باز {open_total}" if monitor_ts else "⚠️ هنوز چک ثبت نشده"
 
         toobit_connected = bool(self.storage.get("toobit_connected", False))
         toobit_margin = float(self.storage.get("toobit_margin_usdt", 0.0) or 0.0)
@@ -155,6 +170,9 @@ class TelegramBot:
             "⚙️ پنل ترید\n\n"
             f"ترید واقعی: {trading}\n"
             f"اتو سیگنال: {auto}\n"
+            f"اسکن بازار 15M: {scan_status}\n"
+            f"واچ اجرای زنده: {watch_active} ارز\n"
+            f"مانیتورینگ نتایج: {monitor_status}\n"
             f"اتصال توبیت: {toobit_line}\n"
             f"مارجین توبیت: {toobit_margin:.4f} USDT\n"
             f"موجودی آزاد توبیت: {toobit_available:.4f} USDT\n"

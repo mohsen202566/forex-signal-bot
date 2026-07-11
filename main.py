@@ -138,7 +138,9 @@ class TradingBotApp:
 
         trading_on = bool(self.storage.get("trading_enabled", False))
         auto_on = bool(self.storage.get("auto_signal_enabled", True))
-        slot = self.reserve_real_slot() if trading_on and auto_on else None
+        if not auto_on:
+            return False, "اتو سیگنال غیرفعال است"
+        slot = self.reserve_real_slot() if trading_on else None
         is_real = slot is not None
         data = {
             "symbol_id": sig.symbol_id,
@@ -236,31 +238,66 @@ class TradingBotApp:
         with self._slot_lock:
             self._reserved_slots.discard(int(slot))
 
+    @staticmethod
+    def _compact_details(details: dict | None, limit: int = 8) -> str:
+        if not isinstance(details, dict) or not details:
+            return "ندارد"
+        parts: list[str] = []
+        for key, value in list(details.items())[:max(1, int(limit))]:
+            if isinstance(value, float):
+                text = f"{value:.4f}"
+            elif isinstance(value, dict):
+                continue
+            else:
+                text = str(value)
+            parts.append(f"{key}={text}")
+        return " | ".join(parts) if parts else "ندارد"
+
+    def _log_scan_reject(self, symbol_id: str, reason: str, details: dict | None, detail_no: int) -> int:
+        if not bool(getattr(config, "DEBUG_REJECTS", False)):
+            return detail_no
+        limit = max(0, int(getattr(config, "REJECT_DETAIL_LIMIT_PER_CYCLE", 0)))
+        if detail_no >= limit:
+            return detail_no
+        logger.info(
+            "[رد اسکن] ارز=%s | دلیل=%s | جزئیات=%s",
+            symbol_id, reason, self._compact_details(details),
+        )
+        return detail_no + 1
+
     def light_scan_loop(self) -> None:
-        """اسکن ارزان همه ارزها؛ فقط نشانه اولیه را وارد واچ می‌کند."""
+        """اسکن ۱۵ دقیقه‌ای همه ارزها و ثبت علت دقیق رد هر ارز."""
         while not self._stop.is_set():
             cycle_start = time.time()
             self._scan_count += 1
             reasons: Counter[str] = Counter()
+            detail_no = 0
+            error_count = 0
             for sym in SYMBOLS:
                 if self._stop.is_set():
                     break
                 with self._watch_lock:
                     already_watched = sym.id in self._watch
                 if already_watched:
-                    reasons["از قبل در واچ"] += 1
+                    reason = "از قبل در واچ"
+                    reasons[reason] += 1
+                    detail_no = self._log_scan_reject(sym.id, reason, None, detail_no)
                     continue
                 eligible, eligibility_reason = self.signal_eligibility(sym)
                 if not eligible:
                     reasons[eligibility_reason] += 1
+                    detail_no = self._log_scan_reject(sym.id, eligibility_reason, None, detail_no)
                     continue
                 try:
                     candles = self.okx.get_candles(sym.okx)
                     self.health.mark("okx")
                     self.storage.clear_health_events("analysis", sym.id)
                     candidate, reason, details = detect_watch_candidate(candles)
+                    self.health.mark("signal")
+                    self.storage.set("signal_engine_last_ts", int(time.time()))
                     if not candidate:
                         reasons[reason] += 1
+                        detail_no = self._log_scan_reject(sym.id, reason, details, detail_no)
                         continue
                     state = WatchState(
                         symbol_id=sym.id,
@@ -278,31 +315,54 @@ class TradingBotApp:
                         last_price=candidate.start_price,
                         last_update=time.time(),
                     )
+                    added = False
                     with self._watch_lock:
                         if sym.id not in self._watch and not self._has_open_signal(sym.id):
                             self._watch[sym.id] = state
                             self._watch_stats["وارد_واچ"] += 1
+                            added = True
                             logger.info(
                                 "[واچ] ارز وارد واچ‌لیست شد | ارز=%s | جهت اولیه=%s | دلیل=%s | فشار اولیه=%.4f | حد دیرشدن=%.4f%%",
                                 sym.id, self._fa_side(state.side), state.trigger, state.early_flow, state.late_limit_pct,
                             )
-                    reasons["وارد واچ"] += 1
+                    if added:
+                        reasons["وارد واچ"] += 1
+                    else:
+                        reason = "هم‌زمان با اسکن، ارز وارد واچ یا دارای سیگنال باز شد"
+                        reasons[reason] += 1
+                        detail_no = self._log_scan_reject(sym.id, reason, details, detail_no)
                 except Exception as exc:
-                    reasons["خطای داده"] += 1
+                    reason = "خطای داده"
+                    reasons[reason] += 1
+                    error_count += 1
                     transient = self._is_transient_data_error(exc)
                     logger.warning("[اسکن] ارز به علت خطا رد شد | ارز=%s | موقت=%s | خطا=%s", sym.id, transient, exc)
                     self.storage.add_health_event("analysis", "warning", f"light scan skipped: {exc}", sym.id)
-                    # Rate limit و timeout مشکل خود ارز نیستند؛ blacklist طولانی باعث خشک‌شدن کل ربات می‌شد.
                     if not transient:
                         self.storage.blacklist_symbol(sym.id, str(exc)[:180], config.SYMBOL_ERROR_BLACKLIST_SECONDS)
 
             elapsed = time.time() - cycle_start
+            now_ts = int(time.time())
             with self._watch_lock:
                 active = len(self._watch)
-            logger.info(
-                "[خلاصه اسکن] دور=%s | ارزها=%s | واچ فعال=%s | وارد واچ=%s | بدون نشانه کافی=%s | زمان=%.2f ثانیه",
-                self._scan_count, len(SYMBOLS), active, reasons.get("وارد واچ", 0), reasons.get("نشانه اولیه شروع حرکت کافی نبود", 0), elapsed,
-            )
+            reason_summary = dict(reasons)
+            self.storage.set("scan_last_ts", now_ts)
+            self.storage.set("scan_last_cycle", self._scan_count)
+            self.storage.set("scan_last_duration", round(elapsed, 3))
+            self.storage.set("scan_last_symbols", len(SYMBOLS))
+            self.storage.set("scan_last_watch_active", active)
+            self.storage.set("scan_last_watch_added", reasons.get("وارد واچ", 0))
+            self.storage.set("scan_last_error_count", error_count)
+            self.storage.set("scan_last_reason_summary", reason_summary)
+            self.storage.set("scan_running", True)
+
+            every = max(1, int(getattr(config, "REJECT_SUMMARY_EVERY_CYCLES", 1)))
+            if self._scan_count % every == 0:
+                summary_text = " | ".join(f"{k}={v}" for k, v in reasons.most_common()) or "بدون رد"
+                logger.info(
+                    "[خلاصه اسکن] دور=%s | ارزها=%s | واچ فعال=%s | وارد واچ=%s | خطا=%s | زمان=%.2f ثانیه | دلایل=%s",
+                    self._scan_count, len(SYMBOLS), active, reasons.get("وارد واچ", 0), error_count, elapsed, summary_text,
+                )
             wait = max(0.25, float(config.LIGHT_SCAN_INTERVAL_SECONDS) - elapsed)
             self._stop.wait(wait)
 
@@ -400,6 +460,9 @@ class TradingBotApp:
                 with self._watch_lock:
                     active = len(self._watch)
                     names = ",".join(self._watch.keys()) if self._watch else "ندارد"
+                self.storage.set("watch_last_ts", int(now))
+                self.storage.set("watch_active_count", active)
+                self.storage.set("watch_active_symbols", names)
                 logger.info(
                     "[خلاصه واچ] فعال=%s | ارزهای فعال=%s | ورودها=%s | حذف‌ها=%s | سیگنال‌ها=%s | رد نهایی=%s",
                     active, names, self._watch_stats.get("وارد_واچ", 0), self._watch_stats.get("حذف", 0), self._watch_stats.get("سیگنال", 0), self._watch_stats.get("رد_نهایی", 0),
@@ -416,6 +479,8 @@ class TradingBotApp:
             try:
                 self.monitor.tick()
                 self.health.mark("monitor")
+                self.storage.set("monitor_last_ts", int(time.time()))
+                self.storage.set("monitor_running", True)
             except Exception as exc:
                 logger.warning("[مانیتور] خطای حلقه مانیتور | خطا=%s", exc)
                 self.storage.add_health_event("monitor_loop", "warning", str(exc))
