@@ -71,18 +71,60 @@ class Storage:
         """
         with self._conn() as c:
             c.executescript(schema)
-            # Migration for databases created by earlier builds.
-            existing = {r[1] for r in c.execute("PRAGMA table_info(signals)")}
-            for name, sql_type in {
-                "estimated_cost_win": "REAL",
-                "estimated_cost_loss": "REAL",
-                "real_open_confirmed": "INTEGER DEFAULT 0",
-                "result_retry_count": "INTEGER DEFAULT 0",
-                "result_retry_at": "INTEGER DEFAULT 0",
-                "real_entry": "REAL",
-            }.items():
-                if name not in existing:
-                    c.execute(f"ALTER TABLE signals ADD COLUMN {name} {sql_type}")
+            # Complete forward migration for databases created by older builds.
+            # CREATE TABLE IF NOT EXISTS does not add new columns to an existing table,
+            # therefore every column used by runtime code must be ensured explicitly.
+            migrations = {
+                "signals": {
+                    "symbol_id": "TEXT", "okx_symbol": "TEXT", "toobit_symbol": "TEXT",
+                    "side": "TEXT", "setup_type": "TEXT", "trade_mode": "TEXT",
+                    "is_real": "INTEGER DEFAULT 0", "status": "TEXT",
+                    "entry": "REAL", "tp": "REAL", "sl": "REAL",
+                    "gross_rr": "REAL", "net_rr": "REAL", "trade_usdt": "REAL",
+                    "leverage": "INTEGER", "notional_usdt": "REAL",
+                    "estimated_net_profit": "REAL", "estimated_net_loss": "REAL",
+                    "estimated_cost": "REAL", "estimated_cost_win": "REAL",
+                    "estimated_cost_loss": "REAL", "slot_id": "INTEGER",
+                    "message_id": "INTEGER", "order_id": "TEXT",
+                    "created_at": "INTEGER", "opened_at": "INTEGER", "closed_at": "INTEGER",
+                    "exit_price": "REAL", "outcome": "TEXT", "net_pnl": "REAL",
+                    "fees": "REAL", "slippage": "REAL",
+                    "mfe_r": "REAL DEFAULT 0", "mae_r": "REAL DEFAULT 0",
+                    "direction_score": "REAL", "strength_score": "REAL",
+                    "freshness_score": "REAL", "setup_score": "REAL",
+                    "trigger_score": "REAL", "final_score": "REAL",
+                    "confidence": "REAL", "model_version": "TEXT", "raw_json": "TEXT",
+                    "result_message_sent": "INTEGER DEFAULT 0",
+                    "result_retry_count": "INTEGER DEFAULT 0",
+                    "result_retry_at": "INTEGER DEFAULT 0",
+                    "real_open_confirmed": "INTEGER DEFAULT 0", "real_entry": "REAL",
+                },
+                "experiences": {
+                    "signal_id": "INTEGER", "symbol_id": "TEXT", "outcome": "TEXT",
+                    "primary_cause": "TEXT", "direction_label": "TEXT",
+                    "mfe_r": "REAL", "mae_r": "REAL", "net_pnl": "REAL",
+                    "model_version": "TEXT", "created_at": "INTEGER", "raw_json": "TEXT",
+                },
+                "health_events": {
+                    "component": "TEXT", "severity": "TEXT", "message": "TEXT",
+                    "symbol_id": "TEXT", "active": "INTEGER DEFAULT 1",
+                    "created_at": "INTEGER",
+                },
+            }
+            for table, columns in migrations.items():
+                existing = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+                for name, sql_type in columns.items():
+                    if name not in existing:
+                        c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+
+            # Normalize legacy rows after adding columns.
+            c.execute("UPDATE health_events SET active=1 WHERE active IS NULL")
+            c.execute("UPDATE signals SET mfe_r=0 WHERE mfe_r IS NULL")
+            c.execute("UPDATE signals SET mae_r=0 WHERE mae_r IS NULL")
+            c.execute("UPDATE signals SET result_message_sent=0 WHERE result_message_sent IS NULL")
+            c.execute("UPDATE signals SET result_retry_count=0 WHERE result_retry_count IS NULL")
+            c.execute("UPDATE signals SET result_retry_at=0 WHERE result_retry_at IS NULL")
+            c.execute("UPDATE signals SET real_open_confirmed=0 WHERE real_open_confirmed IS NULL")
         defaults = {
             "trading_enabled": config.TRADING_ENABLED_DEFAULT,
             "auto_signal_enabled": config.AUTO_SIGNAL_ENABLED_DEFAULT,
