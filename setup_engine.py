@@ -27,14 +27,33 @@ class SetupCandidate:
 
 class SetupEngine:
     def detect(self, m: MarketAnalysis, c5: list[dict[str, Any]]) -> SetupCandidate | None:
-        if m.hard_veto or m.primary_direction == "NEUTRAL" or len(c5) < 25:
-            return None
+        candidate, _, _ = self.detect_with_reason(m, c5)
+        return candidate
+
+    def detect_with_reason(
+        self, m: MarketAnalysis, c5: list[dict[str, Any]]
+    ) -> tuple[SetupCandidate | None, str, dict[str, Any]]:
+        details: dict[str, Any] = {
+            "direction": m.primary_direction,
+            "regime": m.regime,
+            "direction_score": round(float(m.direction_score), 2),
+            "strength_score": round(float(m.strength_score), 2),
+            "freshness_score": round(float(m.freshness_score), 2),
+        }
+        if m.hard_veto:
+            return None, "رد بازار: Hard Veto فعال است", details
+        if m.primary_direction == "NEUTRAL":
+            return None, "رد بازار: جهت معتبر LONG یا SHORT وجود ندارد", details
+        if len(c5) < 25:
+            details["candles_5m"] = len(c5)
+            return None, "رد داده: تعداد کندل 5M کافی نیست", details
 
         px = float(c5[-1]["close"])
         atr = float(m.features.get("atr") or 0)
         e21 = float(m.features.get("ema21") or 0)
+        details.update({"price": px, "atr": atr, "ema21": e21})
         if px <= 0 or atr <= 0 or e21 <= 0:
-            return None
+            return None, "رد داده: قیمت، ATR یا EMA21 نامعتبر است", details
 
         side = m.primary_direction
         recent = c5[-20:]
@@ -45,10 +64,19 @@ class SetupEngine:
         local_lo = min(float(x["low"]) for x in c5[-5:-1])
         vr = float(m.features.get("volume_ratio") or 1.0)
         eff = float(m.features.get("efficiency") or 0.0)
-        near_value = abs(px - e21) <= 0.8 * atr
+        value_distance_atr = abs(px - e21) / atr
+        near_value = value_distance_atr <= 0.8
         breakout = (side == "LONG" and px > hi) or (side == "SHORT" and px < lo)
+        details.update({
+            "volume_ratio": round(vr, 4),
+            "efficiency": round(eff, 4),
+            "value_distance_atr": round(value_distance_atr, 4),
+            "near_value": near_value,
+            "breakout": breakout,
+            "range_high": hi,
+            "range_low": lo,
+        })
 
-        # Breakout has priority. Otherwise a fresh breakout near EMA could be mislabeled as a pullback.
         if breakout and vr >= 1.05:
             setup_type = "COMPRESSION_BREAKOUT"
             base = (
@@ -78,18 +106,30 @@ class SetupEngine:
             )
             obstacle = hi if side == "LONG" else lo
         else:
-            return None
+            if breakout and vr < 1.05:
+                return None, f"رد ستاپ شکست: حجم نسبی ضعیف است ({vr:.2f} < 1.05)", details
+            if not near_value and m.strength_score < 55:
+                return None, f"رد ستاپ: قیمت از EMA21 دور است ({value_distance_atr:.2f} ATR) و قدرت پایین است ({m.strength_score:.1f})", details
+            if not near_value:
+                return None, f"رد پولبک: فاصله از ناحیه ارزش زیاد است ({value_distance_atr:.2f} ATR)", details
+            return None, f"رد پولبک: قدرت روند کافی نیست ({m.strength_score:.1f} < 55)", details
 
         score = max(0.0, min(100.0, float(base)))
+        details.update({
+            "setup_type": setup_type,
+            "setup_score": round(score, 2),
+            "trigger_price": float(trigger),
+            "invalidation_price": float(invalidation),
+        })
         if score < config.SETUP_WATCH_MIN:
-            return None
+            return None, f"رد ستاپ: امتیاز {score:.1f} کمتر از حد ورود به واچ {config.SETUP_WATCH_MIN:.1f} است", details
         if (side == "LONG" and float(invalidation) >= px) or (side == "SHORT" and float(invalidation) <= px):
-            return None
+            return None, "رد ستاپ: سطح ابطال در سمت نادرست Entry قرار دارد", details
         if (side == "LONG" and float(trigger) <= float(invalidation)) or (side == "SHORT" and float(trigger) >= float(invalidation)):
-            return None
+            return None, "رد ستاپ: ترتیب Trigger و Invalidation نامعتبر است", details
 
         now = int(time.time())
-        return SetupCandidate(
+        candidate = SetupCandidate(
             setup_id=f"{m.symbol_id}-{side}-{setup_type}-{now}",
             symbol_id=m.symbol_id,
             side=side,
@@ -108,3 +148,4 @@ class SetupEngine:
                 "obstacle_price": obstacle,
             },
         )
+        return candidate, f"ورود به واچ: {setup_type} با امتیاز {score:.1f}", details

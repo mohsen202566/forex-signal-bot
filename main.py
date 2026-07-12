@@ -130,12 +130,16 @@ class App:
                 if self._open_exists(sym.id):
                     with self.watch_lock:
                         self.active_watches.pop(sym.id, None)
+                    if config.LOG_SCAN_DETAILS:
+                        log.info("اسکن | ارز=%s | نتیجه=رد | علت=پوزیشن یا سیگنال باز دارد", sym.id)
                     continue
                 if (time.time() - self.last_signal.get(sym.id, 0) < config.SIGNAL_COOLDOWN_SECONDS_PER_SYMBOL
                         or time.time() - self.last_publish_failure.get(sym.id, 0) < config.SIGNAL_PUBLISH_RETRY_COOLDOWN_SECONDS
                         or self.storage.has_recent_signal(sym.id, config.SIGNAL_COOLDOWN_SECONDS_PER_SYMBOL)):
                     with self.watch_lock:
                         self.active_watches.pop(sym.id, None)
+                    if config.LOG_SCAN_DETAILS:
+                        log.info("اسکن | ارز=%s | نتیجه=رد | علت=Cooldown سیگنال یا شکست ارسال فعال است", sym.id)
                     continue
 
                 c5 = self.okx.get_candles(sym.okx, bar=config.OKX_BAR, limit=300)
@@ -150,20 +154,46 @@ class App:
                     candidate = existing["setup"]
                     # If the market direction changes or becomes unsafe, discard the stale watch.
                     if market.hard_veto or market.primary_direction != candidate.side or int(time.time()) > candidate.expires_at:
+                        if market.hard_veto:
+                            stale_reason = "Hard Veto جدید بازار"
+                        elif market.primary_direction != candidate.side:
+                            stale_reason = f"تغییر جهت بازار از {candidate.side} به {market.primary_direction}"
+                        else:
+                            stale_reason = "انقضای واچ"
                         with self.watch_lock:
                             self.active_watches.pop(sym.id, None)
+                        if config.LOG_SCAN_DETAILS:
+                            log.info("اسکن | ارز=%s | نتیجه=حذف واچ | علت=%s", sym.id, stale_reason)
                         continue
                     with self.watch_lock:
                         self.active_watches[sym.id]["market"] = market
+                    if config.LOG_SCAN_DETAILS:
+                        log.info(
+                            "اسکن | ارز=%s | نتیجه=ادامه واچ | ستاپ=%s | سمت=%s | امتیاز=%.1f | زمان‌مانده=%ss",
+                            sym.id, self._setup_fa(candidate.setup_type), candidate.side, candidate.score,
+                            max(0, candidate.expires_at-int(time.time())),
+                        )
                     continue
 
                 if not auto_signal_enabled:
                     continue
-                candidate = self.setup.detect(market, c5)
+                candidate, setup_reason, setup_details = self.setup.detect_with_reason(market, c5)
                 if candidate is None:
+                    if config.LOG_SCAN_DETAILS:
+                        log.info(
+                            "اسکن | ارز=%s | نتیجه=رد | علت=%s | جهت=%s(%.1f) | قدرت=%.1f | تازگی=%.1f | رژیم=%s",
+                            sym.id, setup_reason, market.primary_direction, market.direction_score,
+                            market.strength_score, market.freshness_score, market.regime,
+                        )
                     continue
                 with self.watch_lock:
                     self.active_watches[sym.id] = {"symbol": sym, "market": market, "setup": candidate}
+                if config.LOG_SCAN_DETAILS:
+                    log.info(
+                        "اسکن | ارز=%s | نتیجه=واچ | ستاپ=%s | سمت=%s | امتیاز=%.1f | Trigger=%.8g | Invalidation=%.8g | انقضا=%ss",
+                        sym.id, self._setup_fa(candidate.setup_type), candidate.side, candidate.score,
+                        candidate.trigger_price, candidate.invalidation_price, max(0, candidate.expires_at-int(time.time())),
+                    )
             except Exception as exc:
                 self.storage.add_health_event("scan", "warning", str(exc), sym.id)
                 log.exception("خطای اسکن %s", sym.id)
@@ -200,24 +230,53 @@ class App:
                 if watch.state in {"EXPIRED", "INVALIDATED"}:
                     with self.watch_lock:
                         self.active_watches.pop(symbol_id, None)
+                    if config.LOG_WATCH_DETAILS:
+                        log.info(
+                            "واچ | ارز=%s | نتیجه=رد و حذف | حالت=%s | علت=%s | قیمت=%.8g | Trigger=%.8g | Invalidation=%.8g",
+                            symbol_id, watch.state, watch.reason, watch.entry_price,
+                            candidate.trigger_price, candidate.invalidation_price,
+                        )
                     continue
 
                 decision = self.decision.decide(market, candidate, watch)
                 if not decision.allowed:
+                    if config.LOG_WATCH_DETAILS:
+                        log.info(
+                            "واچ | ارز=%s | نتیجه=انتظار | علت=%s | TriggerScore=%.1f | Final=%.1f | قیمت=%s | عبورقیمت=%s | مومنتوم=%s | کندل=%s | LateATR=%.3f",
+                            symbol_id, decision.primary_reason, watch.trigger_score, decision.final_score,
+                            f"{watch.entry_price:.8g}" if watch.entry_price else "نامعتبر",
+                            "بله" if watch.meta.get("price_ok") else "خیر",
+                            "بله" if watch.meta.get("momentum_ok") else "خیر",
+                            "بله" if watch.meta.get("candle_ok") else "خیر",
+                            float(watch.meta.get("late_atr") or 0),
+                        )
                     continue
 
                 trade_usdt = float(self.storage.get("trade_usdt", config.TRADE_USDT_DEFAULT))
                 leverage = int(self.storage.get("leverage", config.LEVERAGE_DEFAULT))
                 risk = self.risk.build(candidate, decision, watch.entry_price, trade_usdt, leverage)
                 if not risk.valid:
-                    if risk.reason.startswith("استاپ") or risk.reason.startswith("فضای واقعی"):
+                    removed = risk.reason.startswith("استاپ") or risk.reason.startswith("فضای واقعی")
+                    if removed:
                         with self.watch_lock:
                             self.active_watches.pop(symbol_id, None)
+                    if config.LOG_WATCH_DETAILS:
+                        log.info(
+                            "واچ | ارز=%s | نتیجه=%s | مرحله=ریسک | علت=%s | SL%%=%.3f | TP%%=%.3f | NetRR=%.2f | سودخالص=%.4f",
+                            symbol_id, "رد و حذف" if removed else "انتظار", risk.reason,
+                            risk.sl_pct, risk.tp_pct, risk.net_rr, risk.estimated_net_profit,
+                        )
                     continue
 
                 if not self.telegram.enabled:
                     self.storage.add_health_event("telegram", "critical", "توکن یا Chat ID تلگرام تنظیم نشده؛ سیگنال صادر نشد", symbol_id)
                     continue
+                if config.LOG_WATCH_DETAILS:
+                    log.info(
+                        "واچ | ارز=%s | نتیجه=سیگنال | سمت=%s | ستاپ=%s | TriggerScore=%.1f | Final=%.1f | NetRR=%.2f",
+                        symbol_id, candidate.side, self._setup_fa(candidate.setup_type),
+                        watch.trigger_score, decision.final_score, risk.net_rr,
+                    )
                 self._publish(sym, market, candidate, watch, decision, risk)
                 with self.watch_lock:
                     self.active_watches.pop(symbol_id, None)
