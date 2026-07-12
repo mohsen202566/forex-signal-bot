@@ -65,13 +65,15 @@ class SetupEngine:
         vr = float(m.features.get("volume_ratio") or 1.0)
         eff = float(m.features.get("efficiency") or 0.0)
         value_distance_atr = abs(px - e21) / atr
-        near_value = value_distance_atr <= 0.8
+        max_value_distance = 1.15 if (m.strength_score >= 65 and m.freshness_score >= 50) else 0.90
+        near_value = value_distance_atr <= max_value_distance
         breakout = (side == "LONG" and px > hi) or (side == "SHORT" and px < lo)
         details.update({
             "volume_ratio": round(vr, 4),
             "efficiency": round(eff, 4),
             "value_distance_atr": round(value_distance_atr, 4),
             "near_value": near_value,
+            "max_value_distance_atr": round(max_value_distance, 4),
             "breakout": breakout,
             "range_high": hi,
             "range_low": lo,
@@ -89,7 +91,7 @@ class SetupEngine:
             trigger = hi if side == "LONG" else lo
             invalidation = local_lo if side == "LONG" else local_hi
             obstacle = None
-        elif near_value and m.strength_score >= 55:
+        elif near_value and m.strength_score >= 52:
             setup_type = "PULLBACK_CONTINUATION"
             base = (
                 0.30 * m.direction_score
@@ -108,11 +110,11 @@ class SetupEngine:
         else:
             if breakout and vr < 1.05:
                 return None, f"رد ستاپ شکست: حجم نسبی ضعیف است ({vr:.2f} < 1.05)", details
-            if not near_value and m.strength_score < 55:
+            if not near_value and m.strength_score < 52:
                 return None, f"رد ستاپ: قیمت از EMA21 دور است ({value_distance_atr:.2f} ATR) و قدرت پایین است ({m.strength_score:.1f})", details
             if not near_value:
                 return None, f"رد پولبک: فاصله از ناحیه ارزش زیاد است ({value_distance_atr:.2f} ATR)", details
-            return None, f"رد پولبک: قدرت روند کافی نیست ({m.strength_score:.1f} < 55)", details
+            return None, f"رد پولبک: قدرت روند کافی نیست ({m.strength_score:.1f} < 52)", details
 
         score = max(0.0, min(100.0, float(base)))
         details.update({
@@ -121,8 +123,9 @@ class SetupEngine:
             "trigger_price": float(trigger),
             "invalidation_price": float(invalidation),
         })
-        if score < config.SETUP_WATCH_MIN:
-            return None, f"رد ستاپ: امتیاز {score:.1f} کمتر از حد ورود به واچ {config.SETUP_WATCH_MIN:.1f} است", details
+        minimum_watch_score = config.BREAKOUT_SETUP_MIN if setup_type == "COMPRESSION_BREAKOUT" else config.SETUP_WATCH_MIN
+        if score < minimum_watch_score:
+            return None, f"رد ستاپ: امتیاز {score:.1f} کمتر از حد ورود به واچ {minimum_watch_score:.1f} است", details
         if (side == "LONG" and float(invalidation) >= px) or (side == "SHORT" and float(invalidation) <= px):
             return None, "رد ستاپ: سطح ابطال در سمت نادرست Entry قرار دارد", details
         if (side == "LONG" and float(trigger) <= float(invalidation)) or (side == "SHORT" and float(trigger) >= float(invalidation)):
