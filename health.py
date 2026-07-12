@@ -1,82 +1,50 @@
-"""Health Manager.
-دستور سلامت/هلس/Health نشان می‌دهد چه چیزی ربات را خوابانده یا جلوی کارش را گرفته است.
-"""
 from __future__ import annotations
 
 import time
 
-from storage import Storage
 
 class HealthManager:
-    def __init__(self, storage: Storage):
+    EXPECTED_MAX_AGE = {
+        "scan": 180,
+        "watch": 30,
+        "monitor": 30,
+        "telegram": 30,
+        "toobit": 60,
+        "learning": 7200,
+    }
+
+    def __init__(self, storage):
         self.storage = storage
-        self.last_okx_ts = 0
-        self.last_toobit_ts = 0
-        self.last_signal_loop_ts = 0
-        self.last_monitor_loop_ts = 0
-        self.last_telegram_ts = 0
 
-    def mark(self, name: str) -> None:
-        now = int(time.time())
-        if name == "okx":
-            self.last_okx_ts = now
-        elif name == "toobit":
-            self.last_toobit_ts = now
-        elif name == "signal":
-            self.last_signal_loop_ts = now
-        elif name == "monitor":
-            self.last_monitor_loop_ts = now
-        elif name == "telegram":
-            self.last_telegram_ts = now
-
-    @staticmethod
-    def age(ts: int) -> str:
-        if not ts:
-            return "هنوز ثبت نشده"
-        sec = int(time.time()) - int(ts)
-        if sec < 60:
-            return f"{sec} ثانیه قبل"
-        return f"{sec//60} دقیقه قبل"
+    def mark(self, component: str, symbol_id: str | None = None) -> None:
+        self.storage.set(f"health_{component}_ts", int(time.time()))
 
     def report(self) -> str:
         events = self.storage.active_health_events()
-        black = self.storage.blacklist_rows()
-        toobit_connected = bool(self.storage.get("toobit_connected", False))
-        toobit_margin = float(self.storage.get("toobit_margin_usdt", 0.0) or 0.0)
-        toobit_available = float(self.storage.get("toobit_available_usdt", 0.0) or 0.0)
-        toobit_error = str(self.storage.get("toobit_last_error", "") or "")
-        toobit_updated = int(self.storage.get("toobit_last_update", 0) or 0)
-        status = "✅ سالم" if not events and toobit_connected else "⚠️ هشدار"
-        critical = [e for e in events if str(e.get("severity", "")).lower() in ("critical", "error", "❌")]
-        if critical or (not toobit_connected and toobit_error):
-            status = "❌ مشکل جدی"
-        if toobit_connected:
-            toobit_line = f"✅ وصل | مارجین {toobit_margin:.4f} USDT | آزاد {toobit_available:.4f} USDT | آپدیت {self.age(toobit_updated)}"
-        else:
-            short_error = (toobit_error[:110] + "...") if len(toobit_error) > 110 else toobit_error
-            toobit_line = f"❌ قطع/خطا | {short_error or 'دیتای موفق ثبت نشده'}"
-        lines = [
-            "🩺 سلامت ربات 15M",
-            "",
-            f"وضعیت کلی: {status}",
-            "",
-            f"OKX Data: آخرین موفقیت {self.age(self.last_okx_ts)}",
-            f"Toobit Trade: {toobit_line}",
-            f"Market Scan: آخرین دور {self.age(int(self.storage.get('scan_last_ts', 0) or 0))}",
-            f"Signal Engine: آخرین تحلیل {self.age(self.last_signal_loop_ts or int(self.storage.get('signal_engine_last_ts', 0) or 0))}",
-            f"Monitoring: آخرین چک {self.age(self.last_monitor_loop_ts or int(self.storage.get('monitor_last_ts', 0) or 0))}",
-            "",
-            f"ارزهای blacklist موقت: {len(black)}",
-        ]
-        if black:
-            for b in black[:8]:
-                left = max(0, int(b["until_ts"]) - int(time.time()))
-                lines.append(f"- {b['symbol_id']}: {b['reason']} | {left//60} دقیقه باقی‌مانده")
-        lines.append("")
+        labels = (
+            ("scan", "اسکن"),
+            ("watch", "واچ"),
+            ("monitor", "مانیتور"),
+            ("telegram", "تلگرام"),
+            ("toobit", "توبیت"),
+            ("learning", "یادگیری"),
+        )
+        lines = ["🩺 پنل سلامت", ""]
+        now = int(time.time())
+        for component, label in labels:
+            ts = int(self.storage.get(f"health_{component}_ts", 0) or 0)
+            if not ts:
+                lines.append(f"{label}: ⚠️ هنوز ثبت نشده")
+                continue
+            age = max(0, now - ts)
+            max_age = self.EXPECTED_MAX_AGE.get(component, 120)
+            icon = "✅" if age <= max_age else "⚠️"
+            state = "فعال" if age <= max_age else "قدیمی/متوقف"
+            lines.append(f"{label}: {icon} {state} | {age} ثانیه قبل")
         if not events:
-            lines.append("🚨 مشکلات فعال: ندارد")
+            lines.extend(["", "✅ مشکل فعالی ثبت نشده."])
         else:
-            lines.append("🚨 مشکلات فعال:")
-            for e in events[:10]:
-                lines.append(f"- {e['severity']} | {e['component']} | {e['symbol_id'] or '-'} | {e['message']}")
+            lines.extend(["", "🚨 مشکلات فعال:"])
+            for event in events[:10]:
+                lines.append(f"{event['severity']} | {event['component']} | {event.get('symbol_id') or '-'} | {event['message']}")
         return "\n".join(lines)

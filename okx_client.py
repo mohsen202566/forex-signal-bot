@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from typing import Any
 
 import requests
@@ -17,12 +18,19 @@ class OKXClient:
     def __init__(self, base_url: str = config.OKX_BASE_URL, timeout: int = config.OKX_REQUEST_TIMEOUT):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self.session = requests.Session()
+        self._local = threading.local()
+
+    def _session(self) -> requests.Session:
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._local.session = session
+        return session
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}{path}"
         try:
-            r = self.session.get(url, params=params or {}, timeout=self.timeout)
+            r = self._session().get(url, params=params or {}, timeout=self.timeout)
             if r.status_code >= 400:
                 raise OKXError(f"HTTP {r.status_code}: {r.text[:300]}")
             payload = r.json()
@@ -67,6 +75,8 @@ class OKXClient:
                 })
             except Exception:
                 continue
+        if getattr(config, "USE_CONFIRMED_CANDLES_ONLY", True) and bar != config.OKX_TRIGGER_BAR:
+            out = [c for c in out if int(c.get("confirm", 1)) == 1]
         if len(out) < 20:
             raise OKXError(f"candles too few: {inst_id}")
         return out
@@ -212,12 +222,15 @@ class OKXClient:
         return None, None, None
 
     @staticmethod
-    def max_favorable_adverse(candles: list[dict[str, float]], side: str, entry: float, after_ts_ms: int) -> tuple[float, float]:
+    def max_favorable_adverse(candles: list[dict[str, float]], side: str, entry: float, after_ts_ms: int, until_ts_ms: int | None = None) -> tuple[float, float]:
         mfe = 0.0
         mae = 0.0
         side = side.upper()
         for c in candles:
-            if int(c["ts"]) <= int(after_ts_ms):
+            ts = int(c["ts"])
+            if ts <= int(after_ts_ms):
+                continue
+            if until_ts_ms is not None and ts > int(until_ts_ms):
                 continue
             if side == "LONG":
                 mfe = max(mfe, (float(c["high"]) - entry) / entry * 100.0)
