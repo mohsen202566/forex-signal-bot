@@ -7,11 +7,11 @@ import threading
 import time
 import config
 from health import HealthManager
-from market_engine import confirm_signal, detect_candidate
+from market_engine import confirm_signal_diagnostic, detect_candidate_diagnostic
 from models import MarketCandidate, MarketSignal, RiskPlan
 from monitor import Monitor
 from okx_client import OKXClient
-from risk_engine import build_risk_plan
+from risk_engine import build_risk_plan_diagnostic
 from storage import Storage
 from symbols import SYMBOLS, SymbolMap
 from telegram_bot import TelegramBot
@@ -30,27 +30,67 @@ class TradingBotApp:
         self.watch: OrderedDict[str, MarketCandidate] = OrderedDict()
         self.watch_lock = threading.RLock()
         self.last_signal: dict[str, int] = {}
+        self._reject_log_cache: dict[tuple[str, str], tuple[str, float]] = {}
+
+    @staticmethod
+    def _metrics_text(metrics: dict) -> str:
+        parts: list[str] = []
+        for key in sorted(metrics):
+            value = metrics[key]
+            if isinstance(value, float):
+                parts.append(f"{key}={value:.6g}")
+            else:
+                parts.append(f"{key}={value}")
+        return " | ".join(parts)
+
+    def _log_reject(self, stage: str, symbol_id: str, reason: str, metrics: dict | None = None, force: bool = False) -> None:
+        if not getattr(config, "LOG_REJECT_REASONS", True):
+            return
+        key = (stage, symbol_id)
+        now = time.time()
+        previous_reason, previous_ts = self._reject_log_cache.get(key, ("", 0.0))
+        repeat = float(getattr(config, "REJECT_LOG_REPEAT_SECONDS", 30.0))
+        if not force and reason == previous_reason and now - previous_ts < repeat:
+            return
+        self._reject_log_cache[key] = (reason, now)
+        detail = self._metrics_text(metrics or {})
+        logger.info("رد | مرحله=%s | ارز=%s | علت=%s%s", stage, symbol_id, reason, f" | {detail}" if detail else "")
+
+    def _eligibility(self, sym: SymbolMap) -> tuple[bool, str]:
+        if self.storage.is_blacklisted(sym.id):
+            return False, "ارز به‌دلیل خطای داده در بلک‌لیست موقت است"
+        if any(x["symbol_id"] == sym.id for x in self.storage.get_open_signals()):
+            return False, "برای این ارز سیگنال باز یا Pending وجود دارد"
+        remaining = config.SIGNAL_COOLDOWN_SECONDS_PER_SYMBOL - (time.time() - self.last_signal.get(sym.id, 0))
+        if remaining > 0:
+            return False, f"کول‌داون پس از سیگنال فعال است؛ {int(remaining)} ثانیه باقی مانده"
+        return True, "مجاز"
 
     def _eligible(self, sym: SymbolMap) -> bool:
-        if self.storage.is_blacklisted(sym.id): return False
-        if any(x["symbol_id"] == sym.id for x in self.storage.get_open_signals()): return False
-        return time.time() - self.last_signal.get(sym.id, 0) >= config.SIGNAL_COOLDOWN_SECONDS_PER_SYMBOL
+        return self._eligibility(sym)[0]
 
     def light_scan_loop(self) -> None:
         while not self.stop_event.is_set():
             start = time.time()
             for sym in SYMBOLS:
                 if self.stop_event.is_set(): break
-                if not self._eligible(sym): continue
+                eligible, eligibility_reason = self._eligibility(sym)
+                if not eligible:
+                    self._log_reject("eligibility", sym.id, eligibility_reason)
+                    continue
                 try:
                     candles = self.okx.get_candles(sym.okx)
-                    candidate = detect_candidate(sym, candles)
+                    candidate, reject_reason, metrics = detect_candidate_diagnostic(sym, candles)
                     self.health.mark("okx")
                     if candidate:
+                        logger.info("واچ | ارز=%s | جهت=%s | علت=%s | %s", sym.id, candidate.side, reject_reason, self._metrics_text(metrics))
                         with self.watch_lock:
                             self.watch[sym.id] = candidate
                             while len(self.watch) > config.MAX_WATCH_SYMBOLS:
-                                self.watch.popitem(last=False)
+                                removed_id, _ = self.watch.popitem(last=False)
+                                self._log_reject("watch-capacity", removed_id, "ظرفیت واچ پر شد و قدیمی‌ترین مورد حذف شد", force=True)
+                    else:
+                        self._log_reject("direction-1H", sym.id, reject_reason, metrics)
                 except Exception as exc:
                     message = str(exc)
                     logger.warning("scan %s: %s", sym.id, message)
@@ -67,15 +107,26 @@ class TradingBotApp:
             with self.watch_lock:
                 items = list(self.watch.items())
             for symbol_id, candidate in items:
-                if time.time() - candidate.detected_at > config.WATCH_MAX_SECONDS or not self._eligible(next(s for s in SYMBOLS if s.id == symbol_id)):
+                age = time.time() - candidate.detected_at
+                sym = next(s for s in SYMBOLS if s.id == symbol_id)
+                eligible, eligibility_reason = self._eligibility(sym)
+                if age > config.WATCH_MAX_SECONDS:
+                    self._log_reject("watch-expired", symbol_id, f"عمر واچ تمام شد: {int(age)}>{config.WATCH_MAX_SECONDS} ثانیه", force=True)
+                    with self.watch_lock: self.watch.pop(symbol_id, None)
+                    continue
+                if not eligible:
+                    self._log_reject("watch-eligibility", symbol_id, eligibility_reason, force=True)
                     with self.watch_lock: self.watch.pop(symbol_id, None)
                     continue
                 try:
                     snap = self.okx.get_micro_snapshot(candidate.okx_symbol)
-                    signal = confirm_signal(candidate, snap)
+                    signal, reject_reason, metrics = confirm_signal_diagnostic(candidate, snap)
                     self.health.mark("okx")
-                    if signal and self.publish_signal(signal):
-                        with self.watch_lock: self.watch.pop(symbol_id, None)
+                    if signal:
+                        if self.publish_signal(signal):
+                            with self.watch_lock: self.watch.pop(symbol_id, None)
+                    else:
+                        self._log_reject("entry", symbol_id, reject_reason, metrics)
                 except Exception as exc:
                     logger.warning("watch %s: %s", symbol_id, exc)
             self.stop_event.wait(config.WATCH_INTERVAL_SECONDS)
@@ -95,8 +146,10 @@ class TradingBotApp:
 
     def publish_signal(self, sig: MarketSignal) -> bool:
         trade_usdt = float(self.storage.get("trade_usdt", config.TRADE_USDT_DEFAULT)); leverage = int(self.storage.get("leverage", config.LEVERAGE_DEFAULT))
-        risk = build_risk_plan(sig, trade_usdt, leverage)
-        if not risk: return False
+        risk, reject_reason, metrics = build_risk_plan_diagnostic(sig, trade_usdt, leverage)
+        if not risk:
+            self._log_reject("risk", sig.symbol_id, reject_reason, metrics, force=True)
+            return False
         trading = bool(self.storage.get("trading_enabled", False)); auto = bool(self.storage.get("auto_signal_enabled", True))
         connected = bool(self.storage.get("toobit_connected", False)); slot = self._reserve_real_slot() if trading and auto and connected else None
         is_real = slot is not None; mode = "real" if is_real else "virtual"

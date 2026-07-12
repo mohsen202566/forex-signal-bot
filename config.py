@@ -83,3 +83,5 @@ MAX_ENTRY_CHASE_ATR = 0.45
 # Storage / logs
 DB_PATH = os.getenv("BOT_DB_PATH", "bot_state.sqlite3")
 LOG_LEVEL = os.getenv("BOT_LOG_LEVEL", "INFO")
+LOG_REJECT_REASONS = True
+REJECT_LOG_REPEAT_SECONDS = 30
