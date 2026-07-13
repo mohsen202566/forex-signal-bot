@@ -12,7 +12,7 @@ import time
 import requests
 
 import config
-from engine import AdaptiveStartEngine, Observation, TradePlan
+from engine import AdaptiveLearningManager, AdaptiveStartEngine, Observation, TradePlan
 from okx_client import OKXClient
 from profiles import ProfileManager, SymbolSpec
 from storage import Storage
@@ -113,6 +113,8 @@ class TelegramPanel:
                 self.send(self.app.market_text())
             elif command == "مانیتور":
                 self.send(self.app.monitor_text())
+            elif command in ("یادگیری", "حافظه"):
+                self.send(self.app.learning_text())
             elif command in ("ترید فعال", "توبیت روشن"):
                 self.storage.set("trading_enabled", True)
                 self.send("✅ ترید واقعی توبیت فعال شد.")
@@ -140,7 +142,7 @@ class TelegramPanel:
             else:
                 self.send(
                     "⚠️ دستور شناخته نشد.\n"
-                    "پنل | آمار | سلامت | چک توبیت | پوزیشن | ارزها | مانیتور\n"
+                    "پنل | آمار | سلامت | چک توبیت | پوزیشن | ارزها | مانیتور | یادگیری\n"
                     "ترید فعال/خاموش | اتوسیگنال فعال/خاموش\n"
                     "دلار ترید 10 | لوریج ترید 10 | حداکثر پوزیشن 3"
                 )
@@ -176,6 +178,7 @@ class TelegramPanel:
         real_open = self.storage.count_real_active()
         max_positions = int(self.storage.get("max_positions", config.MAX_POSITIONS_DEFAULT))
         active = self.storage.get_active_signals()
+        learning = self.storage.learning_summary()
         return (
             "⚙️ پنل ترید\n\n"
             f"ترید واقعی: {'✅ روشن' if self.storage.get('trading_enabled', False) else '⛔ خاموش'}\n"
@@ -189,6 +192,7 @@ class TelegramPanel:
             f"کل سیگنال فعال: {len(active)}\n"
             f"ارز آماده: {len(self.app.ready_symbols)} از {len(config.SYMBOL_BASES)}\n"
             f"پروفایل: {self._age(int(self.storage.get('profiles_updated_at', 0) or 0))}\n"
+            f"یادگیری: {learning['patterns']} الگو | {learning['trial']} آزمایشی | {learning['accepted']} تأییدشده\n"
             f"سود خالص امروز: {float(self.storage.get('profit_today', 0)):.4f} USDT\n"
             f"سود خالص کل: {float(self.storage.get('profit_total', 0)):.4f} USDT"
         )
@@ -211,6 +215,7 @@ class TelegramPanel:
 
     def panel_health(self) -> str:
         events = self.storage.active_health_events()
+        learning = self.storage.learning_summary()
         lines = [
             "🩺 سلامت ربات",
             "",
@@ -218,6 +223,7 @@ class TelegramPanel:
             f"پروفایل آماده: {len(self.app.ready_symbols)}",
             f"واچ فعال: {len(self.app.engine.watches)}",
             f"سیگنال فعال: {len(self.storage.get_active_signals())}",
+            f"یادگیری: {learning['patterns']} الگو | بررسی پس‌ازاستاپ: {learning['reviews']}",
         ]
         if not events:
             lines.append("✅ خطای فعال ثبت نشده است.")
@@ -235,6 +241,7 @@ class TradingBotApp:
         self.okx = OKXClient()
         self.toobit = ToobitFuturesClient()
         self.engine = AdaptiveStartEngine()
+        self.learning = AdaptiveLearningManager(self.storage)
         self.profiles = ProfileManager(self.okx, self.storage)
         self.telegram = TelegramPanel(self)
         self.stop_event = threading.Event()
@@ -255,7 +262,8 @@ class TradingBotApp:
             "range_ratio", "acceleration", "horizon", "expected_minutes",
             "sl_pct", "required_tp_pct", "behavior_capacity_pct",
             "min_profit_tp_pct", "tp_pct", "rr", "tp_net_usdt",
-            "plan_quality", "notional",
+            "plan_quality", "notional", "support_tool", "learning_version",
+            "learning_status", "pattern_key", "move_required", "support_required",
         )
         parts: list[str] = []
         for key in important:
@@ -347,6 +355,7 @@ class TradingBotApp:
                 with self.symbol_lock:
                     symbols = list(self.ready_symbols.values())
                 active_by_symbol = {row["symbol_id"]: row for row in self.storage.get_active_signals()}
+                learning_reviews = self.storage.get_open_learning_reviews() if config.LEARNING_ENABLED else []
                 for symbol in symbols:
                     row = tickers.get(symbol.okx)
                     if not row:
@@ -360,21 +369,28 @@ class TradingBotApp:
                         self.log_reject("ticker", symbol.id, "OKX_PRICE_INVALID")
                         continue
 
+                    self.learning.process_reviews(symbol.id, price, learning_reviews)
                     active = active_by_symbol.get(symbol.id)
                     if active:
-                        if not int(active.get("is_real") or 0):
+                        if int(active.get("is_real") or 0):
+                            self.update_active_excursions(active, price)
+                        else:
                             self.monitor_virtual_tick(active, price)
                         continue
                     profile = self.profiles.get(symbol.id)
                     if not profile:
                         continue
-                    observation = self.engine.evaluate(symbol, profile, price)
+                    learning_gates = self.learning.gates_for_symbol(symbol.id)
+                    observation = self.engine.evaluate(
+                        symbol, profile, price, learning_gates=learning_gates
+                    )
                     self._transition_log(observation)
                     if observation.status == "NEEDS_VOLUME":
                         try:
                             volume = self.okx.recent_quote_volume(symbol.okx, int(observation.window or 60))
                             observation = self.engine.evaluate(
-                                symbol, profile, price, volume_quote=volume, append_tick=False
+                                symbol, profile, price, volume_quote=volume, append_tick=False,
+                                learning_gates=learning_gates,
                             )
                             self._transition_log(observation)
                         except Exception as exc:
@@ -383,8 +399,13 @@ class TradingBotApp:
                     if observation.status == "TRIGGER":
                         trade_usdt = float(self.storage.get("trade_usdt", config.TRADE_USDT_DEFAULT))
                         leverage = int(self.storage.get("leverage", config.LEVERAGE_DEFAULT))
+                        support_tool = str(observation.metrics.get("support_tool") or "RANGE")
+                        learning_adjustments = self.learning.adjustments_for(
+                            symbol.id, str(observation.side), int(observation.window or 0), support_tool
+                        )
                         plan, reason, metrics = self.engine.build_plan(
-                            symbol, profile, observation, price, trade_usdt, leverage
+                            symbol, profile, observation, price, trade_usdt, leverage,
+                            learning_adjustments=learning_adjustments,
                         )
                         if plan is None:
                             self.log_reject("risk", symbol.id, reason, metrics)
@@ -421,7 +442,8 @@ class TradingBotApp:
             f"TP: {plan.tp:.10g} ({plan.tp_pct:.3f}%)\n"
             f"SL: {plan.sl:.10g} ({plan.sl_pct:.3f}%)\n"
             f"انتظار تقریبی: {plan.expected_minutes} دقیقه\n"
-            f"Trigger: {plan.trigger_window} ثانیه\n"
+            f"Trigger: {plan.trigger_window} ثانیه | ابزار: {plan.metrics.get('support_tool', 'RANGE')}\n"
+            f"یادگیری: v{int(plan.metrics.get('learning_version', 0))} | {plan.metrics.get('learning_status', 'BASE')}\n"
             f"RR: {plan.rr_net:.2f}\n"
             f"مارجین: {trade_usdt:g} USDT | لوریج: {leverage}x\n"
             f"سود خالص تخمینی TP: {plan.estimated_tp_net:.4f} USDT\n"
@@ -545,6 +567,22 @@ class TradingBotApp:
                 reply_to=signal.get("message_id"),
             )
 
+    def update_active_excursions(self, signal: dict[str, Any], price: float) -> None:
+        entry = float(signal.get("entry_real") or signal["entry"])
+        if entry <= 0:
+            return
+        if str(signal["side"]) == "LONG":
+            favorable = max(0.0, (price - entry) / entry * 100.0)
+            adverse = max(0.0, (entry - price) / entry * 100.0)
+        else:
+            favorable = max(0.0, (entry - price) / entry * 100.0)
+            adverse = max(0.0, (price - entry) / entry * 100.0)
+        self.storage.update_signal(
+            int(signal["id"]),
+            mfe_pct=max(float(signal.get("mfe_pct") or 0.0), favorable),
+            mae_pct=max(float(signal.get("mae_pct") or 0.0), adverse),
+        )
+
     def monitor_virtual_tick(self, signal: dict[str, Any], price: float) -> None:
         entry = float(signal.get("entry_real") or signal["entry"])
         tp = float(signal["tp"])
@@ -592,6 +630,11 @@ class TradingBotApp:
         ):
             return
         fresh = self.storage.get_signal(int(signal["id"])) or signal
+        if result == "TP":
+            self.learning.on_tp(fresh)
+        else:
+            self.learning.on_sl(fresh)
+        learning_note = self.learning.result_note(fresh)
         stats = self.storage.stats()
         closed_count = stats["tp"] + stats["sl"]
         win_rate = stats["tp"] / closed_count * 100.0 if closed_count else 0.0
@@ -612,7 +655,8 @@ class TradingBotApp:
             f"سود/زیان خالص: {net:.4f} USDT\n"
             f"MFE: {mfe:.3f}% | MAE: {mae:.3f}%\n"
             f"زمان انتظار اعلامی: {fresh['expected_minutes']} دقیقه\n"
-            f"مدت واقعی: {duration} دقیقه\n\n"
+            f"مدت واقعی: {duration} دقیقه\n"
+            f"یادگیری: {learning_note}\n\n"
             f"آمار: TP={stats['tp']} | SL={stats['sl']} | وین‌ریت={win_rate:.2f}%\n"
             f"سود خالص کل آمار: {stats['net_pnl']:.4f} USDT"
         )
@@ -657,16 +701,17 @@ class TradingBotApp:
                     else:
                         favorable = max(0.0, (entry_price - close_price) / entry_price * 100.0)
                         adverse = max(0.0, (close_price - entry_price) / entry_price * 100.0)
+                    fresh_signal = self.storage.get_signal(int(signal["id"])) or signal
                     self.finish_signal(
-                        signal,
+                        fresh_signal,
                         result=result_kind,
                         entry_price=entry_price,
                         close_price=close_price,
                         gross=float(result["gross_pnl"]),
                         fees=float(result["fees"]),
                         net=float(result["net_pnl"]),
-                        mfe=max(float(signal.get("mfe_pct") or 0.0), favorable),
-                        mae=max(float(signal.get("mae_pct") or 0.0), adverse),
+                        mfe=max(float(fresh_signal.get("mfe_pct") or 0.0), favorable),
+                        mae=max(float(fresh_signal.get("mae_pct") or 0.0), adverse),
                         closed_at=int(result["close_time"] / 1000),
                     )
                     self.storage.clear_health("real_monitor", signal["symbol_id"])
@@ -773,6 +818,33 @@ class TradingBotApp:
             f"واقعی: {sum(1 for row in active if int(row.get('is_real') or 0))}\n"
             f"عادی: {sum(1 for row in active if not int(row.get('is_real') or 0))}"
         )
+
+    def learning_text(self) -> str:
+        summary = self.storage.learning_summary()
+        rows = self.storage.recent_learning_patterns(config.LEARNING_PATTERN_RECENT_LIMIT)
+        lines = [
+            "🧠 حافظه و یادگیری",
+            "",
+            f"وضعیت: {'فعال' if config.LEARNING_ENABLED else 'خاموش'}",
+            f"الگوها: {summary['patterns']} | آزمایشی: {summary['trial']} | تأییدشده: {summary['accepted']}",
+            f"نتایج واردشده: TP={summary['tp']} | SL={summary['sl']}",
+            f"بررسی مخفی پس‌ازاستاپ: {summary['reviews']}",
+        ]
+        if rows:
+            lines.append("")
+            lines.append("آخرین تغییرها:")
+            for row in rows:
+                factors = row.get("factors") or {}
+                changed = ", ".join(
+                    f"{key.replace('_factor', '')}={float(value):.2f}"
+                    for key, value in factors.items() if abs(float(value) - 1.0) >= 0.005
+                ) or "پایه"
+                lines.append(
+                    f"• {row['symbol_id']} {row['side']} {row['trigger_window']}s/"
+                    f"{row['support_tool']}/{row['horizon']}m | {row['status']} v{row['version']} | "
+                    f"{row.get('active_reason') or '-'} | {changed}"
+                )
+        return "\n".join(lines)
 
     def profile_bootstrap_loop(self) -> None:
         try:

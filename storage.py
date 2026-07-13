@@ -92,6 +92,70 @@ class Storage:
                 );
                 CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status);
                 CREATE INDEX IF NOT EXISTS idx_signals_symbol_status ON signals(symbol_id,status);
+                CREATE TABLE IF NOT EXISTS learning_patterns(
+                    pattern_key TEXT PRIMARY KEY,
+                    symbol_id TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    trigger_window INTEGER NOT NULL,
+                    support_tool TEXT NOT NULL,
+                    horizon INTEGER NOT NULL,
+                    factors_json TEXT NOT NULL,
+                    best_factors_json TEXT NOT NULL,
+                    previous_factors_json TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'BASE',
+                    active_variable TEXT,
+                    active_reason TEXT,
+                    source_signal_id INTEGER,
+                    trial_tp INTEGER NOT NULL DEFAULT 0,
+                    trial_sl INTEGER NOT NULL DEFAULT 0,
+                    total_tp INTEGER NOT NULL DEFAULT 0,
+                    total_sl INTEGER NOT NULL DEFAULT 0,
+                    consecutive_tp INTEGER NOT NULL DEFAULT 0,
+                    consecutive_sl INTEGER NOT NULL DEFAULT 0,
+                    failed_trials INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_learning_lookup
+                    ON learning_patterns(symbol_id,side,trigger_window,support_tool,horizon);
+                CREATE TABLE IF NOT EXISTS learning_changes(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pattern_key TEXT NOT NULL,
+                    signal_id INTEGER,
+                    version INTEGER NOT NULL,
+                    variable TEXT NOT NULL,
+                    old_value REAL NOT NULL,
+                    new_value REAL NOT NULL,
+                    reason TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    resolved_at INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_learning_changes_pattern
+                    ON learning_changes(pattern_key,id);
+                CREATE TABLE IF NOT EXISTS learning_reviews(
+                    signal_id INTEGER PRIMARY KEY,
+                    pattern_key TEXT NOT NULL,
+                    symbol_id TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    entry REAL NOT NULL,
+                    tp REAL NOT NULL,
+                    sl REAL NOT NULL,
+                    tp_pct REAL NOT NULL,
+                    sl_pct REAL NOT NULL,
+                    started_at INTEGER NOT NULL,
+                    sl_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    max_favorable_pct REAL NOT NULL DEFAULT 0,
+                    max_adverse_pct REAL NOT NULL DEFAULT 0,
+                    hit_original_tp INTEGER NOT NULL DEFAULT 0,
+                    finalized INTEGER NOT NULL DEFAULT 0,
+                    diagnosis TEXT,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_learning_reviews_open
+                    ON learning_reviews(finalized,symbol_id,expires_at);
                 CREATE TABLE IF NOT EXISTS health_events(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     component TEXT NOT NULL,
@@ -351,6 +415,229 @@ class Storage:
             "real_net": sum(float(row.get("net_pnl") or 0.0) for row in real if row["status"] == "closed"),
             "virtual_net": sum(float(row.get("net_pnl") or 0.0) for row in virtual if row["status"] == "closed"),
         }
+
+    @staticmethod
+    def _json_dict(value: Any, default: dict[str, Any] | None = None) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        try:
+            parsed = json.loads(str(value or "{}"))
+            return dict(parsed) if isinstance(parsed, dict) else dict(default or {})
+        except (TypeError, json.JSONDecodeError):
+            return dict(default or {})
+
+    def get_learning_pattern(self, pattern_key: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM learning_patterns WHERE pattern_key=?", (pattern_key,)
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["factors"] = self._json_dict(item.pop("factors_json", "{}"))
+        item["best_factors"] = self._json_dict(item.pop("best_factors_json", "{}"))
+        item["previous_factors"] = self._json_dict(item.pop("previous_factors_json", "{}"))
+        return item
+
+    def save_learning_pattern(self, pattern: dict[str, Any]) -> None:
+        now = int(time.time())
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO learning_patterns(
+                    pattern_key,symbol_id,side,trigger_window,support_tool,horizon,
+                    factors_json,best_factors_json,previous_factors_json,version,status,
+                    active_variable,active_reason,source_signal_id,trial_tp,trial_sl,
+                    total_tp,total_sl,consecutive_tp,consecutive_sl,failed_trials,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(pattern_key) DO UPDATE SET
+                    symbol_id=excluded.symbol_id,side=excluded.side,
+                    trigger_window=excluded.trigger_window,support_tool=excluded.support_tool,
+                    horizon=excluded.horizon,factors_json=excluded.factors_json,
+                    best_factors_json=excluded.best_factors_json,
+                    previous_factors_json=excluded.previous_factors_json,
+                    version=excluded.version,status=excluded.status,
+                    active_variable=excluded.active_variable,active_reason=excluded.active_reason,
+                    source_signal_id=excluded.source_signal_id,trial_tp=excluded.trial_tp,
+                    trial_sl=excluded.trial_sl,total_tp=excluded.total_tp,total_sl=excluded.total_sl,
+                    consecutive_tp=excluded.consecutive_tp,consecutive_sl=excluded.consecutive_sl,
+                    failed_trials=excluded.failed_trials,updated_at=excluded.updated_at
+                """,
+                (
+                    pattern["pattern_key"], pattern["symbol_id"], pattern["side"],
+                    int(pattern["trigger_window"]), pattern["support_tool"], int(pattern["horizon"]),
+                    json.dumps(pattern.get("factors") or {}, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(pattern.get("best_factors") or {}, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(pattern.get("previous_factors") or {}, ensure_ascii=False, separators=(",", ":")),
+                    int(pattern.get("version") or 0), str(pattern.get("status") or "BASE"),
+                    pattern.get("active_variable"), pattern.get("active_reason"),
+                    pattern.get("source_signal_id"), int(pattern.get("trial_tp") or 0),
+                    int(pattern.get("trial_sl") or 0), int(pattern.get("total_tp") or 0),
+                    int(pattern.get("total_sl") or 0), int(pattern.get("consecutive_tp") or 0),
+                    int(pattern.get("consecutive_sl") or 0), int(pattern.get("failed_trials") or 0), now,
+                ),
+            )
+
+    def get_learning_adjustments(
+        self, symbol_id: str, side: str, trigger_window: int, support_tool: str
+    ) -> dict[str, dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT pattern_key,horizon,version,status,factors_json
+                FROM learning_patterns
+                WHERE symbol_id=? AND side=? AND trigger_window=? AND support_tool=?
+                """,
+                (symbol_id, side, int(trigger_window), support_tool),
+            ).fetchall()
+        output: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            output[str(int(row["horizon"]))] = {
+                "pattern_key": str(row["pattern_key"]),
+                "version": int(row["version"]),
+                "status": str(row["status"]),
+                "factors": self._json_dict(row["factors_json"]),
+            }
+        return output
+
+    def get_symbol_learning_gates(self, symbol_id: str) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT side,trigger_window,support_tool,horizon,version,status,factors_json
+                FROM learning_patterns WHERE symbol_id=?
+                """,
+                (symbol_id,),
+            ).fetchall()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            output.append({
+                "side": str(row["side"]),
+                "trigger_window": int(row["trigger_window"]),
+                "support_tool": str(row["support_tool"]),
+                "horizon": int(row["horizon"]),
+                "version": int(row["version"]),
+                "status": str(row["status"]),
+                "factors": self._json_dict(row["factors_json"]),
+            })
+        return output
+
+    def add_learning_change(
+        self,
+        pattern_key: str,
+        signal_id: int | None,
+        version: int,
+        variable: str,
+        old_value: float,
+        new_value: float,
+        reason: str,
+        status: str,
+        details: dict[str, Any] | None = None,
+    ) -> int:
+        with self.connect() as db:
+            cursor = db.execute(
+                """
+                INSERT INTO learning_changes(
+                    pattern_key,signal_id,version,variable,old_value,new_value,reason,status,details_json,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    pattern_key, signal_id, int(version), variable, float(old_value), float(new_value),
+                    reason, status, json.dumps(details or {}, ensure_ascii=False, separators=(",", ":")),
+                    int(time.time()),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def resolve_learning_changes(self, pattern_key: str, version: int, status: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE learning_changes SET status=?,resolved_at=?
+                WHERE pattern_key=? AND version=? AND resolved_at IS NULL
+                """,
+                (status, int(time.time()), pattern_key, int(version)),
+            )
+
+    def start_learning_review(self, review: dict[str, Any]) -> None:
+        now = int(time.time())
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT OR REPLACE INTO learning_reviews(
+                    signal_id,pattern_key,symbol_id,side,entry,tp,sl,tp_pct,sl_pct,
+                    started_at,sl_at,expires_at,max_favorable_pct,max_adverse_pct,
+                    hit_original_tp,finalized,diagnosis,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    int(review["signal_id"]), review["pattern_key"], review["symbol_id"], review["side"],
+                    float(review["entry"]), float(review["tp"]), float(review["sl"]),
+                    float(review["tp_pct"]), float(review["sl_pct"]), int(review["started_at"]),
+                    int(review["sl_at"]), int(review["expires_at"]),
+                    float(review.get("max_favorable_pct") or 0.0),
+                    float(review.get("max_adverse_pct") or 0.0),
+                    int(bool(review.get("hit_original_tp"))), 0, review.get("diagnosis"), now,
+                ),
+            )
+
+    def get_open_learning_reviews(self) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM learning_reviews WHERE finalized=0 ORDER BY signal_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_learning_review(self, signal_id: int, **fields: Any) -> None:
+        allowed = {
+            "max_favorable_pct", "max_adverse_pct", "hit_original_tp",
+            "finalized", "diagnosis", "expires_at",
+        }
+        items = [(key, value) for key, value in fields.items() if key in allowed]
+        if not items:
+            return
+        items.append(("updated_at", int(time.time())))
+        sql = ",".join(f"{key}=?" for key, _ in items)
+        values = [value for _, value in items] + [int(signal_id)]
+        with self.connect() as db:
+            db.execute(f"UPDATE learning_reviews SET {sql} WHERE signal_id=?", values)
+
+    def learning_summary(self) -> dict[str, int]:
+        with self.connect() as db:
+            patterns = db.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN status='TRIAL' THEN 1 ELSE 0 END) AS trial,
+                       SUM(CASE WHEN status='ACCEPTED' THEN 1 ELSE 0 END) AS accepted,
+                       SUM(total_tp) AS tp,SUM(total_sl) AS sl
+                FROM learning_patterns
+                """
+            ).fetchone()
+            reviews = db.execute(
+                "SELECT COUNT(*) AS n FROM learning_reviews WHERE finalized=0"
+            ).fetchone()
+        return {
+            "patterns": int(patterns["total"] or 0),
+            "trial": int(patterns["trial"] or 0),
+            "accepted": int(patterns["accepted"] or 0),
+            "tp": int(patterns["tp"] or 0),
+            "sl": int(patterns["sl"] or 0),
+            "reviews": int(reviews["n"] or 0),
+        }
+
+    def recent_learning_patterns(self, limit: int = 8) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM learning_patterns ORDER BY updated_at DESC LIMIT ?", (int(limit),)
+            ).fetchall()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["factors"] = self._json_dict(item.pop("factors_json", "{}"))
+            item.pop("best_factors_json", None)
+            item.pop("previous_factors_json", None)
+            output.append(item)
+        return output
 
     def add_health_event(self, component: str, severity: str, message: str, symbol_id: str | None = None) -> None:
         now = int(time.time())

@@ -106,3 +106,25 @@ LOG_LEVEL = os.getenv("BOT_LOG_LEVEL", "INFO")
 
 # SQLite is outside the Git repository. Override if service user cannot write /var/lib.
 DB_PATH = os.getenv("BOT_DB_PATH", "/var/lib/forex-signal-bot/bot_state.sqlite3")
+
+# Continuous per-pattern learning. A pattern is:
+# symbol + side + trigger window + support tool + selected horizon.
+LEARNING_ENABLED = True
+LEARNING_FIRST_STEP = 0.03
+LEARNING_SECOND_STEP = 0.05
+LEARNING_NEAR_TP_RATIO = 0.68
+LEARNING_LOW_MFE_RATIO = 0.22
+LEARNING_FAST_STOP_RATIO = 0.35
+LEARNING_LATE_ENTRY_MOVE_RATIO = 1.65
+LEARNING_REVIEW_MIN_SECONDS = 90
+LEARNING_REVIEW_MAX_SECONDS = 60 * 60
+LEARNING_PATTERN_RECENT_LIMIT = 8
+LEARNING_FACTOR_BOUNDS = {
+    "price_factor": (0.88, 1.20),
+    "range_factor": (0.90, 1.25),
+    "volume_factor": (0.90, 1.25),
+    "directionality_factor": (0.92, 1.20),
+    "tp_factor": (0.85, 1.08),
+    "sl_factor": (0.95, 1.20),
+}
+LEARNING_GATE_CACHE_SECONDS = 10
