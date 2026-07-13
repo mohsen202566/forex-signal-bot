@@ -1,112 +1,105 @@
+"""تنظیمات ربات تطبیقی تشخیص شروع حرکت.
+
+تمام فایل‌های پروژه در ریشه ریپو و با پسوند .py هستند. داده پایدار در SQLite
+خارج از ریپو نگهداری می‌شود تا git pull با داده زنده تداخل نداشته باشد.
+"""
 from __future__ import annotations
+
 import os
-from dataclasses import dataclass
 
-TELEGRAM_BOT_TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','')
-TELEGRAM_CHAT_ID=os.getenv('TELEGRAM_CHAT_ID','')
-TELEGRAM_POLL_SECONDS=1.0
-OKX_BASE_URL=os.getenv('OKX_BASE_URL','https://www.okx.com')
-OKX_REQUEST_TIMEOUT=8
-OKX_BAR='5m'; OKX_CONTEXT_BAR='15m'; OKX_TRIGGER_BAR='1m'; OKX_CANDLE_LIMIT=300
-OKX_MICRO_TRADES_LIMIT=100; OKX_BOOK_DEPTH=5; OKX_MICRO_WINDOW_SECONDS=10; OKX_MICRO_MIN_TRADES=8
-USE_CONFIRMED_CANDLES_ONLY=True
-TOOBIT_BASE_URL=os.getenv('TOOBIT_BASE_URL','https://api.toobit.com')
-TOOBIT_API_KEY=os.getenv('TOOBIT_API_KEY','')
-TOOBIT_API_SECRET=os.getenv('TOOBIT_API_SECRET',os.getenv('TOOBIT_SECRET_KEY',''))
-REQUEST_TIMEOUT=8; RECV_WINDOW=5000
-TOOBIT_FUTURES_PATH_EXCHANGE_INFO=os.getenv('TOOBIT_FUTURES_PATH_EXCHANGE_INFO','/api/v1/futures/exchangeInfo')
-TOOBIT_FUTURES_PATH_BALANCE=os.getenv('TOOBIT_FUTURES_PATH_BALANCE','/api/v1/futures/balance')
-TOOBIT_FUTURES_PATH_ORDER=os.getenv('TOOBIT_FUTURES_PATH_ORDER','/api/v1/futures/order')
-TOOBIT_FUTURES_PATH_POSITIONS=os.getenv('TOOBIT_FUTURES_PATH_POSITIONS','/api/v1/futures/position')
-TOOBIT_FUTURES_PATH_LEVERAGE=os.getenv('TOOBIT_FUTURES_PATH_LEVERAGE','/api/v1/futures/leverage')
-TOOBIT_FUTURES_PATH_MARGIN_TYPE=os.getenv('TOOBIT_FUTURES_PATH_MARGIN_TYPE','/api/v1/futures/marginType')
-TOOBIT_FUTURES_PATH_ORDER_HISTORY=os.getenv('TOOBIT_FUTURES_PATH_ORDER_HISTORY','/api/v1/futures/historyOrders')
-TRADING_ENABLED_DEFAULT=False; AUTO_SIGNAL_ENABLED_DEFAULT=True
-TRADE_USDT_DEFAULT=10.0; TRADE_USDT_MIN=1.0; TRADE_USDT_MAX=10000.0
-LEVERAGE_DEFAULT=10; LEVERAGE_MIN=1; LEVERAGE_MAX=100
-MAX_POSITIONS_DEFAULT=3; MAX_POSITIONS_MIN=1; MAX_POSITIONS_MAX=100
-ISOLATED_MARGIN_REQUIRED=True; ORDER_OPEN_CHECK_SECONDS=70; REAL_PENDING_TIMEOUT_SECONDS=120
-TOOBIT_FUTURES_MAKER_FEE_PCT=0.02; TOOBIT_FUTURES_TAKER_FEE_PCT=0.05
-TOOBIT_REALIZED_PNL_INCLUDES_FEES=os.getenv('TOOBIT_REALIZED_PNL_INCLUDES_FEES','false').lower() in ('1','true','yes')
-ENTRY_SLIPPAGE_PCT=0.03; TP_SLIPPAGE_PCT=0.02; SL_SLIPPAGE_PCT=0.05
+# Telegram
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_POLL_SECONDS = 1.0
 
-# قوانین قطعی ریسک: فاصله TP دقیقاً 1.5 برابر فاصله SL است.
-FIXED_GROSS_RR=1.50
-MIN_NET_PROFIT_USDT=0.05
-MIN_NET_RR_AFTER_COSTS=1.10
-MIN_SL_PCT=0.28
-NORMAL_MAX_SL_PCT=1.10
-ADAPTIVE_MAX_SL_PCT=1.35
-ATR_STOP_BUFFER=0.14
+# OKX public data
+OKX_BASE_URL = os.getenv("OKX_BASE_URL", "https://www.okx.com").rstrip("/")
+OKX_REQUEST_TIMEOUT = float(os.getenv("OKX_REQUEST_TIMEOUT", "12"))
+OKX_HISTORY_BAR = "1m"
+PROFILE_DAYS = 7
+PROFILE_MIN_CANDLES = 3000
+PROFILE_MAX_CANDLES = PROFILE_DAYS * 24 * 60 + 120
+PROFILE_PAGE_LIMIT = 300
+PROFILE_REQUEST_PAUSE = 0.11
+PROFILE_FRESH_HOURS = 26
+PROFILE_DAILY_UPDATE_HOUR = 0
+PROFILE_DAILY_UPDATE_MINUTE = 5
+TIMEZONE = "Europe/Istanbul"
 
-ATR_PERIOD=14; EMA_FAST=9; EMA_MID=21; EMA_SLOW=50; RSI_PERIOD=14; ADX_PERIOD=14
-# حدها طوری تنظیم شده‌اند که تأییدها حرکت را خفه نکنند؛ تضاد بحرانی Veto می‌شود و بقیه امتیازی‌اند.
-DIRECTION_MIN=58.0; STRENGTH_MIN=50.0; FRESHNESS_MIN=45.0; SETUP_MIN=58.0; TRIGGER_MIN=66.0; SAFETY_MIN=48.0; FINAL_MIN=62.0
-PULLBACK_SETUP_MIN=58.0; PULLBACK_TRIGGER_MIN=66.0; PULLBACK_FINAL_MIN=62.0
-BREAKOUT_SETUP_MIN=60.0; BREAKOUT_TRIGGER_MIN=68.0; BREAKOUT_FINAL_MIN=64.0
-STRUCTURE_SETUP_MIN=59.0; STRUCTURE_TRIGGER_MIN=66.0; STRUCTURE_FINAL_MIN=63.0
-SETUP_WATCH_MIN=56.0
+# 40 fixed bases. Runtime validation requires an active USDT perpetual on both exchanges.
+SYMBOL_BASES = (
+    "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "BNB", "TRX", "AVAX", "LINK",
+    "DOT", "LTC", "BCH", "ETC", "TON", "SUI", "NEAR", "APT", "OP", "ARB",
+    "INJ", "ATOM", "UNI", "FIL", "AAVE", "HBAR", "XLM", "ALGO", "SHIB", "PEPE",
+    "WIF", "BONK", "ENA", "SEI", "RENDER", "WLD", "JUP", "TIA", "CRV", "ICP",
+)
 
-# پنجره کوتاه برای جلوگیری از ورود دیر: حداکثر 3 کندل 5M.
-WATCH_TTL_SECONDS=15*60
-WATCH_POLL_INTERVAL_SECONDS=5.0; SCAN_INTERVAL_SECONDS=60.0
-WATCH_LATE_LIMIT_ATR=0.65
-SIGNAL_PUBLISH_RETRY_COOLDOWN_SECONDS=300
-EXECUTION_MAX_DEVIATION_PCT=0.25; EXECUTION_MAX_DEVIATION_SL_FRACTION=0.35; MIN_FREE_MARGIN_BUFFER_PCT=5.0
-SIGNAL_COOLDOWN_SECONDS_PER_SYMBOL=20*60; VIRTUAL_MONITOR_MAX_MINUTES=240; RESULT_RETRY_BASE_SECONDS=30; RESULT_RETRY_MAX_SECONDS=1800
-DB_PATH=os.getenv('BOT_DB_PATH','bot_state.sqlite3'); LOG_LEVEL=os.getenv('BOT_LOG_LEVEL','INFO')
-LOG_SCAN_DETAILS=os.getenv('BOT_LOG_SCAN_DETAILS','true').lower() in ('1','true','yes','on')
-LOG_WATCH_DETAILS=os.getenv('BOT_LOG_WATCH_DETAILS','true').lower() in ('1','true','yes','on')
-LOG_REJECTIONS_JSON=os.getenv('BOT_LOG_REJECTIONS_JSON','true').lower() in ('1','true','yes','on')
-LEARNING_MIN_SAMPLES=40; SHADOW_MIN_SAMPLES=30; SHADOW_MIN_DAYS=7; LEARNING_INTERVAL_SECONDS=3600
+# Toobit
+TOOBIT_BASE_URL = os.getenv("TOOBIT_BASE_URL", "https://api.toobit.com").rstrip("/")
+TOOBIT_API_KEY = os.getenv("TOOBIT_API_KEY", "").strip()
+TOOBIT_API_SECRET = os.getenv("TOOBIT_API_SECRET", os.getenv("TOOBIT_SECRET_KEY", "")).strip()
+TOOBIT_REQUEST_TIMEOUT = float(os.getenv("TOOBIT_REQUEST_TIMEOUT", "12"))
+TOOBIT_RECV_WINDOW = int(os.getenv("TOOBIT_RECV_WINDOW", "5000"))
+TOOBIT_PATH_EXCHANGE_INFO = "/api/v1/exchangeInfo"
+TOOBIT_PATH_BALANCE = os.getenv("TOOBIT_PATH_BALANCE", "/api/v1/futures/balance")
+TOOBIT_PATH_POSITIONS = os.getenv("TOOBIT_PATH_POSITIONS", "/api/v1/futures/positions")
+TOOBIT_PATH_HISTORY_POSITIONS = os.getenv("TOOBIT_PATH_HISTORY_POSITIONS", "/api/v1/futures/historyPositions")
+TOOBIT_PATH_MARGIN_TYPE = "/api/v1/futures/marginType"
+TOOBIT_PATH_LEVERAGE = "/api/v1/futures/leverage"
+TOOBIT_PATH_ORDER = "/api/v1/futures/order"
+TOOBIT_PATH_TRADING_STOP = "/api/v1/futures/position/trading-stop"
 
-# 30 بازار ثابت برای اسکن. نگاشت OKX برای دیتا و Toobit برای اجرای واقعی است.
-@dataclass(frozen=True)
-class SymbolMap:
-    id: str
-    okx: str
-    toobit: str
-    base: str
-    quote: str = "USDT"
-    group: str = "ALT"
-    active: bool = True
+# User controls
+TRADING_ENABLED_DEFAULT = False
+AUTO_SIGNAL_ENABLED_DEFAULT = True
+TRADE_USDT_DEFAULT = 10.0
+TRADE_USDT_MIN = 1.0
+TRADE_USDT_MAX = 10_000.0
+LEVERAGE_DEFAULT = 10
+LEVERAGE_MIN = 1
+LEVERAGE_MAX = 100
+MAX_POSITIONS_DEFAULT = 3
+MAX_POSITIONS_MIN = 1
+MAX_POSITIONS_MAX = 100
+ORDER_VERIFY_SECONDS = 70
 
-SYMBOLS = [
-    SymbolMap("BTC", "BTC-USDT-SWAP", "BTCUSDT", "BTC", group="MAJOR"),
-    SymbolMap("ETH", "ETH-USDT-SWAP", "ETHUSDT", "ETH", group="MAJOR"),
-    SymbolMap("BNB", "BNB-USDT-SWAP", "BNBUSDT", "BNB", group="MAJOR"),
-    SymbolMap("SOL", "SOL-USDT-SWAP", "SOLUSDT", "SOL", group="LIQUID_VOL"),
-    SymbolMap("XRP", "XRP-USDT-SWAP", "XRPUSDT", "XRP", group="LIQUID_VOL"),
-    SymbolMap("DOGE", "DOGE-USDT-SWAP", "DOGEUSDT", "DOGE", group="LIQUID_VOL"),
-    SymbolMap("ADA", "ADA-USDT-SWAP", "ADAUSDT", "ADA"),
-    SymbolMap("AVAX", "AVAX-USDT-SWAP", "AVAXUSDT", "AVAX", group="LIQUID_VOL"),
-    SymbolMap("LINK", "LINK-USDT-SWAP", "LINKUSDT", "LINK"),
-    SymbolMap("SUI", "SUI-USDT-SWAP", "SUIUSDT", "SUI", group="LIQUID_VOL"),
-    SymbolMap("LTC", "LTC-USDT-SWAP", "LTCUSDT", "LTC"),
-    SymbolMap("BCH", "BCH-USDT-SWAP", "BCHUSDT", "BCH"),
-    SymbolMap("DOT", "DOT-USDT-SWAP", "DOTUSDT", "DOT"),
-    SymbolMap("NEAR", "NEAR-USDT-SWAP", "NEARUSDT", "NEAR", group="HIGH_VOL"),
-    SymbolMap("APT", "APT-USDT-SWAP", "APTUSDT", "APT", group="HIGH_VOL"),
-    SymbolMap("ATOM", "ATOM-USDT-SWAP", "ATOMUSDT", "ATOM"),
-    SymbolMap("INJ", "INJ-USDT-SWAP", "INJUSDT", "INJ", group="HIGH_VOL"),
-    SymbolMap("ARB", "ARB-USDT-SWAP", "ARBUSDT", "ARB", group="HIGH_VOL"),
-    SymbolMap("OP", "OP-USDT-SWAP", "OPUSDT", "OP", group="HIGH_VOL"),
-    SymbolMap("FIL", "FIL-USDT-SWAP", "FILUSDT", "FIL", group="HIGH_VOL"),
-    SymbolMap("TRX", "TRX-USDT-SWAP", "TRXUSDT", "TRX"),
-    SymbolMap("TON", "TON-USDT-SWAP", "TONUSDT", "TON", group="LIQUID_VOL"),
-    SymbolMap("UNI", "UNI-USDT-SWAP", "UNIUSDT", "UNI"),
-    SymbolMap("AAVE", "AAVE-USDT-SWAP", "AAVEUSDT", "AAVE", group="HIGH_VOL"),
-    SymbolMap("ETC", "ETC-USDT-SWAP", "ETCUSDT", "ETC"),
-    SymbolMap("XLM", "XLM-USDT-SWAP", "XLMUSDT", "XLM"),
-    SymbolMap("PEPE", "PEPE-USDT-SWAP", "PEPEUSDT", "PEPE", group="HIGH_VOL"),
-    SymbolMap("SEI", "SEI-USDT-SWAP", "SEIUSDT", "SEI", group="HIGH_VOL"),
-    SymbolMap("TIA", "TIA-USDT-SWAP", "TIAUSDT", "TIA", group="HIGH_VOL"),
-    SymbolMap("WIF", "WIF-USDT-SWAP", "WIFUSDT", "WIF", group="HIGH_VOL"),
-]
+# Fees and economics. Percent values are per side.
+TAKER_FEE_PCT_PER_SIDE = float(os.getenv("TAKER_FEE_PCT_PER_SIDE", "0.05"))
+SLIPPAGE_PCT_PER_SIDE = float(os.getenv("SLIPPAGE_PCT_PER_SIDE", "0.02"))
+MIN_NET_PROFIT_USDT = 0.05
+RISK_REWARD_MIN = 1.50
+MIN_STOP_PCT = 0.20
+MAX_STOP_PCT = 1.80
+STOP_BEHAVIOR_BUFFER = 1.10
+TP_BEHAVIOR_FRACTION = 0.84
+TP_BEHAVIOR_FLOOR_FRACTION = 0.62
 
-BY_ID = {s.id: s for s in SYMBOLS}
-BY_OKX = {s.okx: s for s in SYMBOLS}
-BY_TOOBIT = {s.toobit: s for s in SYMBOLS}
+# Trigger engine: intentionally soft, profile-relative and non-scoring.
+SCAN_INTERVAL_SECONDS = 2.0
+TRIGGER_WINDOWS_SECONDS = (15, 30, 60)
+TRIGGER_MOVE_QUANTILE = 0.72
+TRIGGER_SUPPORT_QUANTILE = 0.60
+TRIGGER_MIN_DIRECTIONALITY = 0.55
+WATCH_MOVE_FACTOR = 0.76
+WATCH_MIN_DIRECTIONALITY = 0.48
+WATCH_CANCEL_SECONDS = 45
+WATCH_MAX_SECONDS = 12 * 60
+LATE_MOVE_RATIO = 2.20
+MIN_WINDOW_MOVE_PCT = {15: 0.025, 30: 0.035, 60: 0.050}
+MIN_WINDOW_RANGE_PCT = {15: 0.035, 30: 0.050, 60: 0.070}
+RECENT_TRADES_LIMIT = 500
 
-def get_symbol(symbol_id: str):
-    return BY_ID.get(symbol_id.upper())
+# Historical event/outcome model
+HORIZONS_MINUTES = (5, 10, 20, 60)
+PROFILE_EVENT_MIN_DIRECTIONALITY = 0.55
+PROFILE_MIN_EVENTS_PER_SIDE = 25
+HORIZON_CAPTURE_FRACTION = 0.80
+
+# Loops
+REAL_MONITOR_INTERVAL_SECONDS = 12
+TOOBIT_STATUS_INTERVAL_SECONDS = 20
+REJECT_LOG_REPEAT_SECONDS = 30
+LOG_LEVEL = os.getenv("BOT_LOG_LEVEL", "INFO")
+
+# SQLite is outside the Git repository. Override if service user cannot write /var/lib.
+DB_PATH = os.getenv("BOT_DB_PATH", "/var/lib/forex-signal-bot/bot_state.sqlite3")
