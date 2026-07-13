@@ -305,7 +305,7 @@ class WatchEngine:
         if (s.side=='LONG' and px<=s.invalidation_price) or (s.side=='SHORT' and px>=s.invalidation_price):return WatchEvaluation(s.setup_id,'INVALIDATED',0,False,px,'سطح ابطال ساختاری شکسته شد')
         late=max(0,px-s.trigger_price) if s.side=='LONG' else max(0,s.trigger_price-px); late_atr=late/atr
         if late_atr>config.WATCH_LATE_LIMIT_ATR:return WatchEvaluation(s.setup_id,'INVALIDATED',0,False,px,'ورود دیر شده و قیمت تعقیب نمی‌شود',{'late_atr':late_atr})
-        closes=closes(confirmed); rs=rsi(closes,7); _,_,hist=macd(closes,6,13,4); cf=candle_features(confirmed[-1])
+        close_values=closes(confirmed); rs=rsi(close_values,7); _,_,hist=macd(close_values,6,13,4); cf=candle_features(confirmed[-1])
         price_ok=px>=s.trigger_price if s.side=='LONG' else px<=s.trigger_price
         momentum_ok=(hist[-1]>hist[-2] and rs[-1]>=50) if s.side=='LONG' else (hist[-1]<hist[-2] and rs[-1]<=50)
         candle_ok=(cf['direction']==1 and cf['close_location']>.58) if s.side=='LONG' else (cf['direction']==-1 and cf['close_location']<.42)
