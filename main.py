@@ -7,8 +7,13 @@ import threading
 import time
 import config
 from health import HealthManager
-from market_engine import confirm_signal_diagnostic, detect_candidate_diagnostic
-from models import MarketCandidate, MarketSignal, RiskPlan
+from market_engine import (
+    confirm_signal_diagnostic,
+    detect_candidate_diagnostic,
+    detect_impulse_candidate_diagnostic,
+    update_watch_state,
+)
+from models import MarketCandidate, MarketSignal, RiskPlan, WatchState
 from monitor import Monitor
 from okx_client import OKXClient
 from risk_engine import build_risk_plan_diagnostic
@@ -27,7 +32,7 @@ class TradingBotApp:
         self.telegram = TelegramBot(self.storage, self.health)
         self.monitor = Monitor(self.okx, self.toobit, self.storage, self.telegram, self.health)
         self.stop_event = threading.Event()
-        self.watch: OrderedDict[str, MarketCandidate] = OrderedDict()
+        self.watch: OrderedDict[str, WatchState] = OrderedDict()
         self.watch_lock = threading.RLock()
         self.last_signal: dict[str, int] = {}
         self._reject_log_cache: dict[tuple[str, str], tuple[str, float]] = {}
@@ -69,28 +74,71 @@ class TradingBotApp:
     def _eligible(self, sym: SymbolMap) -> bool:
         return self._eligibility(sym)[0]
 
+    def _put_watch(self, candidate: MarketCandidate) -> None:
+        now = time.time()
+        with self.watch_lock:
+            current = self.watch.get(candidate.symbol_id)
+            if current is None:
+                self.watch[candidate.symbol_id] = WatchState(
+                    candidate.symbol_id, candidate.okx_symbol, candidate.toobit_symbol,
+                    now, candidate, last_reanalysis_at=now, last_scenario_change_at=now,
+                )
+                logger.info("واچ جدید | ارز=%s | جهت=%s | منبع=%s | سطح=%.8g | ابطال=%.8g | علت=%s",
+                            candidate.symbol_id, candidate.side, candidate.source,
+                            candidate.structure_level, candidate.invalidation_price, candidate.direction_reason)
+            else:
+                old = current.candidate
+                changed = old.side != candidate.side or old.source != candidate.source
+                current.candidate = candidate
+                current.last_reanalysis_at = now
+                if changed:
+                    current.last_scenario_change_at = now
+                    current.prices.clear(); current.trade_values.clear(); current.book_values.clear(); current.micro_values.clear()
+                    current.opposite_pressure_count = current.aligned_pressure_count = current.break_seen_count = 0
+                    logger.info("تغییر سناریو | ارز=%s | %s/%s -> %s/%s | سطح %.8g -> %.8g | علت=%s",
+                                candidate.symbol_id, old.side, old.source, candidate.side, candidate.source,
+                                old.structure_level, candidate.structure_level, candidate.direction_reason)
+                else:
+                    logger.info("به‌روزرسانی سناریو | ارز=%s | جهت=%s | منبع=%s | سطح=%.8g | ابطال=%.8g",
+                                candidate.symbol_id, candidate.side, candidate.source,
+                                candidate.structure_level, candidate.invalidation_price)
+                self.watch.move_to_end(candidate.symbol_id)
+            while len(self.watch) > config.MAX_WATCH_SYMBOLS:
+                removed_id, _ = self.watch.popitem(last=False)
+                self._log_reject("watch-capacity", removed_id, "ظرفیت واچ پر شد و قدیمی‌ترین ارز حذف شد", force=True)
+
+    def _fresh_candidate(self, sym: SymbolMap) -> tuple[MarketCandidate | None, str, dict]:
+        candles_1h = self.okx.get_candles(sym.okx, bar=config.OKX_PRIMARY_BAR, limit=config.OKX_CANDLE_LIMIT)
+        candidate, reason, metrics = detect_candidate_diagnostic(sym, candles_1h)
+        atr = float(metrics.get("atr_pct") or 0.0)
+        if candidate is not None:
+            return candidate, reason, metrics
+        try:
+            candles_5m = self.okx.get_candles(sym.okx, bar=config.IMPULSE_BAR, limit=config.IMPULSE_CANDLE_LIMIT)
+            impulse, impulse_reason, impulse_metrics = detect_impulse_candidate_diagnostic(sym, candles_5m, atr)
+            if impulse is not None:
+                return impulse, impulse_reason, {**metrics, **{f"impulse_{k}": v for k, v in impulse_metrics.items()}}
+            return None, f"1H: {reason} | 5m: {impulse_reason}", {**metrics, **{f"impulse_{k}": v for k, v in impulse_metrics.items()}}
+        except Exception as exc:
+            return None, f"1H: {reason} | بررسی 5m ناموفق: {exc}", metrics
+
     def light_scan_loop(self) -> None:
         while not self.stop_event.is_set():
             start = time.time()
             for sym in SYMBOLS:
-                if self.stop_event.is_set(): break
+                if self.stop_event.is_set():
+                    break
                 eligible, eligibility_reason = self._eligibility(sym)
                 if not eligible:
                     self._log_reject("eligibility", sym.id, eligibility_reason)
                     continue
                 try:
-                    candles = self.okx.get_candles(sym.okx)
-                    candidate, reject_reason, metrics = detect_candidate_diagnostic(sym, candles)
+                    candidate, reject_reason, metrics = self._fresh_candidate(sym)
                     self.health.mark("okx")
                     if candidate:
-                        logger.info("واچ | ارز=%s | جهت=%s | علت=%s | %s", sym.id, candidate.side, reject_reason, self._metrics_text(metrics))
-                        with self.watch_lock:
-                            self.watch[sym.id] = candidate
-                            while len(self.watch) > config.MAX_WATCH_SYMBOLS:
-                                removed_id, _ = self.watch.popitem(last=False)
-                                self._log_reject("watch-capacity", removed_id, "ظرفیت واچ پر شد و قدیمی‌ترین مورد حذف شد", force=True)
+                        self._put_watch(candidate)
                     else:
-                        self._log_reject("direction-1H", sym.id, reject_reason, metrics)
+                        self._log_reject("direction-or-impulse", sym.id, reject_reason, metrics)
                 except Exception as exc:
                     message = str(exc)
                     logger.warning("scan %s: %s", sym.id, message)
@@ -100,31 +148,60 @@ class TradingBotApp:
                     else:
                         self.storage.blacklist(sym.id, message, config.SYMBOL_ERROR_BLACKLIST_SECONDS)
             self.health.mark("signal")
-            self.stop_event.wait(max(1.0, config.LIGHT_SCAN_INTERVAL_SECONDS - (time.time()-start)))
+            self.stop_event.wait(max(1.0, config.LIGHT_SCAN_INTERVAL_SECONDS - (time.time() - start)))
 
     def watch_loop(self) -> None:
         while not self.stop_event.is_set():
             with self.watch_lock:
                 items = list(self.watch.items())
-            for symbol_id, candidate in items:
-                age = time.time() - candidate.detected_at
-                sym = next(s for s in SYMBOLS if s.id == symbol_id)
+            for symbol_id, state in items:
+                sym = next((s for s in SYMBOLS if s.id == symbol_id), None)
+                if sym is None:
+                    with self.watch_lock:
+                        self.watch.pop(symbol_id, None)
+                    continue
+                age = time.time() - state.started_at
                 eligible, eligibility_reason = self._eligibility(sym)
                 if age > config.WATCH_MAX_SECONDS:
                     self._log_reject("watch-expired", symbol_id, f"عمر واچ تمام شد: {int(age)}>{config.WATCH_MAX_SECONDS} ثانیه", force=True)
-                    with self.watch_lock: self.watch.pop(symbol_id, None)
+                    with self.watch_lock:
+                        self.watch.pop(symbol_id, None)
                     continue
                 if not eligible:
                     self._log_reject("watch-eligibility", symbol_id, eligibility_reason, force=True)
-                    with self.watch_lock: self.watch.pop(symbol_id, None)
+                    with self.watch_lock:
+                        self.watch.pop(symbol_id, None)
                     continue
                 try:
-                    snap = self.okx.get_micro_snapshot(candidate.okx_symbol)
-                    signal, reject_reason, metrics = confirm_signal_diagnostic(candidate, snap)
+                    snap = self.okx.get_micro_snapshot(state.okx_symbol)
+                    action, action_reason, action_metrics = update_watch_state(state, snap)
                     self.health.mark("okx")
+
+                    due = time.time() - state.last_reanalysis_at >= config.WATCH_REANALYZE_SECONDS
+                    if action == "REANALYZE" or due:
+                        fresh, fresh_reason, fresh_metrics = self._fresh_candidate(sym)
+                        state.last_reanalysis_at = time.time()
+                        if fresh is not None:
+                            old_side = state.candidate.side
+                            self._put_watch(fresh)
+                            with self.watch_lock:
+                                state = self.watch.get(symbol_id, state)
+                            if old_side != fresh.side:
+                                logger.info("چرخش جهت واچ | ارز=%s | %s -> %s | علت=%s | %s",
+                                            symbol_id, old_side, fresh.side, action_reason, self._metrics_text(action_metrics))
+                        elif action == "REANALYZE":
+                            # سناریوی قبلی باطل شده، ولی خود ارز در واچ می‌ماند و در دور بعد دوباره تحلیل می‌شود.
+                            logger.info("ابطال سناریو بدون خروج از واچ | ارز=%s | جهت قبلی=%s | علت=%s | تحلیل تازه=%s",
+                                        symbol_id, state.candidate.side, action_reason, fresh_reason)
+                            state.opposite_pressure_count = 0
+                            state.break_seen_count = 0
+                            self._log_reject("watch-reanalysis", symbol_id, fresh_reason, {**action_metrics, **fresh_metrics}, force=True)
+
+                    signal, reject_reason, metrics = confirm_signal_diagnostic(state.candidate, snap, state)
                     if signal:
                         if self.publish_signal(signal):
-                            with self.watch_lock: self.watch.pop(symbol_id, None)
+                            with self.watch_lock:
+                                self.watch.pop(symbol_id, None)
                     else:
                         self._log_reject("entry", symbol_id, reject_reason, metrics)
                 except Exception as exc:
