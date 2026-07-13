@@ -96,7 +96,7 @@ def build_behavior_profile(symbol: SymbolSpec, candles: list[dict[str, Any]]) ->
         use_indices = indices if len(indices) >= config.PROFILE_MIN_EVENTS_PER_SIDE else fallback_indices
         for horizon in config.HORIZONS_MINUTES:
             mfe_values: list[float] = []
-            mae_values: list[float] = []
+            mae_to_mfe_values: list[float] = []
             time_values: list[float] = []
             for index in use_indices:
                 if index + horizon >= len(candles):
@@ -112,18 +112,29 @@ def build_behavior_profile(symbol: SymbolSpec, candles: list[dict[str, Any]]) ->
                     favorable = [(entry - float(row["low"])) / entry * 100.0 for row in future]
                     adverse = [(float(row["high"]) - entry) / entry * 100.0 for row in future]
                 mfe = max(0.0, max(favorable))
-                mae = max(0.0, max(adverse))
-                best_index = favorable.index(max(favorable)) + 1
+                best_zero_index = favorable.index(max(favorable))
+                best_index = best_zero_index + 1
+                # Stop behavior must be measured before the useful move reaches
+                # its peak. Measuring MAE across the whole horizon includes the
+                # later reversal and makes every stop/TP mathematically impossible.
+                mae_to_mfe = max(0.0, max(adverse[: best_zero_index + 1]))
                 mfe_values.append(mfe)
-                mae_values.append(mae)
+                mae_to_mfe_values.append(mae_to_mfe)
                 time_values.append(float(best_index))
             horizons[side][str(horizon)] = {
                 "samples": len(mfe_values),
+                "mfe_q40": quantile(mfe_values, 0.40),
+                "mfe_q45": quantile(mfe_values, 0.45),
                 "mfe_q50": quantile(mfe_values, 0.50),
                 "mfe_q60": quantile(mfe_values, 0.60),
                 "mfe_q70": quantile(mfe_values, 0.70),
-                "mae_q70": quantile(mae_values, 0.70),
-                "mae_q75": quantile(mae_values, 0.75),
+                "mae_to_mfe_q40": quantile(mae_to_mfe_values, 0.40),
+                "mae_to_mfe_q50": quantile(mae_to_mfe_values, 0.50),
+                "mae_to_mfe_q55": quantile(mae_to_mfe_values, 0.55),
+                "mae_to_mfe_q60": quantile(mae_to_mfe_values, 0.60),
+                # Compatibility keys for old readers.
+                "mae_q70": quantile(mae_to_mfe_values, 0.70),
+                "mae_q75": quantile(mae_to_mfe_values, 0.75),
                 "time_to_mfe_median": median(time_values) if time_values else float(horizon),
             }
 
@@ -138,7 +149,7 @@ def build_behavior_profile(symbol: SymbolSpec, candles: list[dict[str, Any]]) ->
         }
 
     return {
-        "version": 1,
+        "version": config.PROFILE_VERSION,
         "symbol_id": symbol.id,
         "okx_symbol": symbol.okx,
         "toobit_symbol": symbol.toobit,
@@ -167,11 +178,20 @@ class ProfileManager:
 
     def load_or_build(self, symbols: list[SymbolSpec], force: bool = False) -> dict[str, dict[str, Any]]:
         ready: dict[str, dict[str, Any]] = {}
-        logger.info("[PROFILE_START] symbols=%d days=%d force=%s", len(symbols), config.PROFILE_DAYS, force)
+        logger.info("[PROFILE_START] symbols=%d days=%d force=%s version=%d", len(symbols), config.PROFILE_DAYS, force, config.PROFILE_VERSION)
+        self.storage.set("profiles_requested", len(symbols))
+        self.storage.set("profiles_progress", 0)
         for index, symbol in enumerate(symbols, start=1):
+            self.storage.set("profiles_progress", index - 1)
             try:
                 cached = self.storage.load_profile(symbol.id)
-                if not force and cached and self.storage.is_profile_fresh(symbol.id):
+                cached_version = int((cached or {}).get("version") or 0)
+                if (
+                    not force
+                    and cached
+                    and cached_version >= config.PROFILE_VERSION
+                    and self.storage.is_profile_fresh(symbol.id)
+                ):
                     ready[symbol.id] = cached
                     logger.info(
                         "[PROFILE_READY] %s source=cache candles=%s progress=%d/%d",
@@ -194,6 +214,7 @@ class ProfileManager:
                 else:
                     logger.warning("[PROFILE_FAILED] %s reason=%s", symbol.id, exc)
                     self.storage.add_health_event("profile", "warning", str(exc), symbol.id)
+        self.storage.set("profiles_progress", len(symbols))
         self.profiles = ready
         self.storage.set("profiles_ready", len(ready))
         self.storage.set("profiles_updated_at", int(time.time()))

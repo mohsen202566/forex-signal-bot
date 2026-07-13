@@ -256,20 +256,32 @@ class AdaptiveStartEngine:
         return gross, costs, gross - costs
 
     @classmethod
-    def _required_tp_pct(
-        cls, entry: float, side: str, notional: float, sl_net_loss: float
+    def _minimum_profit_tp_pct(
+        cls, entry: float, side: str, notional: float
     ) -> float:
-        target_net = max(config.MIN_NET_PROFIT_USDT, config.RISK_REWARD_MIN * sl_net_loss)
+        """Smallest TP distance that leaves the configured net profit after costs."""
         low, high = 0.0, 8.0
         for _ in range(60):
             middle = (low + high) / 2.0
             exit_price = cls._price(entry, side, middle, favorable=True)
             _, _, net = cls.pnl_for_exit(entry, exit_price, side, notional)
-            if net < target_net:
+            if net < config.MIN_NET_PROFIT_USDT:
                 low = middle
             else:
                 high = middle
         return high
+
+    @staticmethod
+    def _behavior_mae_to_mfe(stats: dict[str, Any]) -> float:
+        """Read the pre-MFE adverse move; old profiles get a conservative fallback."""
+        direct = float(stats.get("mae_to_mfe_q55") or 0.0)
+        if direct > 0:
+            return direct
+        # Version-1 profiles measured MAE across the whole horizon, including the
+        # reversal after MFE. Discount it until the automatic v2 rebuild finishes.
+        old_q70 = float(stats.get("mae_q70") or 0.0)
+        old_q75 = float(stats.get("mae_q75") or 0.0)
+        return max(0.0, old_q70 * 0.58, old_q75 * 0.52)
 
     def build_plan(
         self,
@@ -282,78 +294,162 @@ class AdaptiveStartEngine:
     ) -> tuple[TradePlan | None, str, dict[str, Any]]:
         if observation.status != "TRIGGER" or observation.side is None or observation.window is None:
             return None, "NOT_A_CONFIRMED_TRIGGER", {}
-        side = observation.side
-        horizon_rows = profile["horizons"][side]
-        capacities = {
-            int(horizon): float(values.get("mfe_q60") or 0.0)
-            for horizon, values in horizon_rows.items()
-            if int(values.get("samples") or 0) > 0
-        }
-        if not capacities:
-            return None, "NO_HISTORICAL_OUTCOME_SAMPLES", {}
-        max_capacity = max(capacities.values())
-        expected_minutes = max(capacities, key=capacities.get)
-        capture_target = max_capacity * config.HORIZON_CAPTURE_FRACTION
-        for horizon in config.HORIZONS_MINUTES:
-            if capacities.get(horizon, 0.0) >= capture_target:
-                expected_minutes = horizon
-                break
-        stats = horizon_rows[str(expected_minutes)]
-        behavior_mfe = float(stats.get("mfe_q60") or 0.0)
-        behavior_mae = float(stats.get("mae_q75") or 0.0)
-        move_threshold = float(observation.metrics.get("move_threshold_pct") or 0.0)
-        sl_pct = max(
-            config.MIN_STOP_PCT,
-            behavior_mae * config.STOP_BEHAVIOR_BUFFER,
-            move_threshold * 0.90,
-        )
-        metrics: dict[str, Any] = {
-            **observation.metrics,
-            "expected_minutes": expected_minutes,
-            "behavior_mfe_q60_pct": behavior_mfe,
-            "behavior_mae_q75_pct": behavior_mae,
-            "sl_pct": sl_pct,
-        }
-        if sl_pct > config.MAX_STOP_PCT:
-            return None, "STOP_REQUIRED_TOO_WIDE", metrics
 
+        side = observation.side
         notional = float(trade_usdt) * int(leverage)
         if price <= 0 or notional <= 0:
-            return None, "INVALID_TRADE_INPUT", metrics
-        sl = self._price(price, side, sl_pct, favorable=False)
-        sl_gross, sl_costs, sl_net = self.pnl_for_exit(price, sl, side, notional)
-        sl_net_loss = abs(sl_net)
-        required_tp = self._required_tp_pct(price, side, notional, sl_net_loss)
-        cautious_capacity = behavior_mfe * config.TP_BEHAVIOR_FRACTION
-        behavior_floor = behavior_mfe * config.TP_BEHAVIOR_FLOOR_FRACTION
-        tp_pct = max(required_tp, behavior_floor)
-        metrics.update(
-            {
-                "notional": notional,
-                "required_tp_pct": required_tp,
-                "cautious_capacity_pct": cautious_capacity,
-                "behavior_floor_pct": behavior_floor,
+            return None, "INVALID_TRADE_INPUT", {"price": price, "notional": notional}
+
+        horizon_rows = profile.get("horizons", {}).get(side, {})
+        if not horizon_rows:
+            return None, "NO_HISTORICAL_OUTCOME_SAMPLES", {}
+
+        min_profit_tp_pct = self._minimum_profit_tp_pct(price, side, notional)
+        move_threshold = float(observation.metrics.get("move_threshold_pct") or 0.0)
+        preferred: list[dict[str, Any]] = []
+        fallback: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+
+        for horizon in config.HORIZONS_MINUTES:
+            stats = horizon_rows.get(str(horizon)) or {}
+            samples = int(stats.get("samples") or 0)
+            if samples <= 0:
+                continue
+
+            mfe_q40 = float(stats.get("mfe_q40") or 0.0)
+            if mfe_q40 <= 0:
+                mfe_q40 = float(stats.get("mfe_q50") or 0.0) * 0.88
+            mfe_q60 = float(stats.get("mfe_q60") or stats.get("mfe_q50") or 0.0)
+            mae_to_mfe = self._behavior_mae_to_mfe(stats)
+
+            sl_pct = max(
+                config.MIN_STOP_PCT,
+                mae_to_mfe * config.STOP_BEHAVIOR_BUFFER,
+                move_threshold * 0.55,
+            )
+            if sl_pct > config.MAX_STOP_PCT:
+                rejected.append({
+                    "horizon": horizon,
+                    "reason": "STOP_REQUIRED_TOO_WIDE",
+                    "sl_pct": sl_pct,
+                    "hard_capacity_pct": mfe_q60,
+                })
+                continue
+
+            # Standard RR is the price-distance ratio. Fees/slippage are not added
+            # to the RR distance; instead the separate 0.05 USDT net-profit rule is
+            # enforced below. Mixing both was the main reason all signals died.
+            rr_required_tp_pct = sl_pct * config.RISK_REWARD_MIN
+            required_tp_pct = max(rr_required_tp_pct, min_profit_tp_pct)
+            preferred_capacity = mfe_q40 * config.TP_BEHAVIOR_TARGET_FRACTION
+            hard_capacity = mfe_q60 * config.TP_BEHAVIOR_HARD_FRACTION
+
+            if hard_capacity <= 0 or required_tp_pct > hard_capacity:
+                rejected.append({
+                    "horizon": horizon,
+                    "reason": "BEHAVIOR_CAPACITY_INSUFFICIENT_FOR_TP",
+                    "sl_pct": sl_pct,
+                    "required_tp_pct": required_tp_pct,
+                    "preferred_capacity_pct": preferred_capacity,
+                    "hard_capacity_pct": hard_capacity,
+                    "samples": samples,
+                })
+                continue
+
+            is_preferred = required_tp_pct <= preferred_capacity
+            tp_pct = max(required_tp_pct, preferred_capacity if is_preferred else required_tp_pct)
+            tp_pct = min(tp_pct, hard_capacity)
+            tp = self._price(price, side, tp_pct, favorable=True)
+            sl = self._price(price, side, sl_pct, favorable=False)
+            tp_gross, tp_costs, tp_net = self.pnl_for_exit(price, tp, side, notional)
+            sl_gross, sl_costs, sl_net = self.pnl_for_exit(price, sl, side, notional)
+            sl_net_loss = abs(sl_net)
+            rr_distance = tp_pct / sl_pct if sl_pct > 0 else 0.0
+
+            if tp_net < config.MIN_NET_PROFIT_USDT:
+                rejected.append({
+                    "horizon": horizon,
+                    "reason": "NET_PROFIT_BELOW_0_05",
+                    "tp_pct": tp_pct,
+                    "tp_net_usdt": tp_net,
+                })
+                continue
+            if rr_distance + 1e-9 < config.RISK_REWARD_MIN:
+                rejected.append({
+                    "horizon": horizon,
+                    "reason": "RR_DISTANCE_BELOW_MINIMUM",
+                    "tp_pct": tp_pct,
+                    "sl_pct": sl_pct,
+                    "rr": rr_distance,
+                })
+                continue
+
+            candidate = {
+                "horizon": horizon,
+                "samples": samples,
+                "mfe_q40": mfe_q40,
+                "mfe_q60": mfe_q60,
+                "mae_to_mfe_q55": mae_to_mfe,
+                "preferred_capacity_pct": preferred_capacity,
+                "hard_capacity_pct": hard_capacity,
+                "required_tp_pct": required_tp_pct,
+                "minimum_profit_tp_pct": min_profit_tp_pct,
                 "tp_pct": tp_pct,
+                "sl_pct": sl_pct,
+                "tp": tp,
+                "sl": sl,
+                "tp_gross": tp_gross,
+                "tp_costs": tp_costs,
+                "tp_net": tp_net,
+                "sl_gross": sl_gross,
+                "sl_costs": sl_costs,
+                "sl_net_loss": sl_net_loss,
+                "rr": rr_distance,
+                "preferred": is_preferred,
+                "time_to_mfe_median": float(stats.get("time_to_mfe_median") or horizon),
             }
-        )
-        if cautious_capacity <= 0 or tp_pct > cautious_capacity:
-            return None, "BEHAVIOR_CAPACITY_INSUFFICIENT_FOR_TP", metrics
-        tp = self._price(price, side, tp_pct, favorable=True)
-        tp_gross, tp_costs, tp_net = self.pnl_for_exit(price, tp, side, notional)
-        rr_net = tp_net / sl_net_loss if sl_net_loss > 0 else 0.0
-        metrics.update(
-            {
-                "tp_net_usdt": tp_net,
-                "tp_costs_usdt": tp_costs,
-                "sl_net_loss_usdt": sl_net_loss,
-                "sl_costs_usdt": sl_costs,
-                "rr_net": rr_net,
+            (preferred if is_preferred else fallback).append(candidate)
+
+        candidates = preferred or fallback
+        if not candidates:
+            if not rejected:
+                return None, "NO_HISTORICAL_OUTCOME_SAMPLES", {"notional": notional}
+            # Show the closest horizon, not dozens of repeated metrics.
+            closest = max(
+                rejected,
+                key=lambda item: float(item.get("hard_capacity_pct") or 0.0)
+                / max(float(item.get("required_tp_pct") or 999.0), 1e-9),
+            )
+            return None, str(closest.get("reason") or "NO_FEASIBLE_HORIZON"), {
+                **observation.metrics,
+                "horizon": int(closest.get("horizon") or 0),
+                "sl_pct": float(closest.get("sl_pct") or 0.0),
+                "required_tp_pct": float(closest.get("required_tp_pct") or 0.0),
+                "behavior_capacity_pct": float(closest.get("hard_capacity_pct") or 0.0),
+                "min_profit_tp_pct": min_profit_tp_pct,
+                "notional": notional,
             }
-        )
-        if tp_net < config.MIN_NET_PROFIT_USDT:
-            return None, "NET_PROFIT_BELOW_0_05", metrics
-        if rr_net + 1e-6 < config.RISK_REWARD_MIN:
-            return None, "NET_RR_BELOW_MINIMUM", metrics
+
+        # Prefer the shortest horizon that supports the target at the cautious
+        # behavior level. If none does, use the shortest hard-feasible horizon.
+        chosen = min(candidates, key=lambda item: (int(item["horizon"]), float(item["time_to_mfe_median"])))
+        metrics: dict[str, Any] = {
+            **observation.metrics,
+            "expected_minutes": int(chosen["horizon"]),
+            "samples": int(chosen["samples"]),
+            "behavior_mfe_q40_pct": float(chosen["mfe_q40"]),
+            "behavior_mfe_q60_pct": float(chosen["mfe_q60"]),
+            "behavior_mae_to_mfe_q55_pct": float(chosen["mae_to_mfe_q55"]),
+            "behavior_capacity_pct": float(chosen["hard_capacity_pct"]),
+            "required_tp_pct": float(chosen["required_tp_pct"]),
+            "tp_pct": float(chosen["tp_pct"]),
+            "sl_pct": float(chosen["sl_pct"]),
+            "rr": float(chosen["rr"]),
+            "tp_net_usdt": float(chosen["tp_net"]),
+            "sl_net_loss_usdt": float(chosen["sl_net_loss"]),
+            "plan_quality": "CAUTIOUS" if bool(chosen["preferred"]) else "STANDARD",
+            "notional": notional,
+        }
 
         plan = TradePlan(
             symbol_id=symbol.id,
@@ -361,21 +457,22 @@ class AdaptiveStartEngine:
             toobit_symbol=symbol.toobit,
             side=side,
             entry=price,
-            tp=tp,
-            sl=sl,
-            tp_pct=tp_pct,
-            sl_pct=sl_pct,
-            rr_net=rr_net,
-            expected_minutes=expected_minutes,
+            tp=float(chosen["tp"]),
+            sl=float(chosen["sl"]),
+            tp_pct=float(chosen["tp_pct"]),
+            sl_pct=float(chosen["sl_pct"]),
+            rr_net=float(chosen["rr"]),
+            expected_minutes=int(chosen["horizon"]),
             trigger_window=observation.window,
             trigger_reason=observation.reason,
             notional=notional,
-            estimated_tp_gross=tp_gross,
-            estimated_tp_costs=tp_costs,
-            estimated_tp_net=tp_net,
-            estimated_sl_gross_loss=abs(sl_gross),
-            estimated_sl_costs=sl_costs,
-            estimated_sl_net_loss=sl_net_loss,
+            estimated_tp_gross=float(chosen["tp_gross"]),
+            estimated_tp_costs=float(chosen["tp_costs"]),
+            estimated_tp_net=float(chosen["tp_net"]),
+            estimated_sl_gross_loss=abs(float(chosen["sl_gross"])),
+            estimated_sl_costs=float(chosen["sl_costs"]),
+            estimated_sl_net_loss=float(chosen["sl_net_loss"]),
             metrics=metrics,
         )
         return plan, "PLAN_READY", metrics
+

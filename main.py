@@ -248,8 +248,19 @@ class TradingBotApp:
 
     @staticmethod
     def _metrics_text(metrics: dict[str, Any]) -> str:
+        # INFO logs stay exact but readable. Full raw metrics are saved with the
+        # signal in SQLite; journalctl only needs the values that explain a reject.
+        important = (
+            "window", "signed_move_pct", "move_ratio", "directionality",
+            "range_ratio", "acceleration", "horizon", "expected_minutes",
+            "sl_pct", "required_tp_pct", "behavior_capacity_pct",
+            "min_profit_tp_pct", "tp_pct", "rr", "tp_net_usdt",
+            "plan_quality", "notional",
+        )
         parts: list[str] = []
-        for key in sorted(metrics):
+        for key in important:
+            if key not in metrics:
+                continue
             value = metrics[key]
             if isinstance(value, float):
                 parts.append(f"{key}={value:.6g}")
@@ -292,18 +303,26 @@ class TradingBotApp:
         return resolved
 
     def prepare_profiles(self, force: bool = False) -> None:
-        symbols = list(self.resolve_symbols().values())
-        built = self.profiles.load_or_build(symbols, force=force)
-        with self.symbol_lock:
-            self.ready_symbols = {symbol_id: self.symbols[symbol_id] for symbol_id in built if symbol_id in self.symbols}
-        logger.info("[SCAN_READY] symbols=%d", len(self.ready_symbols))
-        if self.ready_symbols:
-            self.telegram.send(
-                f"✅ پروفایل آماده شد.\nارز معتبر: {len(self.symbols)}\nارز آماده اسکن: {len(self.ready_symbols)}"
-            )
-        else:
-            self.storage.add_health_event("profile", "critical", "هیچ پروفایل آماده‌ای وجود ندارد")
-            self.telegram.send("❌ هیچ پروفایل آماده‌ای ساخته نشد؛ اسکن سیگنال شروع نمی‌شود.")
+        self.storage.set("profile_building", True)
+        try:
+            symbols = list(self.resolve_symbols().values())
+            built = self.profiles.load_or_build(symbols, force=force)
+            with self.symbol_lock:
+                self.ready_symbols = {
+                    symbol_id: self.symbols[symbol_id]
+                    for symbol_id in built
+                    if symbol_id in self.symbols
+                }
+            logger.info("[SCAN_READY] symbols=%d", len(self.ready_symbols))
+            if self.ready_symbols:
+                self.telegram.send(
+                    f"✅ پروفایل آماده شد.\nارز معتبر: {len(self.symbols)}\nارز آماده اسکن: {len(self.ready_symbols)}"
+                )
+            else:
+                self.storage.add_health_event("profile", "critical", "هیچ پروفایل آماده‌ای وجود ندارد")
+                self.telegram.send("❌ هیچ پروفایل آماده‌ای ساخته نشد؛ اسکن سیگنال شروع نمی‌شود.")
+        finally:
+            self.storage.set("profile_building", False)
 
     def _transition_log(self, observation: Observation) -> None:
         if observation.transition == "NEW":
@@ -368,7 +387,7 @@ class TradingBotApp:
                             symbol, profile, observation, price, trade_usdt, leverage
                         )
                         if plan is None:
-                            self.log_reject("risk", symbol.id, reason, metrics, force=True)
+                            self.log_reject("risk", symbol.id, reason, metrics)
                             continue
                         self.publish_signal(plan)
                     elif observation.status in ("REJECT",):
@@ -403,7 +422,7 @@ class TradingBotApp:
             f"SL: {plan.sl:.10g} ({plan.sl_pct:.3f}%)\n"
             f"انتظار تقریبی: {plan.expected_minutes} دقیقه\n"
             f"Trigger: {plan.trigger_window} ثانیه\n"
-            f"RR خالص: {plan.rr_net:.2f}\n"
+            f"RR: {plan.rr_net:.2f}\n"
             f"مارجین: {trade_usdt:g} USDT | لوریج: {leverage}x\n"
             f"سود خالص تخمینی TP: {plan.estimated_tp_net:.4f} USDT\n"
             f"زیان خالص تخمینی SL: {plan.estimated_sl_net_loss:.4f} USDT\n"
@@ -755,21 +774,34 @@ class TradingBotApp:
             f"عادی: {sum(1 for row in active if not int(row.get('is_real') or 0))}"
         )
 
+    def profile_bootstrap_loop(self) -> None:
+        try:
+            logger.info("[PROFILE_BOOTSTRAP_THREAD_START]")
+            with self.profile_lock:
+                self.prepare_profiles(force=False)
+        except Exception as exc:
+            logger.exception("profile bootstrap failed")
+            self.storage.add_health_event("profile_bootstrap", "critical", str(exc))
+        finally:
+            logger.info("[PROFILE_BOOTSTRAP_THREAD_DONE] ready=%d", len(self.ready_symbols))
+
     def run(self) -> None:
-        self.prepare_profiles(force=False)
+        # Telegram and panels must answer immediately. Only the signal scanner waits
+        # for ready_symbols, which remain empty until profile bootstrap completes.
         self._last_profile_day = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
         threads = [
-            threading.Thread(target=self.scan_loop, daemon=True, name="okx-scan"),
-            threading.Thread(target=self.real_monitor_loop, daemon=True, name="real-monitor"),
-            threading.Thread(target=self.toobit_status_loop, daemon=True, name="toobit-status"),
             threading.Thread(target=self.telegram_loop, daemon=True, name="telegram"),
+            threading.Thread(target=self.toobit_status_loop, daemon=True, name="toobit-status"),
+            threading.Thread(target=self.real_monitor_loop, daemon=True, name="real-monitor"),
+            threading.Thread(target=self.scan_loop, daemon=True, name="okx-scan"),
+            threading.Thread(target=self.profile_bootstrap_loop, daemon=True, name="profile-bootstrap"),
             threading.Thread(target=self.profile_update_loop, daemon=True, name="profile-update"),
         ]
         for thread in threads:
             thread.start()
         logger.info(
-            "[BOT_STARTED] requested=%d valid=%d ready=%d",
-            len(config.SYMBOL_BASES), len(self.symbols), len(self.ready_symbols),
+            "[BOT_STARTED] telegram_immediate=true requested=%d profile_status=BUILDING",
+            len(config.SYMBOL_BASES),
         )
         try:
             while True:
