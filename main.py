@@ -219,6 +219,9 @@ class TradingBotApp:
                 f"قدرت: {sig.strength}\nEntry: {risk.entry:.8g}\nTP: {risk.tp:.8g}\nSL: {risk.sl:.8g}\nRR خالص: {risk.rr_net:.3f}\n"
                 f"دلار: {trade_usdt:g} | لوریج: {leverage}x | ارزش پوزیشن: {risk.notional:.4f} USDT\n"
                 f"سود خالص تخمینی TP: {risk.estimated_tp_net:.4f} USDT\nزیان خالص تخمینی SL: {risk.estimated_sl_net_loss:.4f} USDT\n"
+                f"مرحله حرکت: {sig.movement_phase} | مصرف‌شده: {sig.move_consumed_pct:.1f}%\n"
+                f"احتمال ادامه: {sig.continuation_probability:.0%} | برگشت: {sig.reversal_probability:.0%} | جذب: {sig.absorption_risk:.0%}\n"
+                f"ظرفیت باقی‌مانده: {sig.remaining_capacity_pct:.4f}%\n"
                 f"جهت: {sig.direction_reason}\nقدرت: {sig.strength_reason}\nورود: {sig.entry_reason}")
 
     def publish_signal(self, sig: MarketSignal) -> bool:
@@ -233,7 +236,11 @@ class TradingBotApp:
         data = {"symbol_id":sig.symbol_id,"okx_symbol":sig.okx_symbol,"toobit_symbol":sig.toobit_symbol,"side":sig.side,"strength":sig.strength,
                 "entry":risk.entry,"tp":risk.tp,"sl":risk.sl,"rr":risk.rr_net,"trade_mode":mode,"status":"pending" if is_real else "open","is_real":is_real,"slot_id":slot,
                 "message_id":None,"created_at":int(time.time()),"opened_at":None,"entry_real":None,"trade_usdt":trade_usdt,"leverage":leverage,"notional":risk.notional,"order_id":None,
-                "raw":{"direction":sig.direction_reason,"strength":sig.strength_reason,"entry":sig.entry_reason,"risk":risk.reason}}
+                "raw":{"direction":sig.direction_reason,"strength":sig.strength_reason,"entry":sig.entry_reason,"risk":risk.reason,
+                       "movement_phase":sig.movement_phase,"move_consumed_pct":sig.move_consumed_pct,
+                       "remaining_capacity_pct":sig.remaining_capacity_pct,"continuation_probability":sig.continuation_probability,
+                       "reversal_probability":sig.reversal_probability,"absorption_risk":sig.absorption_risk,
+                       "price_impact_efficiency":sig.price_impact_efficiency}}
         signal_id = self.storage.create_signal(data)
         msg_id = self.telegram.send_message(self._signal_message(signal_id, sig, risk, mode, trade_usdt, leverage))
         if msg_id:

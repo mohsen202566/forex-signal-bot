@@ -2,6 +2,8 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
+import time
+
 
 @dataclass(frozen=True)
 class MarketCandidate:
@@ -16,6 +18,12 @@ class MarketCandidate:
     expected_move_pct: float
     direction_reason: str
     source: str = "1H"
+    detected_price: float = 0.0
+    move_origin_price: float = 0.0
+    consumed_at_detection_pct: float = 0.0
+    direction_confidence: float = 0.0
+    phase: str = "PREPARATION"
+
 
 @dataclass
 class WatchState:
@@ -30,18 +38,22 @@ class WatchState:
     trade_values: list[float] = field(default_factory=list)
     book_values: list[float] = field(default_factory=list)
     micro_values: list[float] = field(default_factory=list)
+    snapshot_times: list[float] = field(default_factory=list)
     opposite_pressure_count: int = 0
     aligned_pressure_count: int = 0
     break_seen_count: int = 0
+    reclaim_count: int = 0
 
-    def append_snapshot(self, price: float, trade: float, book: float, micro: float, maxlen: int = 12) -> None:
+    def append_snapshot(self, price: float, trade: float, book: float, micro: float, maxlen: int = 20) -> None:
         self.prices.append(float(price))
         self.trade_values.append(float(trade))
         self.book_values.append(float(book))
         self.micro_values.append(float(micro))
-        for seq in (self.prices, self.trade_values, self.book_values, self.micro_values):
+        self.snapshot_times.append(time.time())
+        for seq in (self.prices, self.trade_values, self.book_values, self.micro_values, self.snapshot_times):
             if len(seq) > maxlen:
                 del seq[:-maxlen]
+
 
 @dataclass(frozen=True)
 class MarketSignal:
@@ -61,6 +73,14 @@ class MarketSignal:
     trade_imbalance: float
     book_imbalance: float
     microprice_bias_pct: float
+    movement_phase: str = "FRESH"
+    move_consumed_pct: float = 0.0
+    remaining_capacity_pct: float = 0.0
+    continuation_probability: float = 0.0
+    reversal_probability: float = 0.0
+    absorption_risk: float = 0.0
+    price_impact_efficiency: float = 0.0
+
 
 @dataclass(frozen=True)
 class RiskPlan:
@@ -80,6 +100,7 @@ class RiskPlan:
     estimated_sl_net_loss: float
     min_net_profit_ok: bool
     reason: str
+
 
 @dataclass(frozen=True)
 class MicroSnapshot:
