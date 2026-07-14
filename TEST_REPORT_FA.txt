@@ -1,0 +1,86 @@
+گزارش کنترل نهایی ربات تطبیقی کریپتو
+تاریخ: 2026-07-14
+
+وضعیت کلی
+===========
+- ساختار پروژه: یکپارچه و قابل اجرا با Python 3.10+
+- ترید واقعی در هر استارت: خاموش
+- دیتابیس‌ها: runtime.db و learning.db، با WAL، Migration، Integrity Check و Backup
+- منبع تحلیل: OKX؛ Fallback کامل: Bybit؛ اجرای واقعی و نتیجه مالی: Toobit
+- Registry: 100 ارز معتبر مشترک، 35 فعال و 65 ذخیره به‌صورت اعتبارسنجی پویا در استارت
+
+کنترل‌های اجراشده
+=================
+1) Syntax تمام فایل‌های Python
+   python3 -m py_compile *.py
+   نتیجه: PASS
+
+2) Compile کامل پروژه
+   python3 -m compileall -q .
+   نتیجه: PASS
+
+3) تست‌های آفلاین یکپارچه
+   python3 -m unittest -v self_test.py
+   نتیجه: 28 تست اجرا شد؛ 28 PASS؛ 0 FAIL؛ 0 ERROR
+
+4) اعتبارسنجی Shell Scriptها
+   bash -n deploy_update.sh
+   bash -n install_service.sh
+   نتیجه: PASS
+
+5) Smoke Test ساخت برنامه بدون شبکه و بدون Credential
+   - ساخت BotApplication با دیتابیس موقت
+   - real_trade_enabled = False
+   - startup_ready = False
+   - Integrity هر دو دیتابیس = True
+   - خاموش‌شدن امن و بسته‌شدن دیتابیس‌ها
+   نتیجه: PASS
+
+6) ممیزی Static
+   - تنها وابستگی خارجی Python: requests
+   - TODO / FIXME / NotImplementedError: یافت نشد
+   - sleep(70) بلاک‌کننده: یافت نشد
+   - Secret هاردکدشده: یافت نشد
+   نتیجه: PASS
+
+پوشش مهم تست‌ها
+================
+- قفل یک سیگنال رسمی برای کل ارز
+- اسلات اتمیک، پوزیشن‌های خارجی Toobit و جلوگیری از دوباره‌شماری
+- رزرو اسلات هنگام ارسال و شروع مهلت کامل 70 ثانیه‌ای از Submit واقعی
+- عدم تماس API قبل از Deadline تأیید
+- حفظ اسلات در خطای موقت API
+- بازیابی پوزیشنی که پیش از پایان 70 ثانیه باز و بسته شده است
+- جلوگیری از تطبیق اشتباه یک معامله قدیمی هم‌جهت با نتیجه جدید
+- خواندن Balance ردیف USDT
+- Payload سفارش Market Futures با Isolated، Leverage، TP و SL
+- قوانین Tick Size، Quantity Step، Minimum Quantity و Minimum Notional
+- Fallback کامل OKX به Bybit بدون مخلوط‌کردن منبع
+- کش کندل و کاهش دانلود تاریخچه در اسکن‌های بعدی
+- پروفایل هفت‌روزه و قفل کامل سیگنال تا آماده‌شدن 35 ارز
+- حفظ Stage، Champion و تنظیمات یادگرفته‌شده هنگام Refresh
+- Champion/Challenger با شواهد فرصت‌های آینده
+- سناریوهای تک‌تغییری و جلوگیری از شمردن شاخه‌های هم‌بسته به‌عنوان نمونه مستقل
+- قانون دو Stop واقعی متوالی و انتقال کل ارز به Medium Relearn
+- تشخیص مسیر بعد از Stop و تفکیک Direction Error از Whipsaw
+- پنل‌ها و دستورات بدون وابستگی به شبکه
+- بازه دلار 1..10000، لوریج 1..100 و حداکثر پوزیشن 1..200
+- ریست سود و ریست سود کل بدون حذف تاریخچه یادگیری
+
+بازبینی مستندات رسمی Toobit
+============================
+- Exchange Information: GET /api/v1/exchangeInfo و قراردادها در فیلد contracts
+- LOT_SIZE قرارداد Futures طبق مستند رسمی بر مبنای مقدار Token است
+- سفارش Futures: POST /api/v1/futures/order
+- Market Order: type=LIMIT و priceType=MARKET
+- TP/SL قابل ارسال همراه سفارش اصلی است
+- Margin Type و Leverage با Endpointهای رسمی Futures تنظیم می‌شوند
+- نتیجه بسته‌شده از historyPositions و PnL تحقق‌یافته خوانده می‌شود
+
+محدودیت صادقانه تست
+====================
+- هیچ سفارش واقعی Toobit در محیط ساخت ارسال نشده است.
+- تست Public Network داخل Container به‌دلیل نبود DNS/Internet قابل اجرا نبود؛ این موضوع در تست‌های آفلاین Mock شده است.
+- قالب واقعی پاسخ، Permission کلید API، محدودیت منطقه‌ای و رفتار حساب فقط روی VPS و حساب خود کاربر قابل تأیید نهایی است.
+- قبل از سرمایه واقعی، سرویس باید روی VPS با Credential واقعی، ترید خاموش، چند روز Medium و سپس مارجین کم بررسی شود.
+- ترید واقعی حتی پس از نصب یا Git Pull خودکار روشن نمی‌شود و فقط با دستور «ترید فعال» فعال خواهد شد.
